@@ -19,82 +19,6 @@
         @test all(vol.moments[:, 2] .≈ expected)
     end
 
-    @testset "threshold_qc - below threshold" begin
-        n = 50
-        raw_moments = Array{Union{Missing, Float32}}(undef, n, 3)
-        raw_moments[:, 1] .= 20.0   # DBZ
-        raw_moments[:, 2] .= 5.0    # VEL
-        raw_moments[:, 3] .= 0.0    # SQI (below threshold)
-        raw_moments[1:25, 3] .= 0.5  # first half above threshold
-
-        raw_dict = Dict("DBZ" => 1, "VEL" => 2, "SQI" => 3)
-        qc_dict = Dict("DBZ" => 1, "VEL" => 2)
-
-        qc_moments = Array{Union{Missing, Float32}}(undef, n, 2)
-        qc_moments[:, 1] .= raw_moments[:, 1]
-        qc_moments[:, 2] .= raw_moments[:, 2]
-
-        result = Daisho.threshold_qc(raw_moments, raw_dict, qc_moments, qc_dict,
-            "SQI", 0.3, "SQI", true)
-
-        # First 25 gates have SQI=0.5 > 0.3, should survive
-        @test !ismissing(result[1, 1])
-        @test !ismissing(result[25, 1])
-
-        # Last 25 gates have SQI=0.0 < 0.3, should be set to missing
-        @test ismissing(result[26, 1])
-        @test ismissing(result[50, 1])
-    end
-
-    @testset "threshold_qc - above threshold (spectrum width)" begin
-        n = 50
-        raw_moments = Array{Union{Missing, Float32}}(undef, n, 3)
-        raw_moments[:, 1] .= 20.0   # DBZ
-        raw_moments[:, 2] .= 5.0    # VEL
-        raw_moments[:, 3] .= 10.0   # WIDTH (above threshold)
-        raw_moments[1:25, 3] .= 2.0  # first half below threshold
-
-        raw_dict = Dict("DBZ" => 1, "VEL" => 2, "WIDTH" => 3)
-        qc_dict = Dict("DBZ" => 1, "VEL" => 2)
-
-        qc_moments = Array{Union{Missing, Float32}}(undef, n, 2)
-        qc_moments[:, 1] .= raw_moments[:, 1]
-        qc_moments[:, 2] .= raw_moments[:, 2]
-
-        result = Daisho.threshold_qc(raw_moments, raw_dict, qc_moments, qc_dict,
-            "WIDTH", 8.0, "WIDTH", false)
-
-        # First 25 gates have WIDTH=2.0 < 8.0, should survive (below=false means remove if >= threshold)
-        @test !ismissing(result[1, 1])
-
-        # Last 25 gates have WIDTH=10.0 > 8.0, should be missing
-        @test ismissing(result[26, 1])
-    end
-
-    @testset "threshold_qc - missing_key exclusion" begin
-        n = 20
-        raw_moments = Array{Union{Missing, Float32}}(undef, n, 3)
-        raw_moments[:, 1] .= 20.0   # DBZ
-        raw_moments[:, 2] .= 5.0    # VEL
-        raw_moments[:, 3] .= 0.0    # SQI below threshold
-
-        raw_dict = Dict("DBZ" => 1, "VEL" => 2, "SQI" => 3)
-        qc_dict = Dict("DBZ" => 1, "SQI" => 2)
-
-        qc_moments = Array{Union{Missing, Float32}}(undef, n, 2)
-        qc_moments[:, 1] .= 20.0
-        qc_moments[:, 2] .= 0.0
-
-        result = Daisho.threshold_qc(raw_moments, raw_dict, qc_moments, qc_dict,
-            "SQI", 0.3, "SQI", true)
-
-        # DBZ should be set to missing (SQI below threshold)
-        @test ismissing(result[1, qc_dict["DBZ"]])
-
-        # SQI itself should NOT be modified (it's the missing_key)
-        @test !ismissing(result[1, qc_dict["SQI"]])
-    end
-
     @testset "smooth_sqi is not implemented" begin
         @test_throws ErrorException Daisho.smooth_sqi([0.5, 0.6, 0.7])
     end
@@ -338,7 +262,6 @@
         # Ray at 90° should not be masked (heading-relative = 70, not in [340,360])
         @test !ismissing(result[n_gates + 1, 1])
     end
-
 
     @testset "threshold_qc!(sweep, p) sweep-aware overload" begin
         t0 = DateTime(2024, 9, 3, 15, 0, 0)

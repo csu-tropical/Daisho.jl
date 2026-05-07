@@ -1,28 +1,48 @@
 # API Reference
 
-## Core Types
+## Core Types (CfRadial 2.1)
 
 ```@docs
-Daisho.radar
+Daisho.Volume
+Daisho.SweepGroup
+Daisho.Field
+Daisho.FieldMetadata
+Daisho.Georeference
+Daisho.RadarMonitoring
+Daisho.RadarParameters
+Daisho.RadarCalibration
+Daisho.RadarCalibrationEntry
+Daisho.GeoreferenceCorrection
+Daisho.SpectrumGroup
+Daisho.LidarMonitoring
+Daisho.LidarParameters
+Daisho.LidarCalibration
+```
+
+## Volume Helpers
+
+```@docs
+Daisho.add_field!
+Daisho.remove_field!
+Daisho.n_rays
+Daisho.field_names
+Daisho.has_field
 ```
 
 ## Radar I/O
 
 ```@docs
 Daisho.read_cfradial
+Daisho.write_cfradial
+Daisho.update_cfradial
+Daisho.validate_spec
+Daisho.ValidationReport
 Daisho.get_radar_orientation
-Daisho.write_qced_cfradial_sigmet
-Daisho.write_qced_cfradial_singlepol
-Daisho.write_qced_cfradial_dualpol
-Daisho.write_qced_cfradial_P3
 ```
 
 ## Radar Utilities
 
 ```@docs
-Daisho.initialize_moment_dictionaries
-Daisho.initialize_qc_fields
-Daisho.split_sweeps
 Daisho.beam_height
 Daisho.dB_to_linear
 Daisho.linear_to_dB
@@ -33,8 +53,8 @@ Daisho.linear_to_dB!
 ## Quality Control
 
 ```@docs
+Daisho.threshold_qc!
 Daisho.fix_SEAPOL_RHOHV!
-Daisho.threshold_qc
 Daisho.despeckle
 Daisho.despeckle_azimuthal
 Daisho.stddev_phidp_threshold
@@ -55,18 +75,7 @@ Daisho.smooth_sqi
 Daisho.initialize_regular_grid
 ```
 
-### Radar Information
-
-```@docs
-Daisho.get_radar_zyx
-Daisho.get_beam_info
-Daisho.radar_arrays
-Daisho.radar_balltree_yx
-Daisho.radar_balltree_r
-Daisho.appx_inverse_projection
-```
-
-### High-Level Gridding
+### High-Level Gridding (Volume-typed)
 
 ```@docs
 Daisho.grid_radar_volume
@@ -75,6 +84,15 @@ Daisho.grid_radar_rhi
 Daisho.grid_radar_ppi
 Daisho.grid_radar_composite
 Daisho.grid_radar_column
+```
+
+### Spectral Gridding (Springsteel)
+
+```@docs
+Daisho.grid_radar_volume_spectral
+Daisho.grid_radar_ppi_spectral
+Daisho.grid_radar_column_spectral
+Daisho.create_radar_grid
 ```
 
 ### Core Gridding Algorithms
