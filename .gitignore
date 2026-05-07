@@ -1,2 +1,8 @@
 .ipynb_checkpoints/
 Manifest.toml
+.DS_Store
+bkup/
+tmp/
+test_ci.sh
+# Real CfRadial test fixtures are not committed; see test/fixtures/README.md.
+test/fixtures/*.nc
