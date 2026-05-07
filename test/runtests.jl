@@ -24,4 +24,5 @@ include("test_helpers.jl")
     include("test_cfradial_reader.jl")
     include("test_cfradial_writer.jl")
     include("test_cfradial_validate.jl")
+    include("test_cfradial_bridge.jl")
 end

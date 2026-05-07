@@ -18,6 +18,7 @@ include("cfradial.jl")
 include("cfradial_reader.jl")
 include("cfradial_writer.jl")
 include("cfradial_validate.jl")
+include("cfradial_bridge.jl")
 include("SRTM.jl")
 include("qualitycontrol.jl")
 include("gridding.jl")
@@ -39,5 +40,6 @@ export GeoreferenceCorrection
 export add_field!, remove_field!, n_rays, field_names, has_field
 export read_cfradial, write_cfradial, update_cfradial
 export validate_spec, ValidationReport
+export as_legacy_radar, as_volume
 
 end # module Daisho
