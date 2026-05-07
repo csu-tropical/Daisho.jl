@@ -20,4 +20,8 @@ include("test_helpers.jl")
     include("test_srtm.jl")
     include("test_gridding.jl")
     include("test_springsteel.jl")
+    include("test_cfradial_types.jl")
+    include("test_cfradial_reader.jl")
+    include("test_cfradial_writer.jl")
+    include("test_cfradial_validate.jl")
 end
