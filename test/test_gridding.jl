@@ -204,7 +204,6 @@
         @test length(gates) > 0
     end
 
-
     @testset "Volume overloads dispatch via bridge" begin
         # Smoke-test that the Volume-typed driver methods exist and dispatch.
         v = synthetic_volume(n_sweeps=1, n_rays=8, n_gates=5)

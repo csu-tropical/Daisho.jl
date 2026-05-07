@@ -42,7 +42,7 @@ using Springsteel
         @testset "R (1D) grid" begin
             sgrid = Daisho.create_radar_grid("R", moment_dict;
                 xmin=0.0, xmax=10000.0, xdim=4)
-            @test sgrid isa SpringsteelGrid{CartesianGeometry, SplineBasisArray, NoBasisArray, NoBasisArray}
+            @test sgrid isa R_Grid
             @test sgrid.params.iDim == 4 * 3  # cells * mubar
             @test sgrid.params.iMin == 0.0
             @test sgrid.params.iMax == 10000.0
@@ -55,7 +55,7 @@ using Springsteel
             sgrid = Daisho.create_radar_grid("RR", moment_dict;
                 xmin=-5000.0, xmax=5000.0, xdim=3,
                 ymin=-5000.0, ymax=5000.0, ydim=3)
-            @test sgrid isa SpringsteelGrid{CartesianGeometry, SplineBasisArray, SplineBasisArray, NoBasisArray}
+            @test sgrid isa RR_Grid
             @test sgrid.params.iDim == 3 * 3
             @test sgrid.params.jDim == 3 * 3
             @test sgrid.params.iMin == -5000.0
@@ -67,7 +67,7 @@ using Springsteel
                 xmin=-50000.0, xmax=50000.0, xdim=5,
                 ymin=-50000.0, ymax=50000.0, ydim=5,
                 zmin=0.0, zmax=15000.0, zdim=3)
-            @test sgrid isa SpringsteelGrid{CartesianGeometry, SplineBasisArray, SplineBasisArray, SplineBasisArray}
+            @test sgrid isa RRR_Grid
             @test sgrid.params.iDim == 5 * 3
             @test sgrid.params.jDim == 5 * 3
             @test sgrid.params.kDim == 3 * 3
@@ -557,7 +557,6 @@ using Springsteel
             @test size(grid_3d) == (3, 5, 5, 3)
         end
     end
-
 
     @testset "Volume spectral overloads dispatch" begin
         @test hasmethod(Daisho.grid_radar_volume_spectral,
