@@ -185,7 +185,7 @@ function get_beam_info(radar_volume::radar)
 
     # Create an array with all the relevant beam info (azimuth, elevation, range, height)
     beams = [ (deg2rad(radar_volume.azimuth[j]), deg2rad(radar_volume.elevation[j]), radar_volume.range[i],
-            beam_height(radar_volume.range[i], radar_volume.elevation[j], radar_volume.altitude[j])) 
+            beam_height(radar_volume.range[i], radar_volume.elevation[j], radar_volume.altitude[j]))
             for i in eachindex(radar_volume.range), j in eachindex(radar_volume.elevation) ]
     beams = [ beams[i][j] for i in eachindex(beams), j in 1:4]
     return beams
@@ -216,7 +216,7 @@ function radar_arrays(reference_latitude::AbstractFloat, reference_longitude::Ab
 
     # Grid origin
     grid_origin = convert(projection,LatLon(reference_latitude, reference_longitude))
-    
+
     # Radar locations mapped to transverse mercator with Z,Y,X dimensions
     radar_zyx = get_radar_zyx(reference_latitude, reference_longitude, radar_volume, projection)
 
@@ -224,7 +224,7 @@ function radar_arrays(reference_latitude::AbstractFloat, reference_longitude::Ab
     beams = get_beam_info(radar_volume)
 
     return grid_origin, radar_zyx, beams
-    
+
 end
 
 """
@@ -310,7 +310,7 @@ A tuple `(lat, lon)` of the approximate latitude and longitude in degrees.
 function appx_inverse_projection(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, yx_point::AbstractArray)
 
     # Approximate lat/lon from SAMURAI formula
-    # This formula originated from HRD code, but is originally from FCC wireless communication specs evidently 
+    # This formula originated from HRD code, but is originally from FCC wireless communication specs evidently
     latrad = reference_latitude * pi/180.0
     fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
         + 0.00012 * cos(4.0 * latrad) - 0.000002 * cos(6.0 * latrad)
@@ -359,22 +359,22 @@ function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_fil
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
     reference_longitude = radar_volume.longitude[1]
-    
+
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
     gridpoints = initialize_regular_grid(xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim)
 
     h_roi = xincr * 0.75
     v_roi = zincr * 0.75
-    
-    radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints, 
+
+    radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints,
         radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold,
         missing_key, valid_key)
 
     write_gridded_radar_volume(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
         reference_latitude, reference_longitude, heading)
-    
+
 end
 
 """
@@ -433,7 +433,7 @@ function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, out
     h_roi = deg_km * 1000.0 * degincr * 0.75
     v_roi = zincr * 0.75
 
-    radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints, 
+    radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints,
         radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold,
         missing_key, valid_key)
 
@@ -482,14 +482,14 @@ function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, 
 
     h_roi = rincr * 0.75
     v_roi = rhi_zincr * 0.75
-    
-    radar_grid, latlon_grid = grid_rhi(reference_latitude, reference_longitude, gridpoints, 
+
+    radar_grid, latlon_grid = grid_rhi(reference_latitude, reference_longitude, gridpoints,
         radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold, missing_key, valid_key)
 
     write_gridded_radar_rhi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
         reference_latitude, reference_longitude)
-    
+
 end
 
 """
@@ -525,20 +525,20 @@ function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
     reference_longitude = radar_volume.longitude[1]
-    
+
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
     gridpoints = initialize_regular_grid(xmin, xincr, xdim, ymin, yincr, ydim)
 
     h_roi = xincr * 0.75
-    
-    radar_grid, latlon_grid = grid_ppi(reference_latitude, reference_longitude, gridpoints, 
+
+    radar_grid, latlon_grid = grid_ppi(reference_latitude, reference_longitude, gridpoints,
         radar_volume, moment_dict, grid_type_dict, h_roi, beam_inflation, power_threshold, missing_key, valid_key)
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
         reference_latitude, reference_longitude, heading)
-    
+
 end
 
 """
@@ -573,20 +573,20 @@ function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
     reference_longitude = radar_volume.longitude[1]
-    
+
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
     gridpoints = initialize_regular_grid(xmin, xincr, xdim, ymin, yincr, ydim)
 
     h_roi = xincr * 0.75
-    
-    radar_grid, latlon_grid = grid_composite(reference_latitude, reference_longitude, gridpoints, 
+
+    radar_grid, latlon_grid = grid_composite(reference_latitude, reference_longitude, gridpoints,
         radar_volume, moment_dict, grid_type_dict, h_roi, beam_inflation, missing_key, valid_key)
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
         reference_latitude, reference_longitude, mean_heading)
-    
+
 end
 
 """
@@ -695,7 +695,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
         latlon = convert(LatLon,cartTM)
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
-        
+
         # Find the points within the radius of influence of the horizontal gridpoint
         eff_h_radius_influence = horizontal_roi
         eff_v_radius_influence = vertical_roi
@@ -729,7 +729,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
                 # Loops through the nearby gates with valid data
                 valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
                 for gate in gates[valid_gates]
-                    
+
                     # Calculate the beam intercept to the gridpoint
                     dz = gridpoints[j,i,1] - radar_zyx[gate][1]
                     r = beams[gate,3]
@@ -738,7 +738,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
                     # earth curvature and standard refraction
                     # Sine of the height angle using equation from Doviak and Zrnic (1993)
                     sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2*r*Reff)
-                    
+
                     gridpt_el = missing
                     if abs(sine_h) < 1.0
                         gridpt_el = asin(sine_h)
@@ -758,7 +758,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
                     end
 
                     # Calculate the spherical angle difference using Haversine formula
-                    angle_diff = spherical_angle([beams[gate,1], beams[gate,2]], 
+                    angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                         [gridpt_az, gridpt_el])
 
                     # Use the half-power beamwidth to define the beam
@@ -768,7 +768,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
                     if angle_weight < power_threshold
                         angle_weight = 0
                     end
-    
+
                     # Range weighting based on center of gridbox = 1.0 range_weight
                     gridpt_r = sin(sqrt(dx^2 + dy^2)/Reff) * (Reff + dz) / cos(gridpt_el)
                     range_weight = gridpt_r / r
@@ -908,7 +908,7 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
             # No beam inflation in horizontal in this case since we are gridding in range
             eff_v_radius_influence = max(beam_inflation * origin_dist, vertical_roi)
         end
-        
+
         gates = inrange(balltree, [ origin_dist ], eff_h_radius_influence)
         if !isempty(gates)
 
@@ -933,7 +933,7 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                 # Loops through the nearby gates with valid data
                 valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
                 for gate in gates[valid_gates]
-                    
+
                     # Calculate the beam intercept to the gridpoint
                     dz = gridpoints[j,i,1] - radar_zyx[gate][1]
                     r = beams[gate,3]
@@ -942,10 +942,10 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                     # earth curvature and standard refraction
                     # Sine of the height angle using full equation
                     sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2*r*Reff)
-        
+
                     # Use approximation from Gao et al. 2006
                     #sine_h = (z/r) - (r/(2*Reff))
-                    
+
                     gridpt_el = missing
                     if abs(sine_h) < 1.0
                         gridpt_el = asin(sine_h)
@@ -961,7 +961,7 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                     dy = y_point - radar_zyx[gate][2]
 
                     # Calculate the spherical angle difference using Haversine formula
-                    angle_diff = spherical_angle([beams[gate,1], beams[gate,2]], 
+                    angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                         [beams[gate,1], gridpt_el])
 
                     # Use the half-power beamwidth to define the beam
@@ -971,7 +971,7 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                     if angle_weight < power_threshold
                         angle_weight = 0
                     end
-    
+
                     # Range weighting based on center of gridbox = 1.0 range_weight
                     gridpt_r = sin(sqrt(dx^2 + dy^2)/Reff) * (Reff + dz) / cos(gridpt_el)
                     range_weight = gridpt_r / r
@@ -1073,7 +1073,7 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
-    
+
     # Create a balltree that has horizontal locations of every gate in Y, X dimension
     balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
 
@@ -1096,7 +1096,7 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
         latlon = convert(LatLon,cartTM)
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
-        
+
         # Find the points within the radius of influence of the horizontal gridpoint
         eff_h_radius_influence = horizontal_roi
         if beam_inflation > 0.0
@@ -1131,7 +1131,7 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                 end
 
                 # Calculate the spherical angle difference using Haversine formula
-                angle_diff = spherical_angle([beams[gate,1], beams[gate,2]], 
+                angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                     [gridpt_az, beams[gate,2]])
 
                 # Use the half-power beamwidth to define the beam
@@ -1147,7 +1147,7 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                 gridpt_r = sqrt(dx^2 + dy^2)
                 range_weight = gridpt_r / r
 
-                if abs(gridpt_r - r) > horizontal_roi 
+                if abs(gridpt_r - r) > horizontal_roi
                     # If the range is too far away from the grid center, set range_weight to 0
                     range_weight = 0.0
                 end
@@ -1242,7 +1242,7 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
-    
+
     # Create a balltree that has horizontal locations of every gate in Y, X dimension
     balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
 
@@ -1265,7 +1265,7 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
         latlon = convert(LatLon,cartTM)
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
-        
+
         # Find the points within the radius of influence of the horizontal gridpoint
         eff_h_radius_influence = horizontal_roi
         if beam_inflation > 0.0
@@ -1291,7 +1291,7 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
             valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
             if !isempty(valid_gates)
                 dbzmax, max_idx = findmax(gate -> radar_volume.moments[gate,moment_dict[valid_key]], gates[valid_gates])
-    
+
                 # Divide by the total weight for that gridbox
                 for m in 1:n_moments
                     if !ismissing(radar_volume.moments[gates[valid_gates][max_idx],m])
@@ -1512,7 +1512,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
 
     # Delete any pre-existing file
     rm(file, force=true)
-    
+
     ds = NCDataset(file,"c", attrib = OrderedDict(
         "Conventions"               => "CF-1.12",
         "history"                   => "v1.0",
@@ -1529,9 +1529,9 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
         #"references"                => "Comma-separated list of URL/DOI to extended information",
         "keywords"                  => "radar, precipitation, sea-pol",
         "processing_level"          => "Level 4",
-        "license"                   => "CC-BY-4.0",        
+        "license"                   => "CC-BY-4.0",
     ))
-    
+
     # Dimensions
     # Could concatenate multiple volumes here
     #numswps = length(swpstart)
@@ -1542,9 +1542,9 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
     ds.dim["X"] = xdim
     ds.dim["Y"] = ydim
     ds.dim["Z"] = zdim
-    
+
     # Declare variables
-    
+
     nctime = defVar(ds,"time", Float64, ("time",), attrib = OrderedDict(
         "standard_name"             => "time",
         "long_name"                 => "Data time",
@@ -1566,7 +1566,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
         "units"                     => "seconds since 1970-01-01T00:00:00Z",
         "comment"                   => "",
     ))
-    
+
     ncx = defVar(ds,"X", Float32, ("X",), attrib = OrderedDict(
         "standard_name"             => "projection_x_coordinate",
         "units"                     => "m",
@@ -1591,20 +1591,20 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
         "standard_name"             => "latitude",
         "units"                     => "degrees_north",
     ))
-    
+
     nclon = defVar(ds,"longitude", Float32, ("X", "Y", "time"), attrib = OrderedDict(
         "standard_name"             => "longitude",
         "units"                     => "degrees_east",
     ))
 
     ncgrid_mapping = defVar(ds,"grid_mapping", Int32, (), attrib = OrderedDict(
-        "grid_mapping_name"         => "tranverse_mercator",
+        "grid_mapping_name"         => "transverse_mercator",
         "scale_factor_at_central_meridian" => 1.0,
         "longitude_of_central_meridian" => reference_longitude,
         "latitude_of_projection_origin" => reference_latitude,
         "reference_ellipsoid_name"  => "GRS80",
         "false_easting"             => 0.0,
-        "false_northing"            => 0.0,        
+        "false_northing"            => 0.0,
     ))
 
     ncheading = defVar(ds, "heading", Float32, ("time",), attrib = OrderedDict(
@@ -1616,11 +1616,11 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
     nctime[:] = datetime2unix.(index_time)
     ncstarttime[:] = datetime2unix.(start_time)
     ncstoptime[:] = datetime2unix.(stop_time)
-    ncz[:] = gridpoints[:,1,1,1] 
-    ncy[:] = gridpoints[1,:,1,2] 
-    ncx[:] = gridpoints[1,1,:,3] 
-    nclat[:] = latlon_grid[:,:,1]' 
-    nclon[:] = latlon_grid[:,:,2]' 
+    ncz[:] = gridpoints[:,1,1,1]
+    ncy[:] = gridpoints[1,:,1,2]
+    ncx[:] = gridpoints[1,1,:,3]
+    nclat[:] = latlon_grid[:,:,1]'
+    nclon[:] = latlon_grid[:,:,2]'
     ncgrid_mapping[:] = -32768.0
     ncheading[:] = mean_heading
 
@@ -1628,7 +1628,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
     perm = (1, 4, 3, 2)
     # moment, z, y, x -> moment, x, y, z
     ncgrid = permutedims(radar_grid,perm)
-    
+
     # Loop through the moments
     for key in keys(moment_dict)
         if haskey(variable_attrib_dict,key)
@@ -1690,7 +1690,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
         "processing_level"          => "Level 4",
         "license"                   => "CC-BY-4.0",
     ))
-    
+
     # Dimensions
     # Could concatenate multiple volumes here
     #numswps = length(swpstart)
@@ -1699,9 +1699,9 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     ds.dim["time"] = 1
     ds.dim["R"] = rdim
     ds.dim["Z"] = zdim
-    
+
     # Declare variables
-    
+
     nctime = defVar(ds,"time", Float64, ("time",), attrib = OrderedDict(
         "standard_name"             => "time",
         "long_name"                 => "Data time",
@@ -1723,7 +1723,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
         "units"                     => "seconds since 1970-01-01T00:00:00Z",
         "comment"                   => "",
     ))
-    
+
     ncr = defVar(ds,"R", Float32, ("R",), attrib = OrderedDict(
         "standard_name"             => "projection_range_coordinate",
         "units"                     => "m",
@@ -1742,20 +1742,20 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
         "standard_name"             => "latitude",
         "units"                     => "degrees_north",
     ))
-    
+
     nclon = defVar(ds,"longitude", Float32, ("R", "time"), attrib = OrderedDict(
         "standard_name"             => "longitude",
         "units"                     => "degrees_east",
     ))
 
     ncgrid_mapping = defVar(ds,"grid_mapping", Int32, (), attrib = OrderedDict(
-        "grid_mapping_name"         => "tranverse_mercator",
+        "grid_mapping_name"         => "transverse_mercator",
         "scale_factor_at_central_meridian" => 1.0,
         "longitude_of_central_meridian" => reference_longitude,
         "latitude_of_projection_origin" => reference_latitude,
         "reference_ellipsoid_name"  => "GRS80",
         "false_easting"             => 0.0,
-        "false_northing"            => 0.0,        
+        "false_northing"            => 0.0,
     ))
 
     ncazimuth = defVar(ds,"azimuth", Float32, ("time",), attrib = OrderedDict(
@@ -1768,9 +1768,9 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     ncstarttime[:] = datetime2unix.(start_time)
     ncstoptime[:] = datetime2unix.(stop_time)
     ncazimuth[:] = azimuth
-    ncz[:] = gridpoints[:,1,1] 
+    ncz[:] = gridpoints[:,1,1]
     ncr[:] = gridpoints[1,:,2]
-    nclat[:] = latlon_grid[:,1]' 
+    nclat[:] = latlon_grid[:,1]'
     nclon[:] = latlon_grid[:,2]'
     ncgrid_mapping[:] = -32768.0
 
@@ -1778,7 +1778,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     perm = (1, 3, 2)
     # moment, z, r -> moment, r, z
     ncgrid = permutedims(radar_grid,perm)
-    
+
     # Loop through the moments
     for key in keys(moment_dict)
         var_attrib = common_attrib
@@ -1843,7 +1843,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         "license"                   => "CC-BY-4.0",
 	"scan_name"                 => scan_name
     ))
-    
+
     # Dimensions
     # Could concatenate multiple volumes here
     #numswps = length(swpstart)
@@ -1852,9 +1852,9 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     ds.dim["time"] = 1
     ds.dim["X"] = xdim
     ds.dim["Y"] = ydim
-    
+
     # Declare variables
-    
+
     nctime = defVar(ds,"time", Float64, ("time",), attrib = OrderedDict(
         "standard_name"             => "time",
         "long_name"                 => "Data time",
@@ -1876,7 +1876,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         "units"                     => "seconds since 1970-01-01T00:00:00Z",
         "comment"                   => "",
     ))
-    
+
     ncx = defVar(ds,"X", Float32, ("X",), attrib = OrderedDict(
         "standard_name"             => "projection_x_coordinate",
         "units"                     => "m",
@@ -1894,20 +1894,20 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         "standard_name"             => "latitude",
         "units"                     => "degrees_north",
     ))
-    
+
     nclon = defVar(ds,"longitude", Float32, ("X", "Y", "time"), attrib = OrderedDict(
         "standard_name"             => "longitude",
         "units"                     => "degrees_east",
     ))
 
     ncgrid_mapping = defVar(ds,"grid_mapping", Int32, (), attrib = OrderedDict(
-        "grid_mapping_name"         => "tranverse_mercator",
+        "grid_mapping_name"         => "transverse_mercator",
         "scale_factor_at_central_meridian" => 1.0,
         "longitude_of_central_meridian" => reference_longitude,
         "latitude_of_projection_origin" => reference_latitude,
         "reference_ellipsoid_name"  => "GRS80",
         "false_easting"             => 0.0,
-        "false_northing"            => 0.0,        
+        "false_northing"            => 0.0,
     ))
 
     ncheading = defVar(ds, "heading", Float32, ("time",), attrib = OrderedDict(
@@ -1919,10 +1919,10 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     nctime[:] = datetime2unix.(index_time)
     ncstarttime[:] = datetime2unix.(start_time)
     ncstoptime[:] = datetime2unix.(stop_time)
-    ncy[:] = gridpoints[:,1,1] 
+    ncy[:] = gridpoints[:,1,1]
     ncx[:] = gridpoints[1,:,2]
-    nclat[:] = latlon_grid[:,:,1]' 
-    nclon[:] = latlon_grid[:,:,2]' 
+    nclat[:] = latlon_grid[:,:,1]'
+    nclon[:] = latlon_grid[:,:,2]'
     ncgrid_mapping[:] = -32768.0
     ncheading[:] = mean_heading
 
@@ -1930,7 +1930,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     perm = (1, 3, 2)
     # moment, y, x -> moment, x, y
     ncgrid = permutedims(radar_grid,perm)
-    
+
     # Loop through the moments
     for key in keys(moment_dict)
         var_attrib = common_attrib
@@ -2101,7 +2101,7 @@ function read_latlon_gridded_radar(file, moment_dict)
     z0 = inputds["z0"]
     start_time = inputds["start_time"]
     stop_time = inputds["stop_time"]
-    
+
     # Store radar data
     n_moments = length(moment_dict)
     n_points = length(x0)*length(y0)*length(z0)
@@ -2109,7 +2109,7 @@ function read_latlon_gridded_radar(file, moment_dict)
     for key in keys(moment_dict)
         radardata[moment_dict[key],:] = inputds[key][:]
     end
-    
+
     return x0, y0, z0, start_time, stop_time, radardata
 end
 
@@ -2139,11 +2139,11 @@ function read_cartesian_gridded_radar(file, moment_dict)
     x0 = inputds["x0"]
     y0 = inputds["y0"]
     z0 = inputds["z0"]
-    lon0 = inputds["lon0"]    
+    lon0 = inputds["lon0"]
     lat0 = inputds["lat0"]
     start_time = inputds["start_time"]
     stop_time = inputds["stop_time"]
-    
+
     # Store radar data
     n_moments = length(moment_dict)
     n_points = length(x0)*length(y0)*length(z0)
@@ -2181,11 +2181,11 @@ function read_gridded_radar(file, moment_dict)
     x = inputds["X"]
     y = inputds["Y"]
     z = inputds["Z"]
-    lon = inputds["longitude"]    
+    lon = inputds["longitude"]
     lat = inputds["latitude"]
     start_time = inputds["start_time"]
     stop_time = inputds["stop_time"]
-    
+
     # Store radar data
     n_moments = length(moment_dict)
     n_points = length(x)*length(y)*length(z)
@@ -2222,11 +2222,11 @@ function read_gridded_ppi(file, moment_dict)
 
     x = inputds["X"]
     y = inputds["Y"]
-    lon = inputds["longitude"]    
+    lon = inputds["longitude"]
     lat = inputds["latitude"]
     start_time = inputds["start_time"]
     stop_time = inputds["stop_time"]
-    
+
     # Store radar data
     n_moments = length(moment_dict)
     n_points = length(x)*length(y)
@@ -2264,11 +2264,11 @@ function read_gridded_rhi(file, moment_dict)
 
     R = inputds["R"]
     Z = inputds["Z"]
-    lon = inputds["longitude"]    
+    lon = inputds["longitude"]
     lat = inputds["latitude"]
     start_time = inputds["start_time"]
     stop_time = inputds["stop_time"]
-    
+
     # Store radar data
     n_moments = length(moment_dict)
     n_points = length(R)*length(Z)
@@ -2279,3 +2279,102 @@ function read_gridded_rhi(file, moment_dict)
 
     return R, Z, lat, lon, start_time, stop_time, radardata
 end
+
+# ── Parameter-struct overloads ──────────────────────────────────────────────
+# Convenience methods that pull configuration out of a `DaishoParameters` and
+# delegate to the long-positional driver above. Adding a new knob means
+# extending the struct + `defaults.toml` and updating the delegating call —
+# callers using `p::DaishoParameters` do not change.
+
+"""
+    grid_radar_volume(radar_volume, output_file, index_time, p::DaishoParameters; heading=-9999.0)
+
+Parameter-struct overload reading from `p.grid.cartesian`, `p.gridding`, and
+`p.moments`.
+"""
+function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
+                            index_time, p::DaishoParameters; heading::Real=-9999.0)
+    g, gd = p.grid.cartesian, p.gridding
+    grid_radar_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+end
+
+"""
+    grid_radar_latlon_volume(radar_volume, output_file, index_time, p::DaishoParameters; heading=-9999.0)
+
+Parameter-struct overload reading from `p.grid.latlon`, `p.gridding`, and
+`p.moments`.
+"""
+function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractString,
+                                   index_time, p::DaishoParameters; heading::Real=-9999.0)
+    g, gd = p.grid.latlon, p.gridding
+    grid_radar_latlon_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.lonmin, g.londim, g.latmin, g.latdim, g.degincr,
+        g.zmin, g.zincr, g.zdim,
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+end
+
+"""
+    grid_radar_rhi(radar_volume, output_file, index_time, p::DaishoParameters)
+
+Parameter-struct overload reading from `p.grid.rhi`, `p.gridding`, and `p.moments`.
+"""
+function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
+                         index_time, p::DaishoParameters)
+    g, gd = p.grid.rhi, p.gridding
+    grid_radar_rhi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
+end
+
+"""
+    grid_radar_ppi(radar_volume, output_file, index_time, p::DaishoParameters; heading=-9999.0)
+
+Parameter-struct overload using the (xmin/xincr/xdim, ymin/yincr/ydim) fields
+of `p.grid.cartesian` plus `p.gridding` and `p.moments`. The Cartesian z-axis
+fields are ignored.
+"""
+function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
+                         index_time, p::DaishoParameters; heading::Real=-9999.0)
+    g, gd = p.grid.cartesian, p.gridding
+    grid_radar_ppi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+end
+
+"""
+    grid_radar_composite(radar_volume, output_file, index_time, p::DaishoParameters; mean_heading=-9999.0)
+
+Parameter-struct overload using the (xmin/xincr/xdim, ymin/yincr/ydim) fields
+of `p.grid.cartesian` plus `p.gridding` and `p.moments`. `power_threshold` is
+not applicable to composite gridding.
+"""
+function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
+                               index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
+    g, gd = p.grid.cartesian, p.gridding
+    grid_radar_composite(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
+        gd.beam_inflation, gd.missing_key, gd.valid_key, mean_heading)
+end
+
+"""
+    grid_radar_column(radar_volume, output_file, index_time, p::DaishoParameters)
+
+Parameter-struct overload using `p.grid.cartesian.z*` as the column axis,
+plus `p.gridding` and `p.moments`.
+"""
+function grid_radar_column(radar_volume::radar, output_file::AbstractString,
+                            index_time, p::DaishoParameters)
+    g, gd = p.grid.cartesian, p.gridding
+    grid_radar_column(radar_volume, field_index_dict(p), grid_type_index_dict(p),
+        output_file, index_time,
+        g.zmin, g.zincr, g.zdim,
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
+end
+

@@ -29,9 +29,9 @@ end
         ymin=0.0, ymax=0.0, ydim=0,
         zmin=0.0, zmax=0.0, zdim=0,
         mubar=3, quadrature=:gauss,
-        BCL=CubicBSpline.R0, BCR=CubicBSpline.R0,
-        BCU=CubicBSpline.R0, BCD=CubicBSpline.R0,
-        BCB=CubicBSpline.R0, BCT=CubicBSpline.R0)
+        BCL=NaturalBC(), BCR=NaturalBC(),
+        BCU=NaturalBC(), BCD=NaturalBC(),
+        BCB=NaturalBC(), BCT=NaturalBC())
 
 Create a Springsteel spectral grid configured for radar data analysis.
 
@@ -53,9 +53,12 @@ Dimension mapping: i = X (easting), j = Y (northing), k = Z (altitude).
 - `zdim`: Number of B-spline cells in Z.
 - `mubar`: Quadrature points per cell (default: 3).
 - `quadrature`: Quadrature rule (default: `:gauss`).
-- `BCL`, `BCR`: Left/right boundary conditions for X (default: `CubicBSpline.R0`).
-- `BCU`, `BCD`: Upper/lower boundary conditions for Y (default: `CubicBSpline.R0`).
-- `BCB`, `BCT`: Bottom/top boundary conditions for Z (default: `CubicBSpline.R0`).
+- `BCL`, `BCR`: Left/right boundary conditions for X. Accepts a Springsteel
+  `BoundaryConditions` (e.g. `NaturalBC()`, `DirichletBC()`, `NeumannBC()`)
+  or a legacy module-qualified Dict (e.g. `CubicBSpline.R0`, `CubicBSpline.R1T1`).
+  Default: `NaturalBC()`.
+- `BCU`, `BCD`: Upper/lower boundary conditions for Y. Same accepted forms as `BCL`.
+- `BCB`, `BCT`: Bottom/top boundary conditions for Z. Same accepted forms as `BCL`.
 
 # Returns
 A typed `SpringsteelGrid` (`R_Grid`, `RR_Grid`, or `RRR_Grid`).
@@ -76,9 +79,12 @@ function create_radar_grid(geometry::String, moment_dict::Dict;
         ymin::Real=0.0, ymax::Real=0.0, ydim::Integer=0,
         zmin::Real=0.0, zmax::Real=0.0, zdim::Integer=0,
         mubar::Integer=3, quadrature::Symbol=:gauss,
-        BCL::Dict=CubicBSpline.R0, BCR::Dict=CubicBSpline.R0,
-        BCU::Dict=CubicBSpline.R0, BCD::Dict=CubicBSpline.R0,
-        BCB::Dict=CubicBSpline.R0, BCT::Dict=CubicBSpline.R0)
+        BCL::Union{Dict, BoundaryConditions}=NaturalBC(),
+        BCR::Union{Dict, BoundaryConditions}=NaturalBC(),
+        BCU::Union{Dict, BoundaryConditions}=NaturalBC(),
+        BCD::Union{Dict, BoundaryConditions}=NaturalBC(),
+        BCB::Union{Dict, BoundaryConditions}=NaturalBC(),
+        BCT::Union{Dict, BoundaryConditions}=NaturalBC())
 
     # Build vars dict from moment_dict (name => index)
     vars = Dict{String, Int}(k => v for (k, v) in moment_dict)
@@ -211,8 +217,7 @@ See also: [`create_radar_grid`](@ref), [`populate_physical!`](@ref)
 function get_springsteel_gridpoints_zyx end
 
 # 3D: RRR_Grid
-function get_springsteel_gridpoints_zyx(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, SplineBasisArray})
+function get_springsteel_gridpoints_zyx(sgrid::RRR_Grid)
     pts = getGridpoints(sgrid)  # (iDim*jDim*kDim, 3) with [x, y, z] columns
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -234,8 +239,7 @@ function get_springsteel_gridpoints_zyx(sgrid::SpringsteelGrid{CartesianGeometry
 end
 
 # 2D: RR_Grid
-function get_springsteel_gridpoints_zyx(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, NoBasisArray})
+function get_springsteel_gridpoints_zyx(sgrid::RR_Grid)
     pts = getGridpoints(sgrid)  # (iDim*jDim, 2) with [x, y] columns
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -253,8 +257,7 @@ function get_springsteel_gridpoints_zyx(sgrid::SpringsteelGrid{CartesianGeometry
 end
 
 # 1D: R_Grid
-function get_springsteel_gridpoints_zyx(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, NoBasisArray, NoBasisArray})
+function get_springsteel_gridpoints_zyx(sgrid::R_Grid)
     return getGridpoints(sgrid)  # Vector of x-coordinates
 end
 
@@ -279,8 +282,7 @@ See also: [`create_radar_grid`](@ref), [`get_springsteel_gridpoints_zyx`](@ref)
 function populate_physical! end
 
 # 3D: RRR_Grid
-function populate_physical!(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, SplineBasisArray},
+function populate_physical!(sgrid::RRR_Grid,
         radar_grid::AbstractArray, moment_dict::Dict)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -306,8 +308,7 @@ function populate_physical!(sgrid::SpringsteelGrid{CartesianGeometry,
 end
 
 # 2D: RR_Grid
-function populate_physical!(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, NoBasisArray},
+function populate_physical!(sgrid::RR_Grid,
         radar_grid::AbstractArray, moment_dict::Dict)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -330,8 +331,7 @@ function populate_physical!(sgrid::SpringsteelGrid{CartesianGeometry,
 end
 
 # 1D: R_Grid
-function populate_physical!(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, NoBasisArray, NoBasisArray},
+function populate_physical!(sgrid::R_Grid,
         radar_grid::AbstractArray, moment_dict::Dict)
     iDim = sgrid.params.iDim
 
@@ -369,8 +369,7 @@ See also: [`create_radar_grid`](@ref)
 function compute_roi end
 
 # 3D: RRR_Grid
-function compute_roi(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, SplineBasisArray})
+function compute_roi(sgrid::RRR_Grid)
     pts = getGridpoints(sgrid)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -388,8 +387,7 @@ function compute_roi(sgrid::SpringsteelGrid{CartesianGeometry,
 end
 
 # 2D: RR_Grid
-function compute_roi(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, SplineBasisArray, NoBasisArray})
+function compute_roi(sgrid::RR_Grid)
     pts = getGridpoints(sgrid)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -401,8 +399,7 @@ function compute_roi(sgrid::SpringsteelGrid{CartesianGeometry,
 end
 
 # 1D: R_Grid
-function compute_roi(sgrid::SpringsteelGrid{CartesianGeometry,
-        SplineBasisArray, NoBasisArray, NoBasisArray})
+function compute_roi(sgrid::R_Grid)
     pts = getGridpoints(sgrid)
     spacing = mean(diff(pts))
     return (0.75 * abs(spacing),)
@@ -752,3 +749,85 @@ function grid_radar_column_spectral(radar_volume, moment_dict::Dict, grid_type_d
 
     return sgrid
 end
+
+# ── Parameter-struct overloads ──────────────────────────────────────────────
+# Read spectral-grid configuration directly from a `DaishoParameters`. Per-axis
+# BCs come from `p.grid.spectral.bc`; geometry/cell counts/bounds from
+# `p.grid.spectral`.
+
+"""
+    create_radar_grid(p::DaishoParameters)
+
+Parameter-struct overload that builds a Springsteel spectral grid from
+`p.grid.spectral` and `p.moments`. The Springsteel variable map is built from
+`p.moments.fields` (1-based indices in source order).
+"""
+function create_radar_grid(p::DaishoParameters)
+    s = p.grid.spectral
+    moment_dict = field_index_dict(p)
+    return create_radar_grid(s.geometry, moment_dict;
+        xmin=s.xmin, xmax=s.xmax, xdim=s.xdim,
+        ymin=s.ymin, ymax=s.ymax, ydim=s.ydim,
+        zmin=s.zmin, zmax=s.zmax, zdim=s.zdim,
+        mubar=s.mubar, quadrature=s.quadrature,
+        BCL=s.bc.xL, BCR=s.bc.xR,
+        BCU=s.bc.yL, BCD=s.bc.yR,
+        BCB=s.bc.zL, BCT=s.bc.zR)
+end
+
+"""
+    grid_radar_volume_spectral(radar_volume, output_file, index_time, sgrid, p::DaishoParameters; heading=-9999.0, institution="", source="", include_derivatives=false)
+
+Parameter-struct overload reading gridding config from `p.gridding` and the
+moment map from `p.moments`.
+"""
+function grid_radar_volume_spectral(radar_volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    moment_dict = field_index_dict(p)
+    grid_radar_volume_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
+        output_file, index_time, sgrid,
+        p.gridding.beam_inflation, p.gridding.power_threshold;
+        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        heading=heading, institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end
+
+"""
+    grid_radar_ppi_spectral(radar_volume, output_file, index_time, sgrid, p::DaishoParameters; heading=-9999.0, institution="", source="", include_derivatives=false)
+
+Parameter-struct overload reading gridding config from `p.gridding` and the
+moment map from `p.moments`.
+"""
+function grid_radar_ppi_spectral(radar_volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    moment_dict = field_index_dict(p)
+    grid_radar_ppi_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
+        output_file, index_time, sgrid,
+        p.gridding.beam_inflation, p.gridding.power_threshold;
+        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        heading=heading, institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end
+
+"""
+    grid_radar_column_spectral(radar_volume, output_file, index_time, sgrid, p::DaishoParameters; institution="", source="", include_derivatives=false)
+
+Parameter-struct overload reading gridding config from `p.gridding` and the
+moment map from `p.moments`.
+"""
+function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        institution::String="", source::String="", include_derivatives::Bool=false)
+    moment_dict = field_index_dict(p)
+    grid_radar_column_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
+        output_file, index_time, sgrid,
+        p.gridding.beam_inflation, p.gridding.power_threshold;
+        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end
+

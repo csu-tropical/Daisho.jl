@@ -86,6 +86,20 @@ function initialize_moment_dictionaries(raw_moment_names, qc_moment_names, momen
 end
 
 """
+    initialize_moment_dictionaries(p::DaishoParameters) -> (Dict, Dict, Dict)
+
+Convenience overload that returns moment-index dictionaries derived from
+`p.moments.fields` and `p.moments.grid_type`. Returns
+`(field_index_dict, field_index_dict, grid_type_index_dict)` so that legacy
+callers expecting `(raw, qc, grid_type)` continue to work — the raw/qc
+distinction was dropped in the CfRadial 2.1 refactor.
+"""
+function initialize_moment_dictionaries(p::DaishoParameters)
+    fid = field_index_dict(p)
+    return (fid, fid, grid_type_index_dict(p))
+end
+
+"""
     initialize_qc_fields(volume, raw_moment_dict, qc_moment_dict) -> Array{Union{Missing, Float32}}
 
 Initialize quality-controlled moment fields by copying the corresponding raw moments.
