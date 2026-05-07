@@ -339,4 +339,47 @@
         @test !ismissing(result[n_gates + 1, 1])
     end
 
+
+    @testset "threshold_qc!(sweep, p) sweep-aware overload" begin
+        t0 = DateTime(2024, 9, 3, 15, 0, 0)
+        n_rays = 4
+        n_gates = 5
+        sweep = SweepGroup(
+            sweep_number = 0,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = 1.0,
+            time = [t0 + Second(r) for r in 0:(n_rays-1)],
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates-1))),
+            azimuth = collect(Float64, 0.0:90.0:(90.0*(n_rays-1))),
+            elevation = fill(1.0, n_rays),
+        )
+        # DBZ field (the input to QC)
+        dbz = fill(Float32(20.0), n_rays, n_gates)
+        add_field!(sweep, "DBZ", dbz, FieldMetadata(units="dBZ", long_name="raw_dbz"))
+        # SQI: half the gates fail the SQI threshold
+        sqi = fill(Float32(0.5), n_rays, n_gates)
+        sqi[:, 1:2] .= 0.1f0  # below sqi_threshold=0.35
+        add_field!(sweep, "SQI", sqi, FieldMetadata(units=""))
+        # SNR: above threshold
+        snr = fill(Float32(20.0), n_rays, n_gates)
+        add_field!(sweep, "SNR", snr, FieldMetadata(units="dB"))
+        # RHOHV: above threshold
+        rhohv = fill(Float32(0.99), n_rays, n_gates)
+        add_field!(sweep, "RHOHV", rhohv, FieldMetadata(units=""))
+        # WIDTH: below max
+        width = fill(Float32(2.0), n_rays, n_gates)
+        add_field!(sweep, "WIDTH", width, FieldMetadata(units="m/s"))
+
+        p = DaishoParameters()
+        threshold_qc!(sweep, p; inputs = ["DBZ"])
+        @test haskey(sweep.fields, "DBZ_QC")
+        out = sweep.fields["DBZ_QC"].data
+        @test all(isnan, out[:, 1:2])
+        @test !any(isnan, out[:, 3:end])
+        @test sweep.fields["DBZ_QC"].metadata.is_quality_field
+        @test sweep.fields["DBZ_QC"].metadata.qualified_variables == ["DBZ"]
+        # Input DBZ should now have ancillary_variables containing DBZ_QC.
+        @test "DBZ_QC" in sweep.fields["DBZ"].metadata.ancillary_variables
+    end
+
 end

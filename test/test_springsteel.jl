@@ -558,4 +558,14 @@ using Springsteel
         end
     end
 
+
+    @testset "Volume spectral overloads dispatch" begin
+        @test hasmethod(Daisho.grid_radar_volume_spectral,
+            Tuple{Volume,AbstractString,Any,SpringsteelGrid,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_ppi_spectral,
+            Tuple{Volume,AbstractString,Any,SpringsteelGrid,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_column_spectral,
+            Tuple{Volume,AbstractString,Any,SpringsteelGrid,DaishoParameters})
+    end
+
 end

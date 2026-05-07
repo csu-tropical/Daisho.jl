@@ -831,3 +831,33 @@ function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
         include_derivatives=include_derivatives)
 end
 
+# ── Volume-aware overloads (Phase C bridge) ──────────────────────────────────
+
+function grid_radar_volume_spectral(volume::Volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_volume_spectral(legacy, output_file, index_time, sgrid, p;
+        heading=heading, institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end
+
+function grid_radar_ppi_spectral(volume::Volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_ppi_spectral(legacy, output_file, index_time, sgrid, p;
+        heading=heading, institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end
+
+function grid_radar_column_spectral(volume::Volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        institution::String="", source::String="", include_derivatives::Bool=false)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_column_spectral(legacy, output_file, index_time, sgrid, p;
+        institution=institution, source=source,
+        include_derivatives=include_derivatives)
+end

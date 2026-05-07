@@ -130,6 +130,126 @@ function threshold_qc(raw_moments, raw_moment_dict, qc_moments, qc_moment_dict,
 end
 
 """
+    threshold_qc!(sweep::SweepGroup, p::DaishoParameters;
+                  inputs=["DBZ","VEL","ZDR","KDP","RHOHV","WIDTH","PHIDP"],
+                  out_suffix="_QC")
+
+Sweep-aware quality-control. For each input field present in `sweep.fields`,
+add a thresholded copy named `<input>*out_suffix`. Gates are set to `NaN`
+where any of:
+- `SQI < p.qc.sqi_threshold`
+- `SNR < p.qc.snr_threshold`
+- `RHOHV < p.qc.rhohv_threshold`
+- `WIDTH > p.qc.spectrum_width_max`
+
+The output field metadata is the input metadata plus `is_quality_field=true`,
+`qualified_variables=[input_name]`, and `long_name="QC " * <input long_name>`.
+The input field's `ancillary_variables` is updated to include the new output.
+Returns `sweep`.
+"""
+function threshold_qc!(sweep::SweepGroup, p::DaishoParameters;
+                       inputs::Vector{String} = ["DBZ", "VEL", "ZDR", "KDP",
+                                                  "RHOHV", "WIDTH", "PHIDP"],
+                       out_suffix::String = "_QC")
+    # Gather threshold fields. If a threshold field is absent, skip that test.
+    sqi  = haskey(sweep.fields, "SQI") ? sweep.fields["SQI"].data : nothing
+    snr  = haskey(sweep.fields, "SNR") ? sweep.fields["SNR"].data : nothing
+    rhohv = haskey(sweep.fields, "RHOHV") ? sweep.fields["RHOHV"].data : nothing
+    width = haskey(sweep.fields, "WIDTH") ? sweep.fields["WIDTH"].data : nothing
+
+    sqi_t  = p.qc.sqi_threshold
+    snr_t  = p.qc.snr_threshold
+    rh_t   = p.qc.rhohv_threshold
+    sw_max = p.qc.spectrum_width_max
+
+    for input in inputs
+        haskey(sweep.fields, input) || continue
+        in_field = sweep.fields[input]
+        in_data = in_field.data
+        out_data = similar(in_data, Float32)
+        @inbounds for i in eachindex(in_data)
+            v = in_data[i]
+            keep = !(ismissing(v) || (isa(v, AbstractFloat) && isnan(v)))
+            if keep && sqi !== nothing
+                s = sqi[i]
+                keep = !ismissing(s) && !(isa(s, AbstractFloat) && isnan(s)) && s >= sqi_t
+            end
+            if keep && snr !== nothing
+                sn = snr[i]
+                keep = !ismissing(sn) && !(isa(sn, AbstractFloat) && isnan(sn)) && sn >= snr_t
+            end
+            if keep && rhohv !== nothing
+                rh = rhohv[i]
+                keep = !ismissing(rh) && !(isa(rh, AbstractFloat) && isnan(rh)) && rh >= rh_t
+            end
+            if keep && width !== nothing
+                w = width[i]
+                keep = !ismissing(w) && !(isa(w, AbstractFloat) && isnan(w)) && w <= sw_max
+            end
+            out_data[i] = keep ? Float32(v) : Float32(NaN)
+        end
+        in_md = in_field.metadata
+        new_long = in_md.long_name === nothing ? "QC " * input : "QC " * in_md.long_name
+        out_md = FieldMetadata(
+            standard_name = in_md.standard_name,
+            long_name = new_long,
+            units = in_md.units,
+            fill_value = in_md.fill_value,
+            undetect = in_md.undetect,
+            scale_factor = in_md.scale_factor,
+            add_offset = in_md.add_offset,
+            coordinates = in_md.coordinates,
+            sampling_ratio = in_md.sampling_ratio,
+            is_discrete = in_md.is_discrete,
+            field_folds = in_md.field_folds,
+            fold_limit_lower = in_md.fold_limit_lower,
+            fold_limit_upper = in_md.fold_limit_upper,
+            is_quality_field = true,
+            qualified_variables = [input],
+            ancillary_variables = String[],
+            flag_values = in_md.flag_values,
+            flag_meanings = in_md.flag_meanings,
+            flag_masks = in_md.flag_masks,
+            thresholding_xml = in_md.thresholding_xml,
+            legend_xml = in_md.legend_xml,
+            extra_attrs = Dict{String,Any}(),
+        )
+        out_name = input * out_suffix
+        sweep.fields[out_name] = Field(out_data, out_md)
+
+        # Append the new output name to the input's ancillary_variables.
+        if !(out_name in in_md.ancillary_variables)
+            new_anc = push!(copy(in_md.ancillary_variables), out_name)
+            sweep.fields[input] = Field(in_data, FieldMetadata(
+                standard_name = in_md.standard_name,
+                long_name = in_md.long_name,
+                units = in_md.units,
+                fill_value = in_md.fill_value,
+                undetect = in_md.undetect,
+                scale_factor = in_md.scale_factor,
+                add_offset = in_md.add_offset,
+                coordinates = in_md.coordinates,
+                sampling_ratio = in_md.sampling_ratio,
+                is_discrete = in_md.is_discrete,
+                field_folds = in_md.field_folds,
+                fold_limit_lower = in_md.fold_limit_lower,
+                fold_limit_upper = in_md.fold_limit_upper,
+                is_quality_field = in_md.is_quality_field,
+                qualified_variables = in_md.qualified_variables,
+                ancillary_variables = new_anc,
+                flag_values = in_md.flag_values,
+                flag_meanings = in_md.flag_meanings,
+                flag_masks = in_md.flag_masks,
+                thresholding_xml = in_md.thresholding_xml,
+                legend_xml = in_md.legend_xml,
+                extra_attrs = in_md.extra_attrs,
+            ))
+        end
+    end
+    return sweep
+end
+
+"""
     smooth_sqi(sqi)
 
 Smooth the Signal Quality Index (SQI) field using a Gaussian kernel to help remove second-trip echo.

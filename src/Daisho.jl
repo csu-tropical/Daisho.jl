@@ -41,5 +41,6 @@ export add_field!, remove_field!, n_rays, field_names, has_field
 export read_cfradial, write_cfradial, update_cfradial
 export validate_spec, ValidationReport
 export as_legacy_radar, as_volume
+export threshold_qc!
 
 end # module Daisho

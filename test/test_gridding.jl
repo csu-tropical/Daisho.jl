@@ -204,4 +204,27 @@
         @test length(gates) > 0
     end
 
+
+    @testset "Volume overloads dispatch via bridge" begin
+        # Smoke-test that the Volume-typed driver methods exist and dispatch.
+        v = synthetic_volume(n_sweeps=1, n_rays=8, n_gates=5)
+        # The Volume-typed methods are defined; just check that they resolve.
+        @test hasmethod(Daisho.grid_radar_volume,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_ppi,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_rhi,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_column,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_composite,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        @test hasmethod(Daisho.grid_radar_latlon_volume,
+            Tuple{Volume,AbstractString,Any,DaishoParameters})
+        # Bridge: Volume → legacy radar should produce a sensibly-shaped struct.
+        legacy, names = as_legacy_radar(v)
+        @test length(legacy.azimuth) == 8
+        @test "DBZ" in names
+    end
+
 end

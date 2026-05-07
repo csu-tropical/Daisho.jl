@@ -177,3 +177,53 @@ function create_synthetic_cfradial(filepath;
     close(ds)
     return filepath
 end
+
+"""
+Build a deterministic CfRadial 2.1 `Volume` for round-trip tests, with the
+moment fields named in `fields`.
+"""
+function synthetic_volume(; n_sweeps::Int=2, n_rays::Int=20, n_gates::Int=10,
+                          fields = ["DBZ", "VEL", "SQI", "DBZ_QC"],
+                          lat::Real=16.886, lon::Real=-24.988, alt::Real=50.0,
+                          instrument_name::String="SYN")
+    t0 = DateTime(2024, 9, 3, 15, 0, 0)
+    sweeps = SweepGroup[]
+    for s in 1:n_sweeps
+        ts = [t0 + Second((s-1) * n_rays + r) for r in 0:(n_rays-1)]
+        sweep = SweepGroup(
+            sweep_number = s - 1,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = Float64(s),
+            time = ts,
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates-1))),
+            azimuth = collect(Float64, range(0.0, 360.0; length=n_rays+1))[1:n_rays],
+            elevation = fill(Float64(s), n_rays),
+            nyquist_velocity = fill(25.0, n_rays),
+        )
+        for fname in fields
+            data = Float32.(reshape(1:(n_rays * n_gates), n_rays, n_gates))
+            if fname == "DBZ" || fname == "DBZ_QC"
+                data .= data .+ 20.0f0
+            elseif fname == "SQI"
+                data = fill(Float32(0.5), n_rays, n_gates)
+            end
+            md = FieldMetadata(units = (fname == "DBZ" || fname == "DBZ_QC") ? "dBZ" :
+                                       fname == "VEL" ? "m/s" : "",
+                               long_name = fname, fill_value = -32768.0)
+            add_field!(sweep, fname, data, md)
+        end
+        push!(sweeps, sweep)
+    end
+    return Volume(
+        instrument_name = instrument_name,
+        site_name = instrument_name,
+        title = "Synthetic",
+        institution = "Test",
+        source = "Test",
+        history = "Test",
+        time_coverage_start = t0,
+        time_coverage_end = t0 + Second(n_sweeps * n_rays),
+        latitude = Float64(lat), longitude = Float64(lon), altitude = Float64(alt),
+        sweeps = sweeps,
+    )
+end

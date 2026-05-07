@@ -2378,3 +2378,43 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
         gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
 end
 
+# ── Volume-aware overloads (Phase C bridge) ──────────────────────────────────
+#
+# These delegate to the legacy `radar` drivers via `as_legacy_radar`. The
+# bridge layer is removed in Phase D once the legacy drivers are gone.
+
+function grid_radar_volume(volume::Volume, output_file::AbstractString,
+                            index_time, p::DaishoParameters; heading::Real=-9999.0)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_volume(legacy, output_file, index_time, p; heading=heading)
+end
+
+function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
+                                   index_time, p::DaishoParameters; heading::Real=-9999.0)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_latlon_volume(legacy, output_file, index_time, p; heading=heading)
+end
+
+function grid_radar_rhi(volume::Volume, output_file::AbstractString,
+                        index_time, p::DaishoParameters)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_rhi(legacy, output_file, index_time, p)
+end
+
+function grid_radar_ppi(volume::Volume, output_file::AbstractString,
+                        index_time, p::DaishoParameters; heading::Real=-9999.0)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_ppi(legacy, output_file, index_time, p; heading=heading)
+end
+
+function grid_radar_composite(volume::Volume, output_file::AbstractString,
+                              index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_composite(legacy, output_file, index_time, p; mean_heading=mean_heading)
+end
+
+function grid_radar_column(volume::Volume, output_file::AbstractString,
+                           index_time, p::DaishoParameters)
+    legacy, _names = as_legacy_radar(volume)
+    grid_radar_column(legacy, output_file, index_time, p)
+end
