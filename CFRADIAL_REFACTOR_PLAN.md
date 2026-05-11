@@ -76,7 +76,9 @@ and confirm the documented test count target before moving to the next phase.
 
 - The legacy `write_gridded_radar_*` family in `src/gridding.jl`. Springsteel
   handles new gridded writes; the legacy gridded writers stay as-is and will
-  be deprecated in a separate effort.
+  be deprecated in a separate effort. **See `MULTISWEEP_GRIDDING_PLAN.md`**
+  for the follow-on plan that puts a `GridAccumulator` in front of these
+  writers and routes the Volume-typed gridding drivers through it.
 - `src/processing.jl` (orchestration script that lives outside the package
   module — not `include`d in `src/Daisho.jl`).
 - LIDAR-specific paths (`lidar_parameters`, `lidar_calibration`,

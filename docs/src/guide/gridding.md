@@ -74,3 +74,53 @@ Gridded data is written as CF-compliant NetCDF files with:
 - All gridded moments as 3D or 2D variables
 - Time, start_time, stop_time
 - Latitude/longitude grids for each horizontal point
+
+## Per-sweep gridding and accumulator-based combination
+
+The Volume drivers above build a [`GridAccumulator`](@ref Daisho.GridAccumulator)
+internally, fold every sweep of the volume into it, and finalize once. The
+accumulator is also exposed as a first-class object so callers can grid one
+sweep at a time, persist intermediate state to JLD2, and combine sweeps from
+many files later. This is the natural workflow for airborne radars where each
+CfRadial file is one sweep along a flight track, and for multi-Doppler retrieval
+inputs where sweeps from different radars need to land on a common grid.
+
+The flow uses three verbs:
+
+- [`grid_sweep_to_file`](@ref Daisho.grid_sweep_to_file) — grid one sweep
+  of a volume into a JLD2 accumulator file. Either create a fresh accumulator
+  with a `grid_spec` argument, or merge into an existing rolling file.
+- [`combine_accumulator_files`](@ref Daisho.combine_accumulator_files) — merge
+  many per-sweep accumulator files into one, provided they share a grid spec.
+- [`finalize_accumulator_file`](@ref Daisho.finalize_accumulator_file) — divide
+  by weights, apply linear→dBZ conversion, and write a normalized NetCDF using
+  the appropriate `write_gridded_radar_*` writer.
+
+Example (one CfRadial file per sweep along a flight leg):
+
+```julia
+p = DaishoParameters("config/your.toml")
+first_volume = read_cfradial(first(p3_files))
+grid_spec = build_grid_spec(:volume_3d, first_volume, p)
+
+for file in p3_files
+    volume = read_cfradial(file)
+    threshold_qc!(volume.sweeps[1], p)
+    grid_sweep_to_file(volume, 1, "leg.accum.jld2", p;
+                       grid_spec = grid_spec,
+                       merge_into_existing = true)
+end
+
+finalize_accumulator_file("leg.accum.jld2", "leg_gridded.nc", p;
+                          index_time = first_volume.time_coverage_start)
+```
+
+### Field-folds quantities
+
+Radial velocity (`VEL`) and other folding quantities (anything where
+`Field.metadata.field_folds == true`) cannot be physically meaningfully merged
+across distinct look directions. The merge step
+([`combine_accumulator_files`](@ref Daisho.combine_accumulator_files) and
+[`merge_accumulators!`](@ref Daisho.merge_accumulators!)) refuses to combine
+field-folds fields across distinct sweeps and points the user at the
+wind-retrieval workflow, which reads the per-sweep accumulators directly.

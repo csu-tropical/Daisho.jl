@@ -105,6 +105,23 @@ Daisho.grid_composite
 Daisho.grid_column
 ```
 
+### Multi-Sweep Accumulator
+
+```@docs
+Daisho.GridSpec
+Daisho.SweepProvenance
+Daisho.GridAccumulator
+Daisho.build_grid_spec
+Daisho.grid_sweep!
+Daisho.finalize_grid
+Daisho.merge_accumulators!
+Daisho.save_accumulator
+Daisho.load_accumulator
+Daisho.grid_sweep_to_file
+Daisho.combine_accumulator_files
+Daisho.finalize_accumulator_file
+```
+
 ### Gridded Data I/O
 
 ```@docs

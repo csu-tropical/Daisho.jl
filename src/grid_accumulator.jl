@@ -1328,6 +1328,195 @@ function _writer_radar_stub(volume::Volume)
     )
 end
 
+# ── Multi-file / per-sweep workflow ──────────────────────────────────────────
+
+"""
+    grid_sweep_to_file(volume, sweep_index, accumulator_file, p;
+                       grid_spec=nothing, heading=-9999.0,
+                       merge_into_existing=true) -> path
+
+Grid one sweep of `volume` into a JLD2 accumulator file. Useful for the
+airborne / multi-file workflow where each CfRadial file is one sweep along a
+flight track.
+
+If `accumulator_file` already exists and `merge_into_existing=true`, the file
+is loaded, the new sweep folded in via `grid_sweep!`, and the result saved
+back. If `merge_into_existing=false` an `ArgumentError` is raised — refusing
+to overwrite is the safer default.
+
+If `accumulator_file` does not yet exist, `grid_spec` must be supplied so the
+fresh accumulator can be allocated.
+
+Returns the file path.
+"""
+function grid_sweep_to_file(volume::Volume, sweep_index::Int,
+                             accumulator_file::AbstractString,
+                             p::DaishoParameters;
+                             grid_spec::Union{Nothing,GridSpec} = nothing,
+                             heading::Real = -9999.0,
+                             merge_into_existing::Bool = true)
+    if isfile(accumulator_file)
+        merge_into_existing || throw(ArgumentError(
+            "grid_sweep_to_file: $(accumulator_file) exists; pass merge_into_existing=true to merge"))
+        acc = load_accumulator(accumulator_file)
+        if grid_spec !== nothing
+            _grid_spec_equal(acc.grid_spec, grid_spec) || throw(ArgumentError(
+                "grid_sweep_to_file: supplied grid_spec disagrees with the one stored in $(accumulator_file)"))
+        end
+    else
+        grid_spec === nothing && throw(ArgumentError(
+            "grid_sweep_to_file: $(accumulator_file) does not exist; supply grid_spec to create"))
+        acc = GridAccumulator(grid_spec, p)
+    end
+    grid_sweep!(acc, volume, sweep_index, p; heading = heading,
+                source_file = String(accumulator_file))
+    save_accumulator(accumulator_file, acc)
+    return accumulator_file
+end
+
+"""
+    finalize_accumulator_file(input_file, output_file, p; index_time) -> output_file
+
+Load an accumulator from JLD2, call `finalize_grid`, and dispatch to the
+appropriate `write_gridded_radar_*` writer based on `accumulator.grid_spec.shape`.
+Returns the output file path.
+"""
+function finalize_accumulator_file(input_file::AbstractString,
+                                    output_file::AbstractString,
+                                    p::DaishoParameters;
+                                    index_time)
+    acc = load_accumulator(input_file)
+    radar_grid = finalize_grid(acc)
+    latlon_grid = _compute_latlon_grid(acc.grid_spec)
+    moment_dict = Dict{String,Int}(name => i for (i, name) in enumerate(acc.fields))
+
+    # Reconstruct start/stop time from the recorded SweepProvenance entries.
+    start_time = nothing
+    stop_time = nothing
+    for sp in acc.sweeps
+        if sp.time_start !== nothing
+            start_time = start_time === nothing ? sp.time_start :
+                         min(start_time, sp.time_start)
+        end
+        if sp.time_end !== nothing
+            stop_time = stop_time === nothing ? sp.time_end :
+                        max(stop_time, sp.time_end)
+        end
+    end
+    start_time === nothing && (start_time = index_time)
+    stop_time === nothing && (stop_time = index_time)
+
+    shape = acc.grid_spec.shape
+    if shape === :volume_3d
+        gridpoints = _gridpoints_volume_array(acc.grid_spec)
+        write_gridded_radar_volume(output_file, index_time, start_time, stop_time,
+            gridpoints, radar_grid, latlon_grid, moment_dict,
+            acc.grid_spec.reference_latitude,
+            acc.grid_spec.reference_longitude, -9999.0)
+    elseif shape === :latlon_3d
+        gridpoints = _gridpoints_latlon_array(acc.grid_spec)
+        write_gridded_radar_volume(output_file, index_time, start_time, stop_time,
+            gridpoints, radar_grid, latlon_grid, moment_dict,
+            acc.grid_spec.reference_latitude,
+            acc.grid_spec.reference_longitude, -9999.0)
+    elseif shape === :rhi_2d
+        gridpoints = _gridpoints_rhi_array(acc.grid_spec)
+        stub = _writer_stub_from_provenance(acc)
+        write_gridded_radar_rhi(output_file, index_time, stub,
+            gridpoints, radar_grid, latlon_grid, moment_dict,
+            acc.grid_spec.reference_latitude,
+            acc.grid_spec.reference_longitude)
+    elseif shape === :ppi_2d || shape === :composite_2d
+        gridpoints = _gridpoints_ppi_array(acc.grid_spec)
+        stub = _writer_stub_from_provenance(acc)
+        write_gridded_radar_ppi(output_file, index_time, stub,
+            gridpoints, radar_grid, latlon_grid, moment_dict,
+            acc.grid_spec.reference_latitude,
+            acc.grid_spec.reference_longitude, -9999.0)
+    elseif shape === :column_1d
+        gridpoints = _gridpoints_column_array(acc.grid_spec)
+        write_gridded_radar_column(output_file, index_time, start_time, stop_time,
+            gridpoints, radar_grid, latlon_grid, moment_dict,
+            acc.grid_spec.reference_latitude,
+            acc.grid_spec.reference_longitude)
+    else
+        throw(ArgumentError("finalize_accumulator_file: unsupported shape $shape"))
+    end
+    return output_file
+end
+
+# Minimal radar-shaped stub built from accumulator provenance — gives the
+# writers `time`, `azimuth`, `scan_name` without requiring the original
+# Volume. Used when finalizing an accumulator from disk where the input
+# volumes are no longer in memory.
+function _writer_stub_from_provenance(acc::GridAccumulator)
+    times = DateTime[]
+    azimuths = Float32[]
+    scan_name = ""
+    if !isempty(acc.sweeps)
+        scan_name = acc.sweeps[1].scan_name
+        for sp in acc.sweeps
+            if sp.time_start !== nothing
+                push!(times, sp.time_start)
+            end
+            if sp.time_end !== nothing
+                push!(times, sp.time_end)
+            end
+            # Use the sweep's fixed angle direction proxy as the RHI azimuth.
+            if !isnan(sp.fixed_angle)
+                push!(azimuths, Float32(sp.fixed_angle))
+            end
+        end
+    end
+    isempty(times)    && push!(times, DateTime(2000, 1, 1))
+    isempty(azimuths) && push!(azimuths, Float32(0.0))
+
+    n = length(azimuths)
+    return radar(
+        scan_name = scan_name,
+        azimuth = Vector{Union{Missing,Float32}}(azimuths),
+        elevation = Vector{Union{Missing,Float32}}(fill(Float32(0.0), n)),
+        ew_platform = zeros(Float32, n),
+        ns_platform = zeros(Float32, n),
+        w_platform  = zeros(Float32, n),
+        nyquist_velocity = Vector{Union{Missing,Float32}}(fill(Float32(0.0), n)),
+        range = Float32[0.0],
+        time  = times,
+        latitude  = Vector{Union{Missing,Float32}}(fill(Float32(0.0), n)),
+        longitude = Vector{Union{Missing,Float32}}(fill(Float32(0.0), n)),
+        altitude  = Vector{Union{Missing,Float32}}(fill(Float32(0.0), n)),
+        fixed_angles = Vector{Union{Missing,Float32}}(azimuths),
+        swpstart = Vector{Union{Missing,Float32}}(Float32[0.0]),
+        swpend   = Vector{Union{Missing,Float32}}(Float32[Float32(n - 1)]),
+        moments  = Array{Union{Missing,Float64}}(undef, 0, 0),
+    )
+end
+
+"""
+    combine_accumulator_files(input_files, output_file) -> output_file
+
+Load all listed accumulator files (all must share a `grid_spec`) and merge
+them into a single accumulator written to `output_file`. Useful for combining
+per-sweep airborne accumulators along a leg into one accumulator before
+finalization.
+
+Fields with `field_folds=true` cannot be merged across distinct sweeps; the
+underlying `merge_accumulators!` will raise an `ArgumentError` and the caller
+must process the per-sweep files directly through the wind retrieval instead.
+"""
+function combine_accumulator_files(input_files::Vector{<:AbstractString},
+                                    output_file::AbstractString)
+    isempty(input_files) && throw(ArgumentError(
+        "combine_accumulator_files: input_files is empty"))
+    dst = load_accumulator(input_files[1])
+    for path in input_files[2:end]
+        src = load_accumulator(path)
+        merge_accumulators!(dst, src)
+    end
+    save_accumulator(output_file, dst)
+    return output_file
+end
+
 """
     finalize_grid(accum) -> Array{Float64}
 

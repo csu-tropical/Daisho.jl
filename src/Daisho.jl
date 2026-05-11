@@ -49,5 +49,6 @@ export threshold_qc!
 export GridSpec, SweepProvenance, GridAccumulator
 export save_accumulator, load_accumulator, merge_accumulators!
 export grid_sweep!, finalize_grid, build_grid_spec
+export grid_sweep_to_file, finalize_accumulator_file, combine_accumulator_files
 
 end # module Daisho
