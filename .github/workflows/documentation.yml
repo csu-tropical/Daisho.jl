@@ -26,7 +26,9 @@ jobs:
         shell: julia --color=yes --project=docs {0}
         run: |
           using Pkg
-          Pkg.develop(url="https://github.com/csu-tropical/Springsteel.jl")
+          # Daisho is unregistered, so dev the checked-out source. Springsteel
+          # is now registered (v1.0.0+), so Pkg.instantiate resolves it from
+          # the General registry along with the rest of the docs deps.
           Pkg.develop(PackageSpec(path=pwd()))
           Pkg.instantiate()
       - name: Build and deploy
