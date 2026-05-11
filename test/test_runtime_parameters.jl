@@ -180,4 +180,71 @@
         @test_throws ErrorException p.qc = QCParameters()
     end
 
+    @testset "Metadata defaults populate every CF global attr slot" begin
+        p = DaishoParameters()
+        m = p.grid.metadata
+        @test m isa MetadataParameters
+        # CF conventions header.
+        @test m.Conventions == "CF-1.12"
+        # Daisho default identity — kept identical to historical hard-coded
+        # values so behavior is unchanged when a user supplies no overrides.
+        @test m.institution == "Colorado State University"
+        @test m.creator_name == "Michael M. Bell"
+        @test m.creator_email == "mmbell@colostate.edu"
+        @test m.platform == "RV METEOR"
+        @test m.processing_level == "Level 4"
+        @test m.license == "CC-BY-4.0"
+        # Optional slot: empty by default, opted-in via TOML.
+        @test m.references == ""
+    end
+
+    @testset "Metadata overrides via [grid.metadata] TOML" begin
+        mktemp() do path, io
+            write(io, """
+                [grid.metadata]
+                source           = "NCAR S-PolKa radar"
+                instrument       = "S-PolKa"
+                title            = "Level 4 Gridded S-PolKa Radar Data"
+                summary          = "Level 4 Gridded S-PolKa Radar Data"
+                project          = "DYNAMO"
+                platform         = "Addu Atoll"
+                creator_name     = "Jane Doe"
+                creator_email    = "jane.doe@example.org"
+                creator_id       = "https://orcid.org/0000-0001-0000-0000"
+                keywords         = "radar, precipitation, spolka"
+                references       = "https://doi.org/10.0000/example"
+                """)
+            close(io)
+            p = DaishoParameters(path)
+            m = p.grid.metadata
+            # Overridden fields.
+            @test m.source == "NCAR S-PolKa radar"
+            @test m.instrument == "S-PolKa"
+            @test m.title == "Level 4 Gridded S-PolKa Radar Data"
+            @test m.summary == "Level 4 Gridded S-PolKa Radar Data"
+            @test m.project == "DYNAMO"
+            @test m.platform == "Addu Atoll"
+            @test m.creator_name == "Jane Doe"
+            @test m.creator_email == "jane.doe@example.org"
+            @test m.creator_id == "https://orcid.org/0000-0001-0000-0000"
+            @test m.keywords == "radar, precipitation, spolka"
+            @test m.references == "https://doi.org/10.0000/example"
+            # Untouched defaults still present.
+            @test m.Conventions == "CF-1.12"
+            @test m.institution == "Colorado State University"
+            @test m.license == "CC-BY-4.0"
+        end
+    end
+
+    @testset "Unknown [grid.metadata] keys raise ArgumentError" begin
+        mktemp() do path, io
+            write(io, """
+                [grid.metadata]
+                not_a_global_attr = "oops"
+                """)
+            close(io)
+            @test_throws ArgumentError DaishoParameters(path)
+        end
+    end
+
 end

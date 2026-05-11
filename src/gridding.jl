@@ -323,7 +323,7 @@ function appx_inverse_projection(reference_latitude::AbstractFloat, reference_lo
 end
 
 """
-    grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+    grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar volume scan onto a 3D Cartesian grid and write the result to a NetCDF file.
 
@@ -351,10 +351,12 @@ writes the output via `write_gridded_radar_volume`.
 - `missing_key`: Moment name used to determine if a gate has valid signal (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
 - `heading`: Mean heading of the platform in degrees (default `-9999.0` for missing).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, beam_inflation, power_threshold,
-        missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+        missing_key="SQI", valid_key="DBZ", heading=-9999.0,
+        metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
@@ -373,12 +375,12 @@ function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_fil
 
     write_gridded_radar_volume(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude, heading)
+        reference_latitude, reference_longitude, heading, metadata)
 
 end
 
 """
-    grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+    grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar volume scan onto a 3D latitude-longitude grid and write the result to a NetCDF file.
 
@@ -405,10 +407,12 @@ grid increment. Horizontal radius of influence is computed from the degree incre
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
 - `heading`: Mean heading of the platform in degrees (default `-9999.0` for missing).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
     lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, beam_inflation, power_threshold,
-    missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+    missing_key="SQI", valid_key="DBZ", heading=-9999.0,
+    metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     #reference_latitude = latmin + Int64(round(latdim/2)) * degincr
@@ -439,12 +443,12 @@ function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, out
 
     write_gridded_radar_volume(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude, heading)
+        reference_latitude, reference_longitude, heading, metadata)
 
 end
 
 """
-    grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ")
+    grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
 
 Grid a radar RHI (Range-Height Indicator) scan onto a 2D range-height grid and write to a NetCDF file.
 
@@ -467,10 +471,12 @@ the output via `write_gridded_radar_rhi`.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key::String`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name used for valid-data gating (default `"DBZ"`).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, beam_inflation, power_threshold,
-        missing_key::String="SQI", valid_key::String="DBZ")
+        missing_key::String="SQI", valid_key::String="DBZ",
+        metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
@@ -488,12 +494,12 @@ function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, 
 
     write_gridded_radar_rhi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude)
+        reference_latitude, reference_longitude, metadata)
 
 end
 
 """
-    grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+    grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar PPI (Plan Position Indicator) scan onto a 2D Cartesian grid and write to a NetCDF file.
 
@@ -517,10 +523,12 @@ via `write_gridded_radar_ppi`.
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
 - `heading`: Mean heading of the platform in degrees (default `-9999.0` for missing).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, power_threshold,
-        missing_key="SQI", valid_key="DBZ", heading=-9999.0)
+        missing_key="SQI", valid_key="DBZ", heading=-9999.0,
+        metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
@@ -537,12 +545,12 @@ function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, 
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude, heading)
+        reference_latitude, reference_longitude, heading, metadata)
 
 end
 
 """
-    grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0)
+    grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar composite (column-maximum) onto a 2D Cartesian grid and write to a NetCDF file.
 
@@ -565,10 +573,12 @@ at each horizontal grid point across all elevations. The output is written via `
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
 - `mean_heading`: Mean heading of the platform in degrees (default `-9999.0` for missing).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation,
-        missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0)
+        missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0,
+        metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
@@ -585,12 +595,12 @@ function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude, mean_heading)
+        reference_latitude, reference_longitude, mean_heading, metadata)
 
 end
 
 """
-    grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time, column_zmin, column_zincr, column_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ")
+    grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time, column_zmin, column_zincr, column_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
 
 Grid a radar volume into a single vertical column profile and write to a NetCDF file.
 
@@ -611,10 +621,12 @@ profile directly above the radar.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key::String`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name used for valid-data gating (default `"DBZ"`).
+- `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
     column_zmin, column_zincr, column_zdim, beam_inflation, power_threshold,
-    missing_key::String="SQI", valid_key::String="DBZ")
+    missing_key::String="SQI", valid_key::String="DBZ",
+    metadata::MetadataParameters=MetadataParameters())
 
     # Set the reference to the first location in the volume, but could be a parameter
     reference_latitude = radar_volume.latitude[1]
@@ -631,7 +643,7 @@ function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_fil
 
     write_gridded_radar_column(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude)
+        reference_latitude, reference_longitude, metadata)
 
 end
 
@@ -1486,8 +1498,40 @@ function grid_column(reference_latitude::AbstractFloat, reference_longitude::Abs
     return radar_grid, latlon_grid
 end
 
+# Build the CF-1.12 global-attribute OrderedDict for a gridded output from a
+# user-supplied `MetadataParameters`. `extra` lets a writer append shape-
+# specific attrs (e.g., `scan_name` for PPI). `references` is omitted when
+# empty, preserving the pre-Issue-#1 behavior of leaving it unwritten unless
+# the user opted in.
+function _global_attrib_dict(m::MetadataParameters; extra=Pair{String,Any}[])
+    attrs = OrderedDict{String,Any}(
+        "Conventions"      => m.Conventions,
+        "history"          => m.history,
+        "institution"      => m.institution,
+        "source"           => m.source,
+        "instrument"       => m.instrument,
+        "title"            => m.title,
+        "summary"          => m.summary,
+        "creator_name"     => m.creator_name,
+        "creator_email"    => m.creator_email,
+        "creator_id"       => m.creator_id,
+        "project"          => m.project,
+        "platform"         => m.platform,
+        "keywords"         => m.keywords,
+        "processing_level" => m.processing_level,
+        "license"          => m.license,
+    )
+    if !isempty(m.references)
+        attrs["references"] = m.references
+    end
+    for kv in extra
+        attrs[String(first(kv))] = last(kv)
+    end
+    return attrs
+end
+
 """
-    write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading)
+    write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading, metadata=MetadataParameters())
 
 Write a gridded 3D radar volume to a CF-1.12 compliant NetCDF file.
 
@@ -1507,30 +1551,14 @@ pre-existing file at the output path is deleted first.
 - `reference_latitude::AbstractFloat`: Latitude of the projection origin (degrees).
 - `reference_longitude::AbstractFloat`: Longitude of the projection origin (degrees).
 - `mean_heading::AbstractFloat`: Mean platform heading in degrees.
+- `metadata::MetadataParameters`: CF-1.12 global attributes (institution, creator, project, platform, …). Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat)
+function write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
 
     # Delete any pre-existing file
     rm(file, force=true)
 
-    ds = NCDataset(file,"c", attrib = OrderedDict(
-        "Conventions"               => "CF-1.12",
-        "history"                   => "v1.0",
-        "institution"               => "Colorado State University",
-        "source"                    => "CSU SEA-POL radar",
-        "instrument"                => "SEA-POL",
-        "title"                     => "Level 4 Gridded SEA-POL Radar Data",
-        "summary"                   => "Level 4 Gridded SEA-POL Radar Data",
-        "creator_name"              => "Michael M. Bell",
-        "creator_email"             => "mmbell@colostate.edu",
-        "creator_id"                => "https://orcid.org/0000-0002-0496-331X",
-        "project"                   => "PICCOLO, BOWTIE, ORCESTRA",
-        "platform"                  => "RV METEOR",
-        #"references"                => "Comma-separated list of URL/DOI to extended information",
-        "keywords"                  => "radar, precipitation, sea-pol",
-        "processing_level"          => "Level 4",
-        "license"                   => "CC-BY-4.0",
-    ))
+    ds = NCDataset(file, "c", attrib = _global_attrib_dict(metadata))
 
     # Dimensions
     # Could concatenate multiple volumes here
@@ -1644,7 +1672,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
 end
 
 """
-    write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude)
+    write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, metadata=MetadataParameters())
 
 Write a gridded 2D RHI (range-height) radar scan to a CF-1.12 compliant NetCDF file.
 
@@ -1662,8 +1690,9 @@ azimuth angle, and all radar moment variables. Any pre-existing file at the outp
 - `moment_dict`: Dictionary mapping moment names to integer indices.
 - `reference_latitude::AbstractFloat`: Latitude of the projection origin (degrees).
 - `reference_longitude::AbstractFloat`: Longitude of the projection origin (degrees).
+- `metadata::MetadataParameters`: CF-1.12 global attributes. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat)
+function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1672,24 +1701,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     stop_time = radar_volume.time[end]
     azimuth = radar_volume.azimuth[1]
 
-    ds = NCDataset(file,"c", attrib = OrderedDict(
-        "Conventions"               => "CF-1.12",
-        "history"                   => "v1.0",
-        "institution"               => "Colorado State University",
-        "source"                    => "CSU SEA-POL radar",
-        "instrument"                => "SEA-POL",
-        "title"                     => "Level 4 Gridded SEA-POL Radar Data",
-        "summary"                   => "Level 4 Gridded SEA-POL Radar Data",
-        "creator_name"              => "Michael M. Bell",
-        "creator_email"             => "mmbell@colostate.edu",
-        "creator_id"                => "https://orcid.org/0000-0002-0496-331X",
-        "project"                   => "PICCOLO, BOWTIE, ORCESTRA",
-        "platform"                  => "RV METEOR",
-        #"references"                => "Comma-separated list of URL/DOI to extended information",
-        "keywords"                  => "radar, precipitation, sea-pol",
-        "processing_level"          => "Level 4",
-        "license"                   => "CC-BY-4.0",
-    ))
+    ds = NCDataset(file, "c", attrib = _global_attrib_dict(metadata))
 
     # Dimensions
     # Could concatenate multiple volumes here
@@ -1795,7 +1807,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
 end
 
 """
-    write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading)
+    write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading, metadata=MetadataParameters())
 
 Write a gridded 2D PPI (plan position indicator) radar scan to a CF-1.12 compliant NetCDF file.
 
@@ -1814,8 +1826,9 @@ Also used for writing composite grids. Any pre-existing file at the output path 
 - `reference_latitude::AbstractFloat`: Latitude of the projection origin (degrees).
 - `reference_longitude::AbstractFloat`: Longitude of the projection origin (degrees).
 - `mean_heading::AbstractFloat`: Mean platform heading in degrees.
+- `metadata::MetadataParameters`: CF-1.12 global attributes. The PPI writer also injects `scan_name` from `radar_volume`. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat)
+function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1824,25 +1837,8 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     stop_time = radar_volume.time[end]
     scan_name = radar_volume.scan_name
 
-    ds = NCDataset(file,"c", attrib = OrderedDict(
-        "Conventions"               => "CF-1.12",
-        "history"                   => "v1.0",
-        "institution"               => "Colorado State University",
-        "source"                    => "CSU SEA-POL radar",
-        "instrument"                => "SEA-POL",
-        "title"                     => "Level 4 Gridded SEA-POL Radar Data",
-        "summary"                   => "Level 4 Gridded SEA-POL Radar Data",
-        "creator_name"              => "Michael M. Bell",
-        "creator_email"             => "mmbell@colostate.edu",
-        "creator_id"                => "https://orcid.org/0000-0002-0496-331X",
-        "project"                   => "PICCOLO, BOWTIE, ORCESTRA",
-        "platform"                  => "RV METEOR",
-        #"references"                => "Comma-separated list of URL/DOI to extended information",
-        "keywords"                  => "radar, precipitation, sea-pol",
-        "processing_level"          => "Level 4",
-        "license"                   => "CC-BY-4.0",
-	"scan_name"                 => scan_name
-    ))
+    ds = NCDataset(file, "c",
+        attrib = _global_attrib_dict(metadata; extra=["scan_name" => scan_name]))
 
     # Dimensions
     # Could concatenate multiple volumes here
@@ -1947,7 +1943,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
 end
 
 """
-    write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude)
+    write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, metadata=MetadataParameters())
 
 Write a gridded 1D vertical column profile to a CF-1.12 compliant NetCDF file.
 
@@ -1966,30 +1962,14 @@ radar moment variables. Any pre-existing file at the output path is deleted firs
 - `moment_dict`: Dictionary mapping moment names to integer indices.
 - `reference_latitude::AbstractFloat`: Latitude of the column location (degrees).
 - `reference_longitude::AbstractFloat`: Longitude of the column location (degrees).
+- `metadata::MetadataParameters`: CF-1.12 global attributes. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat)
+function write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
 
     # Delete any pre-existing file
     rm(file, force=true)
 
-    ds = NCDataset(file,"c", attrib = OrderedDict(
-        "Conventions"               => "CF-1.12",
-        "history"                   => "v1.0",
-        "institution"               => "Colorado State University",
-        "source"                    => "CSU SEA-POL radar",
-        "instrument"                => "SEA-POL",
-        "title"                     => "Level 4 Gridded SEA-POL Radar Data",
-        "summary"                   => "Level 4 Gridded SEA-POL Radar Data",
-        "creator_name"              => "Michael M. Bell",
-        "creator_email"             => "mmbell@colostate.edu",
-        "creator_id"                => "https://orcid.org/0000-0002-0496-331X",
-        "project"                   => "PICCOLO, BOWTIE, ORCESTRA",
-        "platform"                  => "RV METEOR",
-        #"references"                => "Comma-separated list of URL/DOI to extended information",
-        "keywords"                  => "radar, precipitation, sea-pol",
-        "processing_level"          => "Level 4",
-        "license"                   => "CC-BY-4.0",
-    ))
+    ds = NCDataset(file, "c", attrib = _global_attrib_dict(metadata))
 
     # Dimensions
     # Could concatenate multiple volumes here
@@ -2298,7 +2278,8 @@ function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
     grid_radar_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        p.grid.metadata)
 end
 
 """
@@ -2314,7 +2295,8 @@ function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractStri
         output_file, index_time,
         g.lonmin, g.londim, g.latmin, g.latdim, g.degincr,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        p.grid.metadata)
 end
 
 """
@@ -2328,7 +2310,8 @@ function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
     grid_radar_rhi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key,
+        p.grid.metadata)
 end
 
 """
@@ -2344,7 +2327,8 @@ function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
     grid_radar_ppi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading)
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        p.grid.metadata)
 end
 
 """
@@ -2360,7 +2344,8 @@ function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
     grid_radar_composite(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, gd.missing_key, gd.valid_key, mean_heading)
+        gd.beam_inflation, gd.missing_key, gd.valid_key, mean_heading,
+        p.grid.metadata)
 end
 
 """
@@ -2375,7 +2360,8 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
     grid_radar_column(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
+        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key,
+        p.grid.metadata)
 end
 
 # ── Volume-aware overloads (accumulator path) ────────────────────────────────
@@ -2397,7 +2383,8 @@ function grid_radar_volume(volume::Volume, output_file::AbstractString,
     write_gridded_radar_volume(output_file, index_time,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+        spec.reference_latitude, spec.reference_longitude, Float64(heading),
+        p.grid.metadata)
     return accum
 end
 
@@ -2414,7 +2401,8 @@ function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
     write_gridded_radar_volume(output_file, index_time,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+        spec.reference_latitude, spec.reference_longitude, Float64(heading),
+        p.grid.metadata)
     return accum
 end
 
@@ -2430,7 +2418,7 @@ function grid_radar_rhi(volume::Volume, output_file::AbstractString,
     gridpoints = _gridpoints_rhi_array(spec)
     write_gridded_radar_rhi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude)
+        spec.reference_latitude, spec.reference_longitude, p.grid.metadata)
     return accum
 end
 
@@ -2446,7 +2434,8 @@ function grid_radar_ppi(volume::Volume, output_file::AbstractString,
     gridpoints = _gridpoints_ppi_array(spec)
     write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+        spec.reference_latitude, spec.reference_longitude, Float64(heading),
+        p.grid.metadata)
     return accum
 end
 
@@ -2462,7 +2451,8 @@ function grid_radar_composite(volume::Volume, output_file::AbstractString,
     gridpoints = _gridpoints_ppi_array(spec)
     write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, Float64(mean_heading))
+        spec.reference_latitude, spec.reference_longitude, Float64(mean_heading),
+        p.grid.metadata)
     return accum
 end
 
@@ -2479,6 +2469,6 @@ function grid_radar_column(volume::Volume, output_file::AbstractString,
     write_gridded_radar_column(output_file, index_time,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude)
+        spec.reference_latitude, spec.reference_longitude, p.grid.metadata)
     return accum
 end

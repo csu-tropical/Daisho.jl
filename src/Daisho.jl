@@ -31,6 +31,7 @@ export DaishoParameters
 export MomentParameters, QCParameters, GriddingParameters
 export GridParameters, CartesianGridParameters, LatLonGridParameters
 export RhiGridParameters, SpectralGridParameters, SpectralBCParameters
+export MetadataParameters
 export IOParameters
 
 # CfRadial 2.1 data model

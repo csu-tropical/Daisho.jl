@@ -180,17 +180,76 @@ Base.@kwdef struct SpectralGridParameters
 end
 
 """
+    MetadataParameters
+
+CF-1.12 global attributes written to every gridded NetCDF output. Override
+per-deployment in a user TOML under `[grid.metadata]`; defaults match the
+historical hard-coded SEA-POL identity so existing workflows are unaffected.
+
+# Fields
+- `Conventions::String`: CF metadata conventions version.
+- `history::String`: provenance string written into the file.
+- `institution::String`: producing institution.
+- `source::String`: producing instrument / platform identifier.
+- `instrument::String`: short instrument name (e.g., `"SEA-POL"`).
+- `title::String`: dataset title.
+- `summary::String`: longer-form summary (often equal to `title`).
+- `creator_name::String`: data creator's name.
+- `creator_email::String`: data creator's email address.
+- `creator_id::String`: data creator's identifier (e.g., ORCID URL).
+- `project::String`: associated field projects, comma-separated.
+- `platform::String`: hosting platform (vessel, aircraft, fixed site).
+- `keywords::String`: comma-separated CF/ACDD keywords.
+- `processing_level::String`: ACDD processing level (e.g., `"Level 4"`).
+- `license::String`: data license (e.g., `"CC-BY-4.0"`).
+- `references::String`: optional URL/DOI list. Empty by default and only
+  emitted as a NetCDF global attribute when explicitly set.
+
+# Examples
+```toml
+[grid.metadata]
+source        = "NCAR S-PolKa radar"
+instrument    = "S-PolKa"
+title         = "Level 4 Gridded S-PolKa Radar Data"
+creator_name  = "Jane Doe"
+creator_email = "jane.doe@example.org"
+project       = "DYNAMO"
+platform      = "Addu Atoll"
+references    = "https://doi.org/10.0000/example"
+```
+"""
+Base.@kwdef struct MetadataParameters
+    Conventions::String       = "CF-1.12"
+    history::String           = "v1.0"
+    institution::String       = "Colorado State University"
+    source::String            = "CSU SEA-POL radar"
+    instrument::String        = "SEA-POL"
+    title::String             = "Level 4 Gridded SEA-POL Radar Data"
+    summary::String           = "Level 4 Gridded SEA-POL Radar Data"
+    creator_name::String      = "Michael M. Bell"
+    creator_email::String     = "mmbell@colostate.edu"
+    creator_id::String        = "https://orcid.org/0000-0002-0496-331X"
+    project::String           = "PICCOLO, BOWTIE, ORCESTRA"
+    platform::String          = "RV METEOR"
+    keywords::String          = "radar, precipitation, sea-pol"
+    processing_level::String  = "Level 4"
+    license::String           = "CC-BY-4.0"
+    references::String        = ""
+end
+
+"""
     GridParameters
 
-Aggregates the four spatial-grid sub-specs. Pull out the one matching the
-gridding driver you are calling (e.g., `p.grid.cartesian` for
-`grid_radar_volume`).
+Aggregates the spatial-grid sub-specs plus the NetCDF metadata block. Pull
+out the one matching the gridding driver you are calling (e.g.,
+`p.grid.cartesian` for `grid_radar_volume`).
 """
 Base.@kwdef struct GridParameters
     cartesian::CartesianGridParameters = CartesianGridParameters()
     latlon::LatLonGridParameters       = LatLonGridParameters()
     rhi::RhiGridParameters             = RhiGridParameters()
     spectral::SpectralGridParameters   = SpectralGridParameters()
+    metadata::MetadataParameters       = MetadataParameters()
 end
 
 """
@@ -359,7 +418,9 @@ function _grid_from_dict(d::AbstractDict)
     latlon    = _struct_from_dict(LatLonGridParameters,    _section(d, "latlon"))
     rhi       = _struct_from_dict(RhiGridParameters,       _section(d, "rhi"))
     spectral  = _spectral_from_dict(_section(d, "spectral"))
-    return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi, spectral=spectral)
+    metadata  = _struct_from_dict(MetadataParameters,      _section(d, "metadata"))
+    return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi,
+                          spectral=spectral, metadata=metadata)
 end
 
 function _spectral_from_dict(d::AbstractDict)

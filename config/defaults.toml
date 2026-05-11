@@ -13,6 +13,7 @@
 #   [grid.rhi]             -> p.grid.rhi
 #   [grid.spectral]        -> p.grid.spectral
 #   [grid.spectral.bc.*]   -> p.grid.spectral.bc.*  (sub-table per axis side)
+#   [grid.metadata]        -> p.grid.metadata  (CF global attrs for outputs)
 #   [io]                   -> p.io
 
 [fields]
@@ -103,6 +104,28 @@ type = "natural"
 type = "natural"
 [grid.spectral.bc.zR]
 type = "natural"
+
+# CF-1.12 global attributes copied into every gridded NetCDF output.
+# Override per-deployment in a user TOML; defaults below match historical
+# SEA-POL identity so existing workflows are unaffected. The `references`
+# slot is empty by default and only written to the file when set here.
+[grid.metadata]
+Conventions      = "CF-1.12"
+history          = "v1.0"
+institution      = "Colorado State University"
+source           = "CSU SEA-POL radar"
+instrument       = "SEA-POL"
+title            = "Level 4 Gridded SEA-POL Radar Data"
+summary          = "Level 4 Gridded SEA-POL Radar Data"
+creator_name     = "Michael M. Bell"
+creator_email    = "mmbell@colostate.edu"
+creator_id       = "https://orcid.org/0000-0002-0496-331X"
+project          = "PICCOLO, BOWTIE, ORCESTRA"
+platform         = "RV METEOR"
+keywords         = "radar, precipitation, sea-pol"
+processing_level = "Level 4"
+license          = "CC-BY-4.0"
+references       = ""
 
 [io]
 fill_value_missing = -32768.0   # true missing — no radar coverage

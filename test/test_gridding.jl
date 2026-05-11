@@ -280,6 +280,111 @@
         end
     end
 
+    @testset "User TOML metadata propagates to NetCDF global attrs" begin
+        # Each writer must source CF global attributes (Issue #1) from
+        # `p.grid.metadata`, not hard-coded SEA-POL strings. We override a
+        # handful of fields and check they reach disk for every shape.
+        p_default = DaishoParameters()
+        small_cart = Daisho.CartesianGridParameters(
+            xmin = -2000.0, xincr = 1000.0, xdim = 5,
+            ymin = -2000.0, yincr = 1000.0, ydim = 5,
+            zmin = 500.0, zincr = 500.0, zdim = 3)
+        small_latlon = Daisho.LatLonGridParameters(
+            lonmin = -0.05, londim = 5,
+            latmin = -0.05, latdim = 5,
+            degincr = 0.025,
+            zmin = 500.0, zincr = 500.0, zdim = 3)
+        small_rhi = Daisho.RhiGridParameters(
+            rmin = 0.0, rincr = 500.0, rdim = 7,
+            zmin = 0.0, zincr = 500.0, zdim = 4)
+        custom_md = MetadataParameters(
+            source         = "TestCorp TestRadar",
+            instrument     = "TESTBAND",
+            title          = "Test Gridded Radar Data",
+            summary        = "Test Gridded Radar Data",
+            creator_name   = "Test Author",
+            creator_email  = "test@example.org",
+            project        = "TESTPROJ",
+            platform       = "Test Platform",
+            keywords       = "radar, test",
+            references     = "https://example.org/refs",
+        )
+        p = Daisho.DaishoParameters(p_default.moments, p_default.qc,
+            p_default.gridding,
+            Daisho.GridParameters(cartesian = small_cart,
+                                  latlon = small_latlon,
+                                  rhi = small_rhi,
+                                  spectral = p_default.grid.spectral,
+                                  metadata = custom_md),
+            p_default.io)
+        v = synthetic_volume(n_sweeps = 2, n_rays = 24, n_gates = 6)
+        for (shape, driver) in (
+            (:volume_3d,    Daisho.grid_radar_volume),
+            (:latlon_3d,    Daisho.grid_radar_latlon_volume),
+            (:ppi_2d,       Daisho.grid_radar_ppi),
+            (:composite_2d, Daisho.grid_radar_composite),
+            (:column_1d,    Daisho.grid_radar_column),
+            (:rhi_2d,       Daisho.grid_radar_rhi),
+        )
+            outfile = tempname() * "_md_" * String(shape) * ".nc"
+            try
+                driver(v, outfile, v.time_coverage_start, p)
+                ds = NCDataset(outfile, "r")
+                try
+                    @test ds.attrib["source"]        == "TestCorp TestRadar"
+                    @test ds.attrib["instrument"]    == "TESTBAND"
+                    @test ds.attrib["title"]         == "Test Gridded Radar Data"
+                    @test ds.attrib["creator_name"]  == "Test Author"
+                    @test ds.attrib["creator_email"] == "test@example.org"
+                    @test ds.attrib["project"]       == "TESTPROJ"
+                    @test ds.attrib["platform"]      == "Test Platform"
+                    @test ds.attrib["keywords"]      == "radar, test"
+                    @test ds.attrib["references"]    == "https://example.org/refs"
+                    # Untouched defaults still arrive on disk.
+                    @test ds.attrib["Conventions"]   == "CF-1.12"
+                    @test ds.attrib["institution"]   == "Colorado State University"
+                    @test ds.attrib["license"]       == "CC-BY-4.0"
+                finally
+                    close(ds)
+                end
+            finally
+                isfile(outfile) && rm(outfile)
+            end
+        end
+    end
+
+    @testset "Default metadata omits unset references attr" begin
+        # `references` defaults to "" — historically commented out — and
+        # should not appear in the output file unless the user opts in.
+        p_default = DaishoParameters()
+        small_cart = Daisho.CartesianGridParameters(
+            xmin = -2000.0, xincr = 1000.0, xdim = 5,
+            ymin = -2000.0, yincr = 1000.0, ydim = 5,
+            zmin = 500.0, zincr = 500.0, zdim = 3)
+        p = Daisho.DaishoParameters(p_default.moments, p_default.qc,
+            p_default.gridding,
+            Daisho.GridParameters(cartesian = small_cart,
+                                  latlon = p_default.grid.latlon,
+                                  rhi = p_default.grid.rhi,
+                                  spectral = p_default.grid.spectral,
+                                  metadata = p_default.grid.metadata),
+            p_default.io)
+        v = synthetic_volume(n_sweeps = 1, n_rays = 12, n_gates = 4)
+        outfile = tempname() * "_md_default.nc"
+        try
+            Daisho.grid_radar_volume(v, outfile, v.time_coverage_start, p)
+            ds = NCDataset(outfile, "r")
+            try
+                @test !haskey(ds.attrib, "references")
+                @test ds.attrib["creator_name"] == "Michael M. Bell"
+            finally
+                close(ds)
+            end
+        finally
+            isfile(outfile) && rm(outfile)
+        end
+    end
+
     @testset "SEAPOL fixture smoke test (volume gridding)" begin
         # Only runs if the v1 fixture is available; CI on a minimal install
         # may skip it.
