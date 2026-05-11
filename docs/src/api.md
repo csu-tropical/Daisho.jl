@@ -73,6 +73,7 @@ Daisho.smooth_sqi
 
 ```@docs
 Daisho.initialize_regular_grid
+Daisho.appx_inverse_projection
 ```
 
 ### High-Level Gridding (Volume-typed)
@@ -93,6 +94,15 @@ Daisho.grid_radar_volume_spectral
 Daisho.grid_radar_ppi_spectral
 Daisho.grid_radar_column_spectral
 Daisho.create_radar_grid
+```
+
+### Spectral Helpers
+
+```@docs
+Daisho.get_springsteel_gridpoints_zyx
+Daisho.populate_physical!
+Daisho.write_radar_netcdf
+Daisho.radar_global_attributes
 ```
 
 ### Core Gridding Algorithms

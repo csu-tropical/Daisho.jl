@@ -47,7 +47,7 @@ Daisho.grid_radar_volume(volume, qc_dict, grid_dict, "output.nc", volume.time[1]
 
 ## Package Structure
 
-- [`radar`](@ref): Core data structure for radar volumes
+- [`Volume`](@ref Daisho.Volume): Core data structure for radar volumes
 - [Radar I/O](guide/radar_io.md): Reading and writing CfRadial data
 - [Quality Control](guide/quality_control.md): QC workflow and functions
 - [Gridding](guide/gridding.md): Gridding algorithms and options

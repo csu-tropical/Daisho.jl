@@ -14,7 +14,7 @@ moment_dict = Dict("DBZ" => 1, "VEL" => 2, "WIDTH" => 3)
 volume = Daisho.read_cfradial("path/to/cfradial.nc", moment_dict)
 ```
 
-The returned [`Daisho.radar`](@ref) struct contains all the data from the file, including:
+The returned `Daisho.radar` struct contains all the data from the file, including:
 - Azimuth, elevation, and range arrays
 - Platform motion vectors (for moving platforms)
 - Nyquist velocity
@@ -24,7 +24,7 @@ The returned [`Daisho.radar`](@ref) struct contains all the data from the file, 
 
 ## The `radar` Struct
 
-The [`Daisho.radar`](@ref) struct is the core data container. Moments are stored as a 2D array where rows correspond to range gates across all rays (flattened) and columns correspond to different radar variables.
+The `Daisho.radar` struct is the core data container. Moments are stored as a 2D array where rows correspond to range gates across all rays (flattened) and columns correspond to different radar variables.
 
 ## Moment Dictionaries
 
@@ -45,12 +45,7 @@ Grid types determine how moments are interpolated during gridding:
 
 ## Writing QC'd CfRadial Files
 
-After quality control, write the QC'd data back to CfRadial format. Several variants are available for different radar configurations:
-
-- [`Daisho.write_qced_cfradial_sigmet`](@ref) - SIGMET radar systems
-- [`Daisho.write_qced_cfradial_singlepol`](@ref) - Single-polarization radars
-- [`Daisho.write_qced_cfradial_dualpol`](@ref) - Dual-polarization radars
-- [`Daisho.write_qced_cfradial_P3`](@ref) - NOAA P-3 airborne radar
+After quality control, write the QC'd data back to CfRadial format with [`Daisho.write_cfradial`](@ref). The CfRadial 2.1 refactor unified the per-radar variants (SIGMET, single-/dual-pol, P-3) into this single `Volume`-based writer.
 
 ## Splitting Sweeps
 
