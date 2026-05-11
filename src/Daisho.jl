@@ -7,6 +7,7 @@ using DataStructures
 using NearestNeighbors, Distances
 using CoordRefSystems, Unitful
 using Springsteel
+using JLD2
 
 # Constants
 const Reff = 4.0 * 6371000.0 / 3.0
@@ -21,6 +22,7 @@ include("cfradial_validate.jl")
 include("cfradial_bridge.jl")
 include("SRTM.jl")
 include("qualitycontrol.jl")
+include("grid_accumulator.jl")
 include("gridding.jl")
 include("springsteel_adapter.jl")
 
@@ -42,5 +44,9 @@ export read_cfradial, write_cfradial, update_cfradial
 export validate_spec, ValidationReport
 export as_legacy_radar, as_volume
 export threshold_qc!
+
+# Grid accumulator (multi-sweep / multi-file gridding workflow)
+export GridSpec, SweepProvenance, GridAccumulator
+export save_accumulator, load_accumulator, merge_accumulators!
 
 end # module Daisho

@@ -25,4 +25,5 @@ include("test_helpers.jl")
     include("test_cfradial_writer.jl")
     include("test_cfradial_validate.jl")
     include("test_cfradial_bridge.jl")
+    include("test_grid_accumulator.jl")
 end
