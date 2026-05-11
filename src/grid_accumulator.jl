@@ -247,3 +247,857 @@ function merge_accumulators!(dst::GridAccumulator, src::GridAccumulator)
     append!(dst.sweeps, src.sweeps)
     return dst
 end
+
+# ── Per-sweep geometry helpers ───────────────────────────────────────────────
+
+# Resolve the per-ray (lat, lon, alt) for a sweep. Mobile platforms have a
+# Georeference; stationary platforms broadcast the volume-level reference.
+function _sweep_ray_positions(sweep::SweepGroup,
+                              ref_latitude::Float64,
+                              ref_longitude::Float64,
+                              ref_altitude::Float64)
+    n = n_rays(sweep)
+    if sweep.georeference !== nothing && length(sweep.georeference.latitude) == n
+        return (collect(Float64, sweep.georeference.latitude),
+                collect(Float64, sweep.georeference.longitude),
+                collect(Float64, sweep.georeference.altitude))
+    else
+        return (fill(ref_latitude, n), fill(ref_longitude, n), fill(ref_altitude, n))
+    end
+end
+
+# Per-sweep analog of `radar_arrays`. Returns `(grid_origin, radar_zyx, beams)`
+# where `radar_zyx[idx]` and `beams[idx, :]` use the flat
+# `idx = (ray - 1) * n_gates + gate` layout (column-major, matching legacy).
+function _sweep_zyx_and_beams(sweep::SweepGroup,
+                               ref_latitude::Float64,
+                               ref_longitude::Float64,
+                               ref_altitude::Float64,
+                               projection)
+    n_gates_s = length(sweep.range)
+    n_rays_s  = n_rays(sweep)
+
+    lats, lons, alts = _sweep_ray_positions(sweep, ref_latitude, ref_longitude, ref_altitude)
+    radar_loc = convert.(projection, LatLon.(lats, lons))
+    beam_origin = [ [alts[i],
+                     Float64(ustrip(radar_loc[i].y)),
+                     Float64(ustrip(radar_loc[i].x))]  for i in eachindex(radar_loc) ]
+    # Layout: radar_zyx[gate, ray] = beam_origin[ray]. Column-major flat index
+    # `(gate, ray) → idx = (ray-1)*n_gates + gate` matches the legacy bridge.
+    radar_zyx = [ zyx for _ in sweep.range, zyx in beam_origin ]
+
+    beams = [ (deg2rad(sweep.azimuth[j]),
+               deg2rad(sweep.elevation[j]),
+               sweep.range[i],
+               beam_height(sweep.range[i], sweep.elevation[j], alts[j]))
+              for i in eachindex(sweep.range), j in eachindex(sweep.elevation) ]
+    beams = [ beams[i][k] for i in eachindex(beams), k in 1:4 ]
+
+    grid_origin = convert(projection, LatLon(ref_latitude, ref_longitude))
+    return grid_origin, radar_zyx, beams, n_gates_s, n_rays_s
+end
+
+# Horizontal-plane BallTree on (y, x) surface positions of every gate.
+function _sweep_balltree_yx(radar_zyx::AbstractArray, beams::AbstractArray)
+    n = size(beams, 1)
+    gate_yx = zeros(Float64, 2, n)
+    for i in 1:n
+        surface_range = Reff * asin(beams[i, 3] * cos(beams[i, 2]) / (Reff + beams[i, 4]))
+        gate_yx[1, i] = radar_zyx[i][2] + surface_range * cos(beams[i, 1])
+        gate_yx[2, i] = radar_zyx[i][3] + surface_range * sin(beams[i, 1])
+    end
+    return BallTree(gate_yx)
+end
+
+# 1D radial BallTree on surface distance from the reference origin.
+function _sweep_balltree_r(radar_zyx::AbstractArray, beams::AbstractArray)
+    n = size(beams, 1)
+    gate_r = zeros(Float64, 1, n)
+    for i in 1:n
+        surface_range = Reff * asin(beams[i, 3] * cos(beams[i, 2]) / (Reff + beams[i, 4]))
+        y = radar_zyx[i][2] + surface_range * cos(beams[i, 1])
+        x = radar_zyx[i][3] + surface_range * sin(beams[i, 1])
+        gate_r[i] = sqrt(x^2 + y^2)
+    end
+    return BallTree(gate_r)
+end
+
+# Return the gate value at (ray, gate) for a named field, with NaN treated as
+# missing. Returns `missing` if the sweep doesn't carry the field.
+@inline function _gate_value(sweep::SweepGroup, field_name::String,
+                              ray::Int, gate::Int)
+    haskey(sweep.fields, field_name) || return missing
+    v = sweep.fields[field_name].data[ray, gate]
+    if ismissing(v)
+        return missing
+    elseif isa(v, AbstractFloat) && isnan(v)
+        return missing
+    else
+        return Float64(v)
+    end
+end
+
+# Flat-gate-index → (ray, gate_in_ray). Matches the layout produced by
+# `_sweep_zyx_and_beams`.
+@inline _ray_of(flat::Int, n_gates::Int)        = ((flat - 1) ÷ n_gates) + 1
+@inline _gate_in_ray(flat::Int, n_gates::Int)   = ((flat - 1) % n_gates) + 1
+
+# ── grid_sweep! dispatcher ───────────────────────────────────────────────────
+
+"""
+    grid_sweep!(accum, sweep::SweepGroup, p::DaishoParameters;
+                ref_latitude, ref_longitude, ref_altitude,
+                source_file="", heading=-9999.0,
+                instrument_name="", scan_name="")
+
+Add one sweep's contribution to `accum`. The sweep is gridded with the
+configured ROI and the existing weighting math (Gaussian beam-pattern,
+range, refraction-corrected height angle). Linear-mode fields accumulate in
+linear units; `finalize_grid` converts back to dBZ.
+
+`ref_latitude` / `ref_longitude` / `ref_altitude` is the reference position
+the sweep was scanned from. For stationary radars supply the volume's
+lat/lon/alt; for mobile radars supply the first ray's georeference (or any
+representative position). Per-ray georeference, when present on the
+`SweepGroup`, takes precedence.
+
+A `SweepProvenance` entry is appended to `accum.sweeps`.
+"""
+function grid_sweep!(accum::GridAccumulator, sweep::SweepGroup,
+                     p::DaishoParameters;
+                     ref_latitude::Float64,
+                     ref_longitude::Float64,
+                     ref_altitude::Float64,
+                     source_file::AbstractString = "",
+                     heading::Real = -9999.0,
+                     instrument_name::AbstractString = "",
+                     scan_name::AbstractString = "")
+    shape = accum.grid_spec.shape
+    if shape === :volume_3d || shape === :latlon_3d
+        _grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    elseif shape === :rhi_2d
+        _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    elseif shape === :ppi_2d
+        _grid_sweep_ppi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    elseif shape === :composite_2d
+        _grid_sweep_composite_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    elseif shape === :column_1d
+        _grid_sweep_column_1d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    else
+        throw(ArgumentError("grid_sweep!: unsupported shape $shape"))
+    end
+    push!(accum.sweeps, SweepProvenance(
+        instrument_name = String(instrument_name),
+        scan_name = String(scan_name),
+        sweep_number = sweep.sweep_number,
+        sweep_mode = sweep.sweep_mode,
+        fixed_angle = sweep.fixed_angle,
+        time_start = isempty(sweep.time) ? nothing : sweep.time[1],
+        time_end   = isempty(sweep.time) ? nothing : sweep.time[end],
+        source_file = String(source_file),
+        ref_latitude = ref_latitude,
+        ref_longitude = ref_longitude,
+        ref_altitude = ref_altitude,
+    ))
+    return accum
+end
+
+"""
+    grid_sweep!(accum, volume::Volume, sweep_index::Int, p; heading=-9999.0,
+                source_file="")
+
+Volume convenience overload. Resolves the per-sweep reference position from
+the sweep's georeference when present (mobile), else from the volume's
+stationary `latitude`/`longitude`/`altitude`.
+"""
+function grid_sweep!(accum::GridAccumulator, volume::Volume, sweep_index::Int,
+                     p::DaishoParameters; heading::Real = -9999.0,
+                     source_file::AbstractString = "")
+    sweep = volume.sweeps[sweep_index]
+    if sweep.georeference !== nothing && !isempty(sweep.georeference.latitude)
+        ref_lat = sweep.georeference.latitude[1]
+        ref_lon = sweep.georeference.longitude[1]
+        ref_alt = sweep.georeference.altitude[1]
+    else
+        ref_lat = volume.latitude
+        ref_lon = volume.longitude
+        ref_alt = volume.altitude
+    end
+    return grid_sweep!(accum, sweep, p;
+        ref_latitude = Float64(ref_lat),
+        ref_longitude = Float64(ref_lon),
+        ref_altitude = Float64(ref_alt),
+        source_file = source_file,
+        heading = heading,
+        instrument_name = volume.instrument_name,
+        scan_name = volume.scan_name)
+end
+
+# ── 3D volume / latlon worker ────────────────────────────────────────────────
+
+# Materialize a `(zdim, ydim, xdim, 3)` gridpoints array from the GridSpec.
+# For volume_3d this is the cartesian product of the axes. For latlon_3d,
+# x/y meters are computed from lat/lon via the Transverse Mercator projection.
+function _materialize_gridpoints_3d(g::GridSpec, projection, grid_origin)
+    nx = length(g.x_axis)
+    ny = length(g.y_axis)
+    nz = length(g.z_axis)
+    gridpoints = Array{Float64}(undef, nz, ny, nx, 3)
+    if g.shape === :latlon_3d
+        # lat_axis / lon_axis are the geographic axes; project per (lat, lon).
+        lat_axis = g.lat_axis === nothing ? error("latlon_3d GridSpec missing lat_axis") : g.lat_axis
+        lon_axis = g.lon_axis === nothing ? error("latlon_3d GridSpec missing lon_axis") : g.lon_axis
+        for j in 1:ny, i in 1:nx
+            cartTM = convert(projection, LatLon(lat_axis[j], lon_axis[i]))
+            ycoord = ustrip(cartTM.y) - ustrip(grid_origin.y)
+            xcoord = ustrip(cartTM.x) - ustrip(grid_origin.x)
+            for k in 1:nz
+                gridpoints[k, j, i, 1] = g.z_axis[k]
+                gridpoints[k, j, i, 2] = ycoord
+                gridpoints[k, j, i, 3] = xcoord
+            end
+        end
+    else  # :volume_3d
+        for k in 1:nz, j in 1:ny, i in 1:nx
+            gridpoints[k, j, i, 1] = g.z_axis[k]
+            gridpoints[k, j, i, 2] = g.y_axis[j]
+            gridpoints[k, j, i, 3] = g.x_axis[i]
+        end
+    end
+    return gridpoints
+end
+
+function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
+                          p::DaishoParameters,
+                          ref_latitude::Float64, ref_longitude::Float64,
+                          ref_altitude::Float64)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = gd.missing_key
+    valid_key   = gd.valid_key
+
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    grid_origin, radar_zyx, beams, n_gates_s, n_rays_s =
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = _sweep_balltree_yx(radar_zyx, beams)
+    gridpoints = _materialize_gridpoints_3d(g, TM, grid_origin)
+
+    n_fields = length(accum.fields)
+    nx = length(g.x_axis)
+    ny = length(g.y_axis)
+    nz = length(g.z_axis)
+
+    # ROI mirrors the legacy per-driver derivations (xincr * 0.75 etc.). For
+    # the accumulator path we read these from the grid axes directly.
+    horizontal_roi = if g.shape === :latlon_3d
+        # Convert degincr → meters using the SAMURAI approximation centered at
+        # the reference latitude. Matches the legacy `grid_radar_latlon_volume`
+        # ROI formula.
+        latrad = g.reference_latitude * pi / 180.0
+        fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
+        fac_lon = 111.41513 * cos(latrad)
+        deg_km = sqrt(fac_lat^2 + fac_lon^2)
+        degincr = ny >= 2 ? (g.lat_axis[2] - g.lat_axis[1]) :
+                  (nx >= 2 ? (g.lon_axis[2] - g.lon_axis[1]) : 0.01)
+        deg_km * 1000.0 * degincr * 0.75
+    else
+        xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
+        xincr * 0.75
+    end
+    zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
+    vertical_roi = zincr * 0.75
+
+    beam_inflation  = gd.beam_inflation
+    power_threshold = gd.power_threshold
+
+    Threads.@threads for ii in CartesianIndices((ny, nx))
+        j_y, i_x = ii.I
+        yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
+
+        eff_h_roi = horizontal_roi
+        eff_v_roi = vertical_roi
+        if beam_inflation > 0.0
+            origin_dist = euclidean(yx_point, [0.0, 0.0])
+            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
+            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
+        end
+        gates = inrange(balltree, yx_point, eff_h_roi)
+        isempty(gates) && continue
+
+        for k_z in 1:nz
+            grid_z = gridpoints[k_z, j_y, i_x, 1]
+
+            # "Any in-range gate has non-missing missing_key value" → coverage 1.
+            any_scanned = false
+            for g_flat in gates
+                # Vertical-range filter: only consider gates near this z.
+                if abs(beams[g_flat, 4] - grid_z) > eff_v_roi
+                    continue
+                end
+                ray = _ray_of(g_flat, n_gates_s)
+                gate = _gate_in_ray(g_flat, n_gates_s)
+                if !ismissing(_gate_value(sweep, missing_key, ray, gate))
+                    any_scanned = true
+                    break
+                end
+            end
+            if any_scanned
+                @inbounds for m in 1:n_fields
+                    if accum.coverage[m, k_z, j_y, i_x] == Int8(0)
+                        accum.coverage[m, k_z, j_y, i_x] = Int8(1)
+                    end
+                end
+            else
+                continue
+            end
+
+            # Per-gate contribution. We iterate gates filtered by valid_key.
+            for g_flat in gates
+                ray = _ray_of(g_flat, n_gates_s)
+                gate_in = _gate_in_ray(g_flat, n_gates_s)
+                vk = _gate_value(sweep, valid_key, ray, gate_in)
+                ismissing(vk) && continue
+
+                # Refraction-corrected height angle.
+                dz = grid_z - radar_zyx[g_flat][1]
+                r  = beams[g_flat, 3]
+                sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2 * r * Reff)
+                abs(sine_h) < 1.0 || continue
+                gridpt_el = asin(sine_h)
+
+                # Effective azimuth from gate origin to gridpoint.
+                dx = yx_point[2] - radar_zyx[g_flat][3]
+                dy = yx_point[1] - radar_zyx[g_flat][2]
+                gridpt_az = (pi / 2.0) - atan(dy, dx)
+                gridpt_az < 0 && (gridpt_az += 2 * pi)
+
+                angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
+                                              [gridpt_az, gridpt_el])
+                angle_weight = exp(-angle_diff * 79.43)
+                angle_weight < power_threshold && (angle_weight = 0.0)
+
+                gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
+                range_weight = gridpt_r / r
+                if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
+                    range_weight = 0.0
+                end
+                total_weight = range_weight * angle_weight
+                total_weight > 0.0 || continue
+
+                # Accumulate per-field.
+                @inbounds for m in 1:n_fields
+                    fname = accum.fields[m]
+                    v = _gate_value(sweep, fname, ray, gate_in)
+                    ismissing(v) && continue
+                    mode = accum.grid_type[fname]
+                    accum.coverage[m, k_z, j_y, i_x] = Int8(2)
+                    if mode === :linear
+                        linear_z = 10.0 ^ (v / 10.0)
+                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * linear_z
+                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
+                    elseif mode === :nearest
+                        if total_weight > accum.weight_total[m, k_z, j_y, i_x]
+                            accum.weighted_sum[m, k_z, j_y, i_x] = v
+                            accum.weight_total[m, k_z, j_y, i_x] = total_weight
+                        end
+                    else
+                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * v
+                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
+                    end
+                end
+            end
+        end
+    end
+    return accum
+end
+
+# ── RHI worker (2D, range × z) ───────────────────────────────────────────────
+
+function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
+                              p::DaishoParameters,
+                              ref_latitude::Float64, ref_longitude::Float64,
+                              ref_altitude::Float64)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = gd.missing_key
+    valid_key   = gd.valid_key
+
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    grid_origin, radar_zyx, beams, n_gates_s, _ =
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = _sweep_balltree_r(radar_zyx, beams)
+
+    nz = length(g.z_axis)
+    nr = length(g.x_axis)   # range bins stored in x_axis for the RHI shape
+    n_fields = length(accum.fields)
+
+    rincr = nr >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
+    zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
+    horizontal_roi = rincr * 0.75
+    vertical_roi   = zincr * 0.75
+
+    beam_inflation  = gd.beam_inflation
+    power_threshold = gd.power_threshold
+
+    # Use rhi_azimuth if explicitly supplied, else fall back to sweep.azimuth[1].
+    az_rhi = if g.rhi_azimuth !== nothing
+        deg2rad(g.rhi_azimuth)
+    else
+        deg2rad(sweep.azimuth[1])
+    end
+
+    Threads.@threads for i_r in 1:nr
+        r_point = g.x_axis[i_r]
+        y_point = r_point * cos(az_rhi)
+        x_point = r_point * sin(az_rhi)
+
+        eff_h_roi = horizontal_roi
+        eff_v_roi = vertical_roi
+        origin_dist = euclidean(r_point, [0.0])
+        if beam_inflation > 0.0
+            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
+        end
+        gates = inrange(balltree, [origin_dist], eff_h_roi)
+        isempty(gates) && continue
+
+        for k_z in 1:nz
+            grid_z = g.z_axis[k_z]
+
+            any_scanned = false
+            for g_flat in gates
+                if abs(beams[g_flat, 4] - grid_z) > eff_v_roi
+                    continue
+                end
+                ray  = _ray_of(g_flat, n_gates_s)
+                gate = _gate_in_ray(g_flat, n_gates_s)
+                if !ismissing(_gate_value(sweep, missing_key, ray, gate))
+                    any_scanned = true
+                    break
+                end
+            end
+            if any_scanned
+                @inbounds for m in 1:n_fields
+                    if accum.coverage[m, k_z, i_r] == Int8(0)
+                        accum.coverage[m, k_z, i_r] = Int8(1)
+                    end
+                end
+            else
+                continue
+            end
+
+            for g_flat in gates
+                ray  = _ray_of(g_flat, n_gates_s)
+                gate_in = _gate_in_ray(g_flat, n_gates_s)
+                vk = _gate_value(sweep, valid_key, ray, gate_in)
+                ismissing(vk) && continue
+
+                dz = grid_z - radar_zyx[g_flat][1]
+                r  = beams[g_flat, 3]
+                sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2 * r * Reff)
+                abs(sine_h) < 1.0 || continue
+                gridpt_el = asin(sine_h)
+
+                dx = x_point - radar_zyx[g_flat][3]
+                dy = y_point - radar_zyx[g_flat][2]
+                angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
+                                              [beams[g_flat, 1], gridpt_el])
+                angle_weight = exp(-angle_diff * 79.43)
+                angle_weight < power_threshold && (angle_weight = 0.0)
+
+                gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
+                range_weight = gridpt_r / r
+                if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
+                    range_weight = 0.0
+                end
+                total_weight = range_weight * angle_weight
+                total_weight > 0.0 || continue
+
+                @inbounds for m in 1:n_fields
+                    fname = accum.fields[m]
+                    v = _gate_value(sweep, fname, ray, gate_in)
+                    ismissing(v) && continue
+                    mode = accum.grid_type[fname]
+                    accum.coverage[m, k_z, i_r] = Int8(2)
+                    if mode === :linear
+                        linear_z = 10.0 ^ (v / 10.0)
+                        accum.weighted_sum[m, k_z, i_r] += total_weight * linear_z
+                        accum.weight_total[m, k_z, i_r] += total_weight
+                    elseif mode === :nearest
+                        if total_weight > accum.weight_total[m, k_z, i_r]
+                            accum.weighted_sum[m, k_z, i_r] = v
+                            accum.weight_total[m, k_z, i_r] = total_weight
+                        end
+                    else
+                        accum.weighted_sum[m, k_z, i_r] += total_weight * v
+                        accum.weight_total[m, k_z, i_r] += total_weight
+                    end
+                end
+            end
+        end
+    end
+    return accum
+end
+
+# ── PPI worker (2D, y × x) ───────────────────────────────────────────────────
+
+function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
+                              p::DaishoParameters,
+                              ref_latitude::Float64, ref_longitude::Float64,
+                              ref_altitude::Float64)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = gd.missing_key
+    valid_key   = gd.valid_key
+
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    _, radar_zyx, beams, n_gates_s, _ =
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = _sweep_balltree_yx(radar_zyx, beams)
+
+    nx = length(g.x_axis)
+    ny = length(g.y_axis)
+    n_fields = length(accum.fields)
+
+    xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
+    horizontal_roi  = xincr * 0.75
+    beam_inflation  = gd.beam_inflation
+    power_threshold = gd.power_threshold
+
+    Threads.@threads for ii in CartesianIndices((ny, nx))
+        j_y, i_x = ii.I
+        yx_point = [g.y_axis[j_y], g.x_axis[i_x]]
+
+        eff_h_roi = horizontal_roi
+        if beam_inflation > 0.0
+            origin_dist = euclidean(yx_point, [0.0, 0.0])
+            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
+        end
+        gates = inrange(balltree, yx_point, eff_h_roi)
+        isempty(gates) && continue
+
+        # Any in-range gate with non-missing missing_key → coverage 1.
+        any_scanned = false
+        for g_flat in gates
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate = _gate_in_ray(g_flat, n_gates_s)
+            if !ismissing(_gate_value(sweep, missing_key, ray, gate))
+                any_scanned = true
+                break
+            end
+        end
+        if any_scanned
+            @inbounds for m in 1:n_fields
+                if accum.coverage[m, j_y, i_x] == Int8(0)
+                    accum.coverage[m, j_y, i_x] = Int8(1)
+                end
+            end
+        else
+            continue
+        end
+
+        for g_flat in gates
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate_in = _gate_in_ray(g_flat, n_gates_s)
+            vk = _gate_value(sweep, valid_key, ray, gate_in)
+            ismissing(vk) && continue
+
+            dx = g.x_axis[i_x] - radar_zyx[g_flat][3]
+            dy = g.y_axis[j_y] - radar_zyx[g_flat][2]
+            gridpt_az = (pi / 2.0) - atan(dy, dx)
+            gridpt_az < 0 && (gridpt_az += 2 * pi)
+
+            angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
+                                          [gridpt_az, beams[g_flat, 2]])
+            angle_weight = exp(-angle_diff * 79.43)
+            angle_weight < power_threshold && (angle_weight = 0.0)
+
+            r = beams[g_flat, 3]
+            gridpt_r = sqrt(dx^2 + dy^2)
+            range_weight = gridpt_r / r
+            if abs(gridpt_r - r) > horizontal_roi
+                range_weight = 0.0
+            end
+            total_weight = range_weight * angle_weight
+            total_weight > 0.0 || continue
+
+            @inbounds for m in 1:n_fields
+                fname = accum.fields[m]
+                v = _gate_value(sweep, fname, ray, gate_in)
+                ismissing(v) && continue
+                mode = accum.grid_type[fname]
+                accum.coverage[m, j_y, i_x] = Int8(2)
+                if mode === :linear
+                    linear_z = 10.0 ^ (v / 10.0)
+                    accum.weighted_sum[m, j_y, i_x] += total_weight * linear_z
+                    accum.weight_total[m, j_y, i_x] += total_weight
+                elseif mode === :nearest
+                    if total_weight > accum.weight_total[m, j_y, i_x]
+                        accum.weighted_sum[m, j_y, i_x] = v
+                        accum.weight_total[m, j_y, i_x] = total_weight
+                    end
+                else
+                    accum.weighted_sum[m, j_y, i_x] += total_weight * v
+                    accum.weight_total[m, j_y, i_x] += total_weight
+                end
+            end
+        end
+    end
+    return accum
+end
+
+# ── Composite worker (2D, column-maximum) ────────────────────────────────────
+
+function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
+                                    p::DaishoParameters,
+                                    ref_latitude::Float64, ref_longitude::Float64,
+                                    ref_altitude::Float64)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = gd.missing_key
+    valid_key   = gd.valid_key
+
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    _, radar_zyx, beams, n_gates_s, _ =
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = _sweep_balltree_yx(radar_zyx, beams)
+
+    nx = length(g.x_axis)
+    ny = length(g.y_axis)
+    n_fields = length(accum.fields)
+
+    xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
+    horizontal_roi  = xincr * 0.75
+    beam_inflation  = gd.beam_inflation
+
+    # Find the valid_key column index for the max selection. If the valid_key
+    # field isn't in the accumulator, composite produces no contribution.
+    valid_idx = findfirst(==(valid_key), accum.fields)
+
+    Threads.@threads for ii in CartesianIndices((ny, nx))
+        j_y, i_x = ii.I
+        yx_point = [g.y_axis[j_y], g.x_axis[i_x]]
+
+        eff_h_roi = horizontal_roi
+        if beam_inflation > 0.0
+            origin_dist = euclidean(yx_point, [0.0, 0.0])
+            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
+        end
+        gates = inrange(balltree, yx_point, eff_h_roi)
+        isempty(gates) && continue
+
+        any_scanned = false
+        for g_flat in gates
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate = _gate_in_ray(g_flat, n_gates_s)
+            if !ismissing(_gate_value(sweep, missing_key, ray, gate))
+                any_scanned = true
+                break
+            end
+        end
+        if any_scanned
+            @inbounds for m in 1:n_fields
+                if accum.coverage[m, j_y, i_x] == Int8(0)
+                    accum.coverage[m, j_y, i_x] = Int8(1)
+                end
+            end
+        else
+            continue
+        end
+
+        valid_idx === nothing && continue
+
+        # Scan in-range gates, pick the one with the largest valid_key value.
+        best_val = -Inf
+        best_flat = 0
+        for g_flat in gates
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate_in = _gate_in_ray(g_flat, n_gates_s)
+            vk = _gate_value(sweep, valid_key, ray, gate_in)
+            ismissing(vk) && continue
+            if vk > best_val
+                best_val = vk
+                best_flat = g_flat
+            end
+        end
+        best_flat == 0 && continue
+
+        ray  = _ray_of(best_flat, n_gates_s)
+        gate_in = _gate_in_ray(best_flat, n_gates_s)
+        # Composite carries that gate's value directly; weight_total is a
+        # filled-by-this-sweep flag (we use 1.0). The :nearest finalize path
+        # returns weighted_sum unchanged.
+        @inbounds for m in 1:n_fields
+            fname = accum.fields[m]
+            v = _gate_value(sweep, fname, ray, gate_in)
+            ismissing(v) && continue
+            # Overwrite only when this sweep's best > prior; merge_accumulators!
+            # for :nearest already picks the higher weight_total, so use the
+            # composite value itself as the "weight" so cross-sweep merges
+            # also pick the column max.
+            cur_w = accum.weight_total[m, j_y, i_x]
+            if m == valid_idx
+                if best_val > cur_w - 1.0  # tie-aware
+                    accum.weighted_sum[m, j_y, i_x] = v
+                    accum.weight_total[m, j_y, i_x] = best_val + 1.0
+                    accum.coverage[m, j_y, i_x] = Int8(2)
+                end
+            else
+                # Companion field: tag along with whichever gate was selected.
+                # Use the same convention so merges stay consistent.
+                accum.weighted_sum[m, j_y, i_x] = v
+                accum.weight_total[m, j_y, i_x] = best_val + 1.0
+                accum.coverage[m, j_y, i_x] = Int8(2)
+            end
+        end
+    end
+    return accum
+end
+
+# ── Column worker (1D, z) ────────────────────────────────────────────────────
+
+function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
+                                 p::DaishoParameters,
+                                 ref_latitude::Float64, ref_longitude::Float64,
+                                 ref_altitude::Float64)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = gd.missing_key
+    valid_key   = gd.valid_key
+
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    _, radar_zyx, beams, n_gates_s, n_rays_s =
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+
+    nz = length(g.z_axis)
+    n_fields = length(accum.fields)
+    n_gate_total = size(beams, 1)
+
+    zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
+    vertical_roi    = zincr * 0.75
+    beam_inflation  = gd.beam_inflation
+    power_threshold = gd.power_threshold
+
+    Threads.@threads for k_z in 1:nz
+        grid_z = g.z_axis[k_z]
+        eff_v_roi = vertical_roi
+        origin_dist = euclidean(grid_z, [0.0])
+        if beam_inflation > 0.0
+            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
+        end
+
+        # Coverage: any gate in vertical range with non-missing missing_key.
+        any_scanned = false
+        for g_flat in 1:n_gate_total
+            abs(beams[g_flat, 4] - grid_z) > eff_v_roi && continue
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate = _gate_in_ray(g_flat, n_gates_s)
+            if !ismissing(_gate_value(sweep, missing_key, ray, gate))
+                any_scanned = true
+                break
+            end
+        end
+        if any_scanned
+            @inbounds for m in 1:n_fields
+                if accum.coverage[m, k_z] == Int8(0)
+                    accum.coverage[m, k_z] = Int8(1)
+                end
+            end
+        else
+            continue
+        end
+
+        for g_flat in 1:n_gate_total
+            ray  = _ray_of(g_flat, n_gates_s)
+            gate_in = _gate_in_ray(g_flat, n_gates_s)
+            vk = _gate_value(sweep, valid_key, ray, gate_in)
+            ismissing(vk) && continue
+
+            dz = grid_z - radar_zyx[g_flat][1]
+            r  = beams[g_flat, 3]
+            sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2 * r * Reff)
+            abs(sine_h) < 1.0 || continue
+            gridpt_el = asin(sine_h)
+
+            angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
+                                          [beams[g_flat, 1], gridpt_el])
+            angle_weight = exp(-angle_diff * 79.43)
+            angle_weight < power_threshold && (angle_weight = 0.0)
+
+            gridpt_r = grid_z / cos(beams[g_flat, 2])
+            range_weight = gridpt_r / r
+            if abs(gridpt_r - r) > vertical_roi
+                range_weight = 0.0
+            end
+            total_weight = range_weight * angle_weight
+            total_weight > 0.0 || continue
+
+            @inbounds for m in 1:n_fields
+                fname = accum.fields[m]
+                v = _gate_value(sweep, fname, ray, gate_in)
+                ismissing(v) && continue
+                mode = accum.grid_type[fname]
+                accum.coverage[m, k_z] = Int8(2)
+                if mode === :linear
+                    linear_z = 10.0 ^ (v / 10.0)
+                    accum.weighted_sum[m, k_z] += total_weight * linear_z
+                    accum.weight_total[m, k_z] += total_weight
+                elseif mode === :nearest
+                    if total_weight > accum.weight_total[m, k_z]
+                        accum.weighted_sum[m, k_z] = v
+                        accum.weight_total[m, k_z] = total_weight
+                    end
+                else
+                    accum.weighted_sum[m, k_z] += total_weight * v
+                    accum.weight_total[m, k_z] += total_weight
+                end
+            end
+        end
+    end
+    return accum
+end
+
+# ── finalize_grid ────────────────────────────────────────────────────────────
+
+"""
+    finalize_grid(accum) -> Array{Float64}
+
+Normalize an accumulator into the grid shape the existing writers consume.
+`:weighted` fields divide by `weight_total`; `:linear` fields divide and then
+convert back to dBZ; `:nearest` and composite carry through unchanged. Cells
+with no weight but with `coverage == 1` are flagged `-9999.0` (scanned, no
+echo). Cells with `coverage == 0` are flagged `-32768.0` (true missing).
+"""
+function finalize_grid(accum::GridAccumulator)
+    out = fill(-32768.0, size(accum.weighted_sum))
+    n_fields = length(accum.fields)
+    trailing_size = size(accum.weighted_sum)[2:end]
+    @inbounds for m in 1:n_fields
+        name = accum.fields[m]
+        mode = accum.grid_type[name]
+        for ix in CartesianIndices(trailing_size)
+            cov = accum.coverage[m, ix]
+            w   = accum.weight_total[m, ix]
+            s   = accum.weighted_sum[m, ix]
+            if cov == Int8(2) && w > 0
+                if mode === :nearest
+                    out[m, ix] = s
+                elseif mode === :linear
+                    avg = s / w
+                    out[m, ix] = avg > 0.0 ? 10.0 * log10(avg) : -9999.0
+                else
+                    out[m, ix] = s / w
+                end
+            elseif cov == Int8(1)
+                out[m, ix] = -9999.0
+            else
+                out[m, ix] = -32768.0
+            end
+        end
+    end
+    return out
+end
