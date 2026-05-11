@@ -218,10 +218,14 @@
         # check engages.
         v = synthetic_volume(n_sweeps = 2, n_rays = 36, n_gates = 6)
 
-        # Legacy path through the (now-fixed) bridge.
+        # Legacy path: explicitly go through `as_legacy_radar` and the
+        # `radar`-typed driver. The Volume-typed driver no longer goes
+        # through the bridge after Phase 4, so we'd be comparing against
+        # ourselves if we called it here.
         legacy_file = tempname() * "_legacy.nc"
         try
-            Daisho.grid_radar_volume(v, legacy_file, v.time_coverage_start, p)
+            legacy_r, _ = as_legacy_radar(v; field_names = p.moments.fields)
+            Daisho.grid_radar_volume(legacy_r, legacy_file, v.time_coverage_start, p)
             ds = NCDataset(legacy_file, "r")
             try
                 # Reconstruct legacy radar_grid from variables. The writer

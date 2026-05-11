@@ -204,10 +204,9 @@
         @test length(gates) > 0
     end
 
-    @testset "Volume overloads dispatch via bridge" begin
+    @testset "Volume overloads dispatch via accumulator" begin
         # Smoke-test that the Volume-typed driver methods exist and dispatch.
         v = synthetic_volume(n_sweeps=1, n_rays=8, n_gates=5)
-        # The Volume-typed methods are defined; just check that they resolve.
         @test hasmethod(Daisho.grid_radar_volume,
             Tuple{Volume,AbstractString,Any,DaishoParameters})
         @test hasmethod(Daisho.grid_radar_ppi,
@@ -220,10 +219,98 @@
             Tuple{Volume,AbstractString,Any,DaishoParameters})
         @test hasmethod(Daisho.grid_radar_latlon_volume,
             Tuple{Volume,AbstractString,Any,DaishoParameters})
-        # Bridge: Volume → legacy radar should produce a sensibly-shaped struct.
         legacy, names = as_legacy_radar(v)
         @test length(legacy.azimuth) == 8
         @test "DBZ" in names
+    end
+
+    @testset "Volume drivers end-to-end per shape" begin
+        # Each Volume driver should grid a synthetic Volume to NetCDF without
+        # crashing and return an accumulator with one provenance entry per
+        # sweep. We check shape and presence, not numerical values.
+        function _small_p()
+            p = DaishoParameters()
+            small_cart = Daisho.CartesianGridParameters(
+                xmin = -2000.0, xincr = 1000.0, xdim = 5,
+                ymin = -2000.0, yincr = 1000.0, ydim = 5,
+                zmin = 500.0, zincr = 500.0, zdim = 3)
+            small_latlon = Daisho.LatLonGridParameters(
+                lonmin = -0.05, londim = 5,
+                latmin = -0.05, latdim = 5,
+                degincr = 0.025,
+                zmin = 500.0, zincr = 500.0, zdim = 3)
+            small_rhi = Daisho.RhiGridParameters(
+                rmin = 0.0, rincr = 500.0, rdim = 7,
+                zmin = 0.0, zincr = 500.0, zdim = 4)
+            return Daisho.DaishoParameters(p.moments, p.qc, p.gridding,
+                Daisho.GridParameters(cartesian = small_cart,
+                                      latlon = small_latlon,
+                                      rhi = small_rhi,
+                                      spectral = p.grid.spectral),
+                p.io)
+        end
+
+        p = _small_p()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 24, n_gates = 6)
+
+        for (shape, driver) in (
+            (:volume_3d,   Daisho.grid_radar_volume),
+            (:latlon_3d,   Daisho.grid_radar_latlon_volume),
+            (:ppi_2d,      Daisho.grid_radar_ppi),
+            (:composite_2d, Daisho.grid_radar_composite),
+            (:column_1d,   Daisho.grid_radar_column),
+            (:rhi_2d,      Daisho.grid_radar_rhi),
+        )
+            outfile = tempname() * "_" * String(shape) * ".nc"
+            try
+                acc = driver(v, outfile, v.time_coverage_start, p)
+                @test isfile(outfile)
+                @test acc isa GridAccumulator
+                @test acc.grid_spec.shape === shape
+                @test length(acc.sweeps) == length(v.sweeps)
+                ds = NCDataset(outfile, "r")
+                try
+                    @test haskey(ds, "DBZ") || haskey(ds, "VEL")
+                finally
+                    close(ds)
+                end
+            finally
+                isfile(outfile) && rm(outfile)
+            end
+        end
+    end
+
+    @testset "SEAPOL fixture smoke test (volume gridding)" begin
+        # Only runs if the v1 fixture is available; CI on a minimal install
+        # may skip it.
+        local_fixture = joinpath(@__DIR__, "fixtures",
+            "cfrad.20240903_150007.042_to_20240903_150444.596_SEAPOL_SUR.nc")
+        if !isfile(local_fixture)
+            @info "Skipping SEAPOL fixture smoke test"
+            return
+        end
+        v = read_cfradial(local_fixture)
+        p = DaishoParameters()
+        # Override to a small grid so the smoke test stays fast.
+        small_cart = Daisho.CartesianGridParameters(
+            xmin = -50000.0, xincr = 5000.0, xdim = 21,
+            ymin = -50000.0, yincr = 5000.0, ydim = 21,
+            zmin = 500.0,    zincr = 1000.0, zdim = 5)
+        p = Daisho.DaishoParameters(p.moments, p.qc, p.gridding,
+            Daisho.GridParameters(cartesian = small_cart,
+                                  latlon = p.grid.latlon,
+                                  rhi = p.grid.rhi,
+                                  spectral = p.grid.spectral),
+            p.io)
+        outfile = tempname() * "_seapol.nc"
+        try
+            acc = Daisho.grid_radar_volume(v, outfile, v.time_coverage_start, p)
+            @test isfile(outfile)
+            @test acc isa GridAccumulator
+            @test length(acc.sweeps) == length(v.sweeps)
+        finally
+            isfile(outfile) && rm(outfile)
+        end
     end
 
 end

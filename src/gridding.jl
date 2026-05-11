@@ -2378,43 +2378,107 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
         gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key)
 end
 
-# ── Volume-aware overloads (Phase C bridge) ──────────────────────────────────
+# ── Volume-aware overloads (accumulator path) ────────────────────────────────
 #
-# These delegate to the legacy `radar` drivers via `as_legacy_radar`. The
-# bridge layer is removed in Phase D once the legacy drivers are gone.
+# These build a GridAccumulator, fold every sweep into it via `grid_sweep!`,
+# call `finalize_grid`, and pass the result to the existing writer. They
+# return the accumulator so callers can introspect or save it.
 
 function grid_radar_volume(volume::Volume, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_volume(legacy, output_file, index_time, p; heading=heading)
+    spec = build_grid_spec(:volume_3d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p; heading = heading)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_volume_array(spec)
+    write_gridded_radar_volume(output_file, index_time,
+        volume.time_coverage_start, volume.time_coverage_end,
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+    return accum
 end
 
 function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
                                    index_time, p::DaishoParameters; heading::Real=-9999.0)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_latlon_volume(legacy, output_file, index_time, p; heading=heading)
+    spec = build_grid_spec(:latlon_3d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p; heading = heading)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_latlon_array(spec)
+    write_gridded_radar_volume(output_file, index_time,
+        volume.time_coverage_start, volume.time_coverage_end,
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+    return accum
 end
 
 function grid_radar_rhi(volume::Volume, output_file::AbstractString,
                         index_time, p::DaishoParameters)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_rhi(legacy, output_file, index_time, p)
+    spec = build_grid_spec(:rhi_2d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_rhi_array(spec)
+    write_gridded_radar_rhi(output_file, index_time, _writer_radar_stub(volume),
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude)
+    return accum
 end
 
 function grid_radar_ppi(volume::Volume, output_file::AbstractString,
                         index_time, p::DaishoParameters; heading::Real=-9999.0)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_ppi(legacy, output_file, index_time, p; heading=heading)
+    spec = build_grid_spec(:ppi_2d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p; heading = heading)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_ppi_array(spec)
+    write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude, Float64(heading))
+    return accum
 end
 
 function grid_radar_composite(volume::Volume, output_file::AbstractString,
                               index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_composite(legacy, output_file, index_time, p; mean_heading=mean_heading)
+    spec = build_grid_spec(:composite_2d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_ppi_array(spec)
+    write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude, Float64(mean_heading))
+    return accum
 end
 
 function grid_radar_column(volume::Volume, output_file::AbstractString,
                            index_time, p::DaishoParameters)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
-    grid_radar_column(legacy, output_file, index_time, p)
+    spec = build_grid_spec(:column_1d, volume, p)
+    accum = GridAccumulator(spec, p)
+    for i in eachindex(volume.sweeps)
+        grid_sweep!(accum, volume, i, p)
+    end
+    radar_grid = finalize_grid(accum)
+    latlon_grid = _compute_latlon_grid(spec)
+    gridpoints = _gridpoints_column_array(spec)
+    write_gridded_radar_column(output_file, index_time,
+        volume.time_coverage_start, volume.time_coverage_end,
+        gridpoints, radar_grid, latlon_grid, field_index_dict(p),
+        spec.reference_latitude, spec.reference_longitude)
+    return accum
 end

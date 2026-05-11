@@ -1061,16 +1061,281 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     return accum
 end
 
-# ── finalize_grid ────────────────────────────────────────────────────────────
+# ── Volume-level helpers (build_grid_spec, writers' gridpoints, latlon) ──────
+
+"""
+    build_grid_spec(shape, volume, p; rhi_azimuth=nothing) -> GridSpec
+
+Helper for the Volume drivers. Pulls the right grid sub-spec from `p` based on
+`shape` and pairs it with the volume's reference position to build a
+`GridSpec`.
+
+For mobile-platform sweeps the reference position falls back to the first
+ray's georeference when the volume's stationary lat/lon/alt is the zero
+default; callers can override by constructing the `GridSpec` directly.
+"""
+function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
+                          rhi_azimuth::Union{Nothing,Real} = nothing)
+    ref_lat = volume.latitude
+    ref_lon = volume.longitude
+    ref_alt = volume.altitude
+
+    # If the volume's stationary lat/lon look like the zero default but the
+    # first sweep has a georeference, fall back to that — typical mobile
+    # platform path.
+    if (ref_lat == 0.0 && ref_lon == 0.0) && !isempty(volume.sweeps)
+        s1 = volume.sweeps[1]
+        if s1.georeference !== nothing && !isempty(s1.georeference.latitude)
+            ref_lat = s1.georeference.latitude[1]
+            ref_lon = s1.georeference.longitude[1]
+            ref_alt = s1.georeference.altitude[1]
+        end
+    end
+
+    if shape === :volume_3d
+        g = p.grid.cartesian
+        return GridSpec(
+            shape = :volume_3d,
+            reference_latitude = ref_lat,
+            reference_longitude = ref_lon,
+            x_axis = collect(Float64, g.xmin .+ (0:(g.xdim-1)) .* g.xincr),
+            y_axis = collect(Float64, g.ymin .+ (0:(g.ydim-1)) .* g.yincr),
+            z_axis = collect(Float64, g.zmin .+ (0:(g.zdim-1)) .* g.zincr),
+        )
+    elseif shape === :latlon_3d
+        g = p.grid.latlon
+        # Snap the projection origin to a degincr boundary so the geographic
+        # grid lines up across runs (matches legacy `grid_radar_latlon_volume`).
+        snapped_lat = ref_lat - rem(ref_lat, g.degincr)
+        snapped_lon = ref_lon - rem(ref_lon, g.degincr)
+        lat_axis = collect(Float64,
+            round(snapped_lat + g.latmin, digits = 6) .+
+            (0:(g.latdim-1)) .* g.degincr)
+        lon_axis = collect(Float64,
+            round(snapped_lon + g.lonmin, digits = 6) .+
+            (0:(g.londim-1)) .* g.degincr)
+        return GridSpec(
+            shape = :latlon_3d,
+            reference_latitude = snapped_lat,
+            reference_longitude = snapped_lon,
+            # Placeholder Cartesian axes for shape sizing; latlon worker uses
+            # lat_axis/lon_axis for the geographic axes.
+            x_axis = collect(Float64, 1:g.londim),
+            y_axis = collect(Float64, 1:g.latdim),
+            z_axis = collect(Float64, g.zmin .+ (0:(g.zdim-1)) .* g.zincr),
+            lat_axis = lat_axis,
+            lon_axis = lon_axis,
+        )
+    elseif shape === :rhi_2d
+        g = p.grid.rhi
+        # Resolve the RHI azimuth: explicit override, else the first sweep's
+        # first ray's azimuth.
+        az = if rhi_azimuth !== nothing
+            Float64(rhi_azimuth)
+        elseif !isempty(volume.sweeps) && !isempty(volume.sweeps[1].azimuth)
+            Float64(volume.sweeps[1].azimuth[1])
+        else
+            0.0
+        end
+        return GridSpec(
+            shape = :rhi_2d,
+            reference_latitude = ref_lat,
+            reference_longitude = ref_lon,
+            x_axis = collect(Float64, g.rmin .+ (0:(g.rdim-1)) .* g.rincr),
+            y_axis = [0.0],  # unused
+            z_axis = collect(Float64, g.zmin .+ (0:(g.zdim-1)) .* g.zincr),
+            rhi_azimuth = az,
+        )
+    elseif shape === :ppi_2d || shape === :composite_2d
+        g = p.grid.cartesian
+        return GridSpec(
+            shape = shape,
+            reference_latitude = ref_lat,
+            reference_longitude = ref_lon,
+            x_axis = collect(Float64, g.xmin .+ (0:(g.xdim-1)) .* g.xincr),
+            y_axis = collect(Float64, g.ymin .+ (0:(g.ydim-1)) .* g.yincr),
+            z_axis = [0.0],
+        )
+    elseif shape === :column_1d
+        g = p.grid.cartesian
+        return GridSpec(
+            shape = :column_1d,
+            reference_latitude = ref_lat,
+            reference_longitude = ref_lon,
+            x_axis = [0.0],
+            y_axis = [0.0],
+            z_axis = collect(Float64, g.zmin .+ (0:(g.zdim-1)) .* g.zincr),
+        )
+    else
+        throw(ArgumentError("build_grid_spec: unsupported shape $shape"))
+    end
+end
+
+# Return a (zdim, ydim, xdim, 3) gridpoints array shaped like
+# `initialize_regular_grid` so the existing writers can consume it.
+function _gridpoints_volume_array(g::GridSpec)
+    nx = length(g.x_axis); ny = length(g.y_axis); nz = length(g.z_axis)
+    out = Array{Float64}(undef, nz, ny, nx, 3)
+    @inbounds for k in 1:nz, j in 1:ny, i in 1:nx
+        out[k, j, i, 1] = g.z_axis[k]
+        out[k, j, i, 2] = g.y_axis[j]
+        out[k, j, i, 3] = g.x_axis[i]
+    end
+    return out
+end
+
+function _gridpoints_latlon_array(g::GridSpec)
+    nx = length(g.lon_axis); ny = length(g.lat_axis); nz = length(g.z_axis)
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    grid_origin = convert(TM, LatLon(g.reference_latitude, g.reference_longitude))
+    out = Array{Float64}(undef, nz, ny, nx, 3)
+    @inbounds for j in 1:ny, i in 1:nx
+        cartTM = convert(TM, LatLon(g.lat_axis[j], g.lon_axis[i]))
+        y = ustrip(cartTM.y) - ustrip(grid_origin.y)
+        x = ustrip(cartTM.x) - ustrip(grid_origin.x)
+        for k in 1:nz
+            out[k, j, i, 1] = g.z_axis[k]
+            out[k, j, i, 2] = y
+            out[k, j, i, 3] = x
+        end
+    end
+    return out
+end
+
+function _gridpoints_rhi_array(g::GridSpec)
+    nr = length(g.x_axis); nz = length(g.z_axis)
+    out = Array{Float64}(undef, nz, nr, 2)
+    @inbounds for j in 1:nz, i in 1:nr
+        out[j, i, 1] = g.z_axis[j]
+        out[j, i, 2] = g.x_axis[i]
+    end
+    return out
+end
+
+function _gridpoints_ppi_array(g::GridSpec)
+    nx = length(g.x_axis); ny = length(g.y_axis)
+    out = Array{Float64}(undef, ny, nx, 2)
+    @inbounds for j in 1:ny, i in 1:nx
+        out[j, i, 1] = g.y_axis[j]
+        out[j, i, 2] = g.x_axis[i]
+    end
+    return out
+end
+
+function _gridpoints_column_array(g::GridSpec)
+    return collect(Float64, g.z_axis)
+end
+
+# Compute the lat/lon grid the existing writers consume. Shape depends on
+# the driver: 3D writers want (ydim, xdim, 2), RHI wants (rdim, 2), column
+# wants a 2-element [lat, lon].
+function _compute_latlon_grid(g::GridSpec)
+    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
+                                lonₒ = g.reference_longitude)
+    grid_origin = convert(TM, LatLon(g.reference_latitude, g.reference_longitude))
+    if g.shape === :volume_3d
+        nx = length(g.x_axis); ny = length(g.y_axis)
+        out = Array{Float64}(undef, ny, nx, 2)
+        @inbounds for j in 1:ny, i in 1:nx
+            cartTM = convert(TM, Cartesian{WGS84Latest}(
+                grid_origin.x + g.x_axis[i] * u"m",
+                grid_origin.y + g.y_axis[j] * u"m"))
+            latlon = convert(LatLon, cartTM)
+            out[j, i, 1] = ustrip(latlon.lat)
+            out[j, i, 2] = ustrip(latlon.lon)
+        end
+        return out
+    elseif g.shape === :latlon_3d
+        nx = length(g.lon_axis); ny = length(g.lat_axis)
+        out = Array{Float64}(undef, ny, nx, 2)
+        @inbounds for j in 1:ny, i in 1:nx
+            out[j, i, 1] = g.lat_axis[j]
+            out[j, i, 2] = g.lon_axis[i]
+        end
+        return out
+    elseif g.shape === :rhi_2d
+        nr = length(g.x_axis)
+        az = g.rhi_azimuth === nothing ? 0.0 : deg2rad(g.rhi_azimuth)
+        out = Array{Float64}(undef, nr, 2)
+        @inbounds for i in 1:nr
+            r_pt = g.x_axis[i]
+            y_pt = r_pt * cos(az); x_pt = r_pt * sin(az)
+            cartTM = convert(TM, Cartesian{WGS84Latest}(
+                grid_origin.x + x_pt * u"m", grid_origin.y + y_pt * u"m"))
+            latlon = convert(LatLon, cartTM)
+            out[i, 1] = ustrip(latlon.lat)
+            out[i, 2] = ustrip(latlon.lon)
+        end
+        return out
+    elseif g.shape === :ppi_2d || g.shape === :composite_2d
+        nx = length(g.x_axis); ny = length(g.y_axis)
+        out = Array{Float64}(undef, ny, nx, 2)
+        @inbounds for j in 1:ny, i in 1:nx
+            cartTM = convert(TM, Cartesian{WGS84Latest}(
+                grid_origin.x + g.x_axis[i] * u"m",
+                grid_origin.y + g.y_axis[j] * u"m"))
+            latlon = convert(LatLon, cartTM)
+            out[j, i, 1] = ustrip(latlon.lat)
+            out[j, i, 2] = ustrip(latlon.lon)
+        end
+        return out
+    elseif g.shape === :column_1d
+        return [g.reference_latitude, g.reference_longitude]
+    else
+        throw(ArgumentError("_compute_latlon_grid: unsupported shape $(g.shape)"))
+    end
+end
+
+# Build a minimal legacy `radar` adapter just for writers that consume
+# `.time`, `.azimuth`, `.scan_name`. No moments matrix is allocated.
+function _writer_radar_stub(volume::Volume)
+    n_total_rays = sum(n_rays(s) for s in volume.sweeps; init = 0)
+    azimuth = Vector{Union{Missing,Float32}}(undef, n_total_rays)
+    elevation = Vector{Union{Missing,Float32}}(undef, n_total_rays)
+    times = Vector{DateTime}(undef, n_total_rays)
+    cursor = 0
+    for s in volume.sweeps
+        n = n_rays(s)
+        rng = (cursor + 1):(cursor + n)
+        azimuth[rng] .= Float32.(s.azimuth)
+        elevation[rng] .= Float32.(s.elevation)
+        times[rng] .= s.time
+        cursor += n
+    end
+    # Empty other fields the writers don't read.
+    empty32 = Vector{Union{Missing,Float32}}(undef, n_total_rays)
+    empty32 .= missing
+    fa32 = Vector{Union{Missing,Float32}}(undef, length(volume.sweeps))
+    fa32 .= missing
+    return radar(
+        scan_name = volume.scan_name,
+        azimuth = azimuth,
+        elevation = elevation,
+        ew_platform = zeros(Float32, n_total_rays),
+        ns_platform = zeros(Float32, n_total_rays),
+        w_platform  = zeros(Float32, n_total_rays),
+        nyquist_velocity = empty32,
+        range = Float32.(isempty(volume.sweeps) ? Float64[] : volume.sweeps[1].range),
+        time = times,
+        latitude  = empty32,
+        longitude = empty32,
+        altitude  = empty32,
+        fixed_angles = fa32,
+        swpstart = fa32,
+        swpend   = fa32,
+        moments  = Array{Union{Missing,Float64}}(undef, 0, 0),
+    )
+end
 
 """
     finalize_grid(accum) -> Array{Float64}
 
 Normalize an accumulator into the grid shape the existing writers consume.
 `:weighted` fields divide by `weight_total`; `:linear` fields divide and then
-convert back to dBZ; `:nearest` and composite carry through unchanged. Cells
-with no weight but with `coverage == 1` are flagged `-9999.0` (scanned, no
-echo). Cells with `coverage == 0` are flagged `-32768.0` (true missing).
+convert back to dBZ; `:nearest` carries through unchanged. Cells with no
+weight but with `coverage == 1` are flagged `-9999.0` (scanned, no echo).
+Cells with `coverage == 0` are flagged `-32768.0` (true missing).
 """
 function finalize_grid(accum::GridAccumulator)
     out = fill(-32768.0, size(accum.weighted_sum))
