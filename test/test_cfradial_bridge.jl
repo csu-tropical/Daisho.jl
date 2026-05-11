@@ -55,6 +55,156 @@
         end
     end
 
+    @testset "moment-column ordering: explicit field_names" begin
+        # Regression for the silent column-ordering bug: when alphabetical order
+        # of the volume's fields disagrees with TOML order, alphabetical layout
+        # would put ZDR data into the DBZ column and vice versa.
+        t0 = DateTime(2024, 9, 3, 15, 0, 0)
+        n_rays_s = 4
+        n_gates = 3
+        sweep = SweepGroup(
+            sweep_number = 0,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = 1.0,
+            time = [t0 + Second(r) for r in 0:(n_rays_s-1)],
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates - 1))),
+            azimuth = collect(Float64, range(0.0, 270.0; length=n_rays_s)),
+            elevation = fill(1.0, n_rays_s),
+            nyquist_velocity = fill(25.0, n_rays_s),
+        )
+        # Two fields with distinctly different value ranges so column→field
+        # binding is testable by value alone.
+        dbz_data = fill(Float32(30.0), n_rays_s, n_gates)
+        zdr_data = fill(Float32(2.0), n_rays_s, n_gates)
+        add_field!(sweep, "DBZ", dbz_data, FieldMetadata(units="dBZ", fill_value=-32768.0))
+        add_field!(sweep, "ZDR", zdr_data, FieldMetadata(units="dB",  fill_value=-32768.0))
+        v = Volume(
+            instrument_name = "TEST",
+            time_coverage_start = t0,
+            time_coverage_end = t0 + Second(n_rays_s),
+            latitude = 16.0, longitude = -24.0, altitude = 50.0,
+            sweeps = [sweep],
+        )
+
+        # Reverse-alphabetical TOML order: column 1 must be ZDR.
+        legacy, names = as_legacy_radar(v; field_names = ["ZDR", "DBZ"])
+        @test names == ["ZDR", "DBZ"]
+        col_one_value = legacy.moments[1, 1]
+        col_two_value = legacy.moments[1, 2]
+        @test col_one_value ≈ 2.0
+        @test col_two_value ≈ 30.0
+
+        # A field listed but absent in the sweep stays missing.
+        legacy2, names2 = as_legacy_radar(v; field_names = ["DBZ", "MISSING_FIELD"])
+        @test names2 == ["DBZ", "MISSING_FIELD"]
+        @test legacy2.moments[1, 1] ≈ 30.0
+        @test ismissing(legacy2.moments[1, 2])
+    end
+
+    @testset "moment-column ordering: alphabetical default" begin
+        t0 = DateTime(2024, 9, 3, 15, 0, 0)
+        n_rays_s = 2
+        n_gates = 2
+        sweep = SweepGroup(
+            sweep_number = 0,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = 1.0,
+            time = [t0 + Second(r) for r in 0:(n_rays_s-1)],
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates - 1))),
+            azimuth = collect(Float64, range(0.0, 180.0; length=n_rays_s)),
+            elevation = fill(1.0, n_rays_s),
+            nyquist_velocity = fill(25.0, n_rays_s),
+        )
+        add_field!(sweep, "ZDR", fill(Float32(2.0), n_rays_s, n_gates),
+                   FieldMetadata(units="dB", fill_value=-32768.0))
+        add_field!(sweep, "DBZ", fill(Float32(30.0), n_rays_s, n_gates),
+                   FieldMetadata(units="dBZ", fill_value=-32768.0))
+        v = Volume(
+            instrument_name = "TEST",
+            time_coverage_start = t0,
+            time_coverage_end = t0 + Second(n_rays_s),
+            latitude = 0.0, longitude = 0.0, altitude = 0.0,
+            sweeps = [sweep],
+        )
+
+        legacy, names = as_legacy_radar(v)
+        # Default: alphabetical, so DBZ → col 1, ZDR → col 2.
+        @test names == ["DBZ", "ZDR"]
+        @test legacy.moments[1, 1] ≈ 30.0
+        @test legacy.moments[1, 2] ≈ 2.0
+    end
+
+    @testset "platform velocity passthrough" begin
+        # Regression for hard-coded zeros. Build a mobile-platform sweep with
+        # nonzero per-ray velocity in the Georeference; expect those to land in
+        # ew/ns/w_platform.
+        t0 = DateTime(2024, 9, 3, 15, 0, 0)
+        n_rays_s = 4
+        n_gates = 2
+        ew = collect(Float64, [1.0, 2.0, 3.0, 4.0])
+        ns = collect(Float64, [10.0, 20.0, 30.0, 40.0])
+        w  = collect(Float64, [0.1, 0.2, 0.3, 0.4])
+        gr = Georeference(
+            latitude = fill(20.0, n_rays_s),
+            longitude = fill(-150.0, n_rays_s),
+            altitude = fill(3000.0, n_rays_s),
+            eastward_velocity = ew,
+            northward_velocity = ns,
+            vertical_velocity = w,
+        )
+        sweep = SweepGroup(
+            sweep_number = 0,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = 1.0,
+            time = [t0 + Second(r) for r in 0:(n_rays_s-1)],
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates - 1))),
+            azimuth = collect(Float64, range(0.0, 270.0; length=n_rays_s)),
+            elevation = fill(1.0, n_rays_s),
+            nyquist_velocity = fill(25.0, n_rays_s),
+            georeference = gr,
+        )
+        add_field!(sweep, "DBZ", fill(Float32(20.0), n_rays_s, n_gates),
+                   FieldMetadata(units="dBZ", fill_value=-32768.0))
+        v = Volume(
+            instrument_name = "AIRBORNE_TEST",
+            platform_type = "aircraft",
+            time_coverage_start = t0,
+            time_coverage_end = t0 + Second(n_rays_s),
+            latitude = 20.0, longitude = -150.0, altitude = 3000.0,
+            sweeps = [sweep],
+        )
+
+        legacy, _ = as_legacy_radar(v)
+        @test legacy.ew_platform == Float32.(ew)
+        @test legacy.ns_platform == Float32.(ns)
+        @test legacy.w_platform  == Float32.(w)
+
+        # Sweep without Georeference still gets zeros.
+        sweep_no_gr = SweepGroup(
+            sweep_number = 0,
+            sweep_mode = "azimuth_surveillance",
+            fixed_angle = 1.0,
+            time = [t0 + Second(r) for r in 0:(n_rays_s-1)],
+            range = collect(Float64, 400.0:100.0:(400.0 + 100.0 * (n_gates - 1))),
+            azimuth = collect(Float64, range(0.0, 270.0; length=n_rays_s)),
+            elevation = fill(1.0, n_rays_s),
+            nyquist_velocity = fill(25.0, n_rays_s),
+        )
+        add_field!(sweep_no_gr, "DBZ", fill(Float32(20.0), n_rays_s, n_gates),
+                   FieldMetadata(units="dBZ", fill_value=-32768.0))
+        v_stat = Volume(
+            instrument_name = "STATIONARY_TEST",
+            time_coverage_start = t0,
+            time_coverage_end = t0 + Second(n_rays_s),
+            latitude = 0.0, longitude = 0.0, altitude = 0.0,
+            sweeps = [sweep_no_gr],
+        )
+        legacy_stat, _ = as_legacy_radar(v_stat)
+        @test all(legacy_stat.ew_platform .== 0.0f0)
+        @test all(legacy_stat.ns_platform .== 0.0f0)
+        @test all(legacy_stat.w_platform  .== 0.0f0)
+    end
+
     @testset "v1 fixture → legacy radar shape" begin
         if !isfile(FIXTURE_V1)
             @info "Skipping bridge fixture round-trip"

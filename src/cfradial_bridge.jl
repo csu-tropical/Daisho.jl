@@ -3,16 +3,26 @@
 # fully migrated.
 
 """
-    as_legacy_radar(volume::Volume) -> (radar, field_names)
+    as_legacy_radar(volume::Volume; field_names=nothing) -> (radar, field_names)
 
 Flatten a `Volume` into the legacy `radar` struct and return it alongside the
 ordered list of canonical field names that match the moments-matrix columns.
-Field columns are in alphabetical order for stability.
 
-Assumes all sweeps share the same `range` axis. Sweeps with no fields
-contribute a moments matrix of NaN.
+When `field_names` is `nothing` (default), columns are laid out in alphabetical
+order of the volume's fields (legacy behavior, preserved for backwards
+compatibility).
+
+When `field_names` is supplied, columns are laid out in that exact order.
+Fields named but not present in any sweep produce a column of `missing`.
+
+Mobile-platform per-ray velocities (`eastward_velocity`, `northward_velocity`,
+`vertical_velocity`) are copied from `sweep.georeference` into the legacy
+`ew/ns/w_platform` arrays when present; otherwise those arrays are zeros.
+
+Assumes all sweeps share the same `range` axis.
 """
-function as_legacy_radar(volume::Volume)
+function as_legacy_radar(volume::Volume;
+                          field_names::Union{Nothing,Vector{String}}=nothing)
     isempty(volume.sweeps) && throw(ArgumentError("as_legacy_radar: empty volume"))
     range_vec = volume.sweeps[1].range
     for s in volume.sweeps
@@ -21,7 +31,7 @@ function as_legacy_radar(volume::Volume)
     end
     n_gates = length(range_vec)
     n_total_rays = sum(n_rays(s) for s in volume.sweeps; init=0)
-    field_list = field_names(volume)
+    field_list = field_names === nothing ? Daisho.field_names(volume) : copy(field_names)
     n_fields = length(field_list)
 
     azimuth = Vector{Union{Missing,Float32}}(undef, n_total_rays)
@@ -63,11 +73,24 @@ function as_legacy_radar(volume::Volume)
             longitudes[rng] .= Float32(volume.longitude)
             altitudes[rng] .= Float32(volume.altitude)
         end
+        if sweep.georeference !== nothing
+            gr = sweep.georeference
+            if gr.eastward_velocity !== nothing && length(gr.eastward_velocity) == n
+                ew_platform[rng] .= Float32.(gr.eastward_velocity)
+            end
+            if gr.northward_velocity !== nothing && length(gr.northward_velocity) == n
+                ns_platform[rng] .= Float32.(gr.northward_velocity)
+            end
+            if gr.vertical_velocity !== nothing && length(gr.vertical_velocity) == n
+                w_platform[rng] .= Float32.(gr.vertical_velocity)
+            end
+        end
         fixed_angles[si] = Float32(sweep.fixed_angle)
         swpstart[si] = Float32(cursor)
         swpend[si] = Float32(cursor + n - 1)
 
         for (name, fld) in sweep.fields
+            haskey(field_idx, name) || continue
             col = field_idx[name]
             data = fld.data
             # Convert NaN sentinel to missing for legacy consumers.
