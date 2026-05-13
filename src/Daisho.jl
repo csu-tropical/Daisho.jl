@@ -27,7 +27,7 @@ include("gridding.jl")
 include("springsteel_adapter.jl")
 
 # Runtime parameter system exports
-export DaishoParameters
+export DaishoParameters, print_config
 export MomentParameters, QCParameters, GriddingParameters
 export GridParameters, CartesianGridParameters, LatLonGridParameters
 export RhiGridParameters, SpectralGridParameters, SpectralBCParameters

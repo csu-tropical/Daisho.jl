@@ -58,6 +58,19 @@ The algorithm uses a BallTree spatial index for efficient nearest-neighbor queri
 - **`missing_key`**: The moment used to determine if a gate has valid data (e.g., "SQI").
 - **`valid_key`**: The moment used to check for non-missing data (e.g., "DBZ").
 
+## Configuration files
+
+The high-level [`DaishoParameters`](@ref) struct bundles QC thresholds, gridding knobs, grid geometry (Cartesian / lat-lon / RHI / spectral), CF-1.12 metadata, and I/O fill values. It is loaded from a TOML file. To start a configuration, write the bundled template to a path you control and edit it for your deployment:
+
+```julia
+using Daisho
+print_config("mygrid.toml")            # write the template
+# edit mygrid.toml: radar, grid geometry, [grid.metadata] CF attributes …
+p = DaishoParameters("mygrid.toml")    # strict load
+```
+
+`DaishoParameters(path)` is strict: every key documented in the template must be present in your file. There is no silent fallback to bundled defaults — a missing or mis-typed key raises an `ArgumentError` at load time, naming the offending section. This avoids subtle bugs where a forgotten or fat-fingered parameter would silently take a default value.
+
 ## Coordinate Systems
 
 Daisho uses Transverse Mercator projections (via CoordRefSystems.jl) centered on the radar location. The approximate inverse projection function converts projected coordinates back to lat/lon:
@@ -99,7 +112,7 @@ The flow uses three verbs:
 Example (one CfRadial file per sweep along a flight leg):
 
 ```julia
-p = DaishoParameters("config/your.toml")
+p = DaishoParameters("mygrid.toml")
 first_volume = read_cfradial(first(p3_files))
 grid_spec = build_grid_spec(:volume_3d, first_volume, p)
 

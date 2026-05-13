@@ -1,9 +1,11 @@
 # Daisho.jl runtime parameter system.
 #
-# Loads layered TOML configuration into immutable typed structs. Each section
-# of the TOML maps 1:1 to a section struct; the top-level `DaishoParameters`
-# bundles them. Bundled defaults live at `config/defaults.toml`; user TOML
-# files are deep-merged over those defaults.
+# Loads TOML configuration into immutable typed structs. Each section of the
+# TOML maps 1:1 to a section struct; the top-level `DaishoParameters` bundles
+# them. `config/defaults.toml` ships as the canonical template: users obtain a
+# copy via `print_config("mygrid.toml")` and edit it. Loading is strict —
+# `DaishoParameters(path)` reads only the user file, never silently falling
+# back to bundled defaults.
 
 using TOML
 
@@ -182,16 +184,18 @@ end
 """
     MetadataParameters
 
-CF-1.12 global attributes written to every gridded NetCDF output. Override
-per-deployment in a user TOML under `[grid.metadata]`; defaults match the
-historical hard-coded SEA-POL identity so existing workflows are unaffected.
+CF-1.12 global attributes written to every gridded NetCDF output. Every field
+must be set in the user TOML under `[grid.metadata]`; the bundled template
+ships generic placeholders (e.g. `institution = "Your Institution"`) so an
+unedited config produces files that are obviously templates rather than
+masquerading as someone else's data.
 
 # Fields
 - `Conventions::String`: CF metadata conventions version.
 - `history::String`: provenance string written into the file.
 - `institution::String`: producing institution.
 - `source::String`: producing instrument / platform identifier.
-- `instrument::String`: short instrument name (e.g., `"SEA-POL"`).
+- `instrument::String`: short instrument name.
 - `title::String`: dataset title.
 - `summary::String`: longer-form summary (often equal to `title`).
 - `creator_name::String`: data creator's name.
@@ -202,36 +206,44 @@ historical hard-coded SEA-POL identity so existing workflows are unaffected.
 - `keywords::String`: comma-separated CF/ACDD keywords.
 - `processing_level::String`: ACDD processing level (e.g., `"Level 4"`).
 - `license::String`: data license (e.g., `"CC-BY-4.0"`).
-- `references::String`: optional URL/DOI list. Empty by default and only
-  emitted as a NetCDF global attribute when explicitly set.
+- `references::String`: optional URL/DOI list. May be set to `""`; the empty
+  string suppresses the corresponding NetCDF global attribute.
 
 # Examples
 ```toml
 [grid.metadata]
-source        = "NCAR S-PolKa radar"
-instrument    = "S-PolKa"
-title         = "Level 4 Gridded S-PolKa Radar Data"
-creator_name  = "Jane Doe"
-creator_email = "jane.doe@example.org"
-project       = "DYNAMO"
-platform      = "Addu Atoll"
-references    = "https://doi.org/10.0000/example"
+Conventions      = "CF-1.12"
+history          = "v1.0"
+institution      = "Example University"
+source           = "Example C-band radar"
+instrument       = "EXAMPLE"
+title            = "Gridded Radar Data"
+summary          = "Gridded Radar Data"
+creator_name     = "Data Creator"
+creator_email    = "creator@example.org"
+creator_id       = "https://orcid.org/0000-0000-0000-0000"
+project          = "EXAMPLE-2026"
+platform         = "Field site"
+keywords         = "radar, precipitation"
+processing_level = "Level 4"
+license          = "CC-BY-4.0"
+references       = "https://doi.org/10.0000/example"
 ```
 """
 Base.@kwdef struct MetadataParameters
     Conventions::String       = "CF-1.12"
     history::String           = "v1.0"
-    institution::String       = "Colorado State University"
-    source::String            = "CSU SEA-POL radar"
-    instrument::String        = "SEA-POL"
-    title::String             = "Level 4 Gridded SEA-POL Radar Data"
-    summary::String           = "Level 4 Gridded SEA-POL Radar Data"
-    creator_name::String      = "Michael M. Bell"
-    creator_email::String     = "mmbell@colostate.edu"
-    creator_id::String        = "https://orcid.org/0000-0002-0496-331X"
-    project::String           = "PICCOLO, BOWTIE, ORCESTRA"
-    platform::String          = "RV METEOR"
-    keywords::String          = "radar, precipitation, sea-pol"
+    institution::String       = "Your Institution"
+    source::String            = "Your radar"
+    instrument::String        = "Radar"
+    title::String             = "Gridded Radar Data"
+    summary::String           = "Gridded Radar Data"
+    creator_name::String      = "Data Creator"
+    creator_email::String     = ""
+    creator_id::String        = ""
+    project::String           = ""
+    platform::String          = ""
+    keywords::String          = "radar, precipitation"
     processing_level::String  = "Level 4"
     license::String           = "CC-BY-4.0"
     references::String        = ""
@@ -268,8 +280,8 @@ end
     DaishoParameters
 
 Top-level immutable runtime configuration loaded from a TOML file. Construct
-via `DaishoParameters()` for bundled defaults or `DaishoParameters(path)` for
-defaults plus user overrides.
+via `DaishoParameters()` for the bundled template or `DaishoParameters(path)`
+for a user file (strict — every key in the template must be present).
 
 # Fields
 - `moments::MomentParameters`
@@ -280,9 +292,10 @@ defaults plus user overrides.
 
 # Examples
 ```julia
-p = DaishoParameters()                       # bundled defaults
-p = DaishoParameters("config/seapol.toml")   # defaults + user overrides
-threshold_qc(raw, raw_dict, qc, qc_dict, p)
+print_config("mygrid.toml")            # write the template
+# edit mygrid.toml for your radar, grid, and CF metadata
+p = DaishoParameters("mygrid.toml")    # strict load
+threshold_qc!(sweep, p)
 grid_radar_volume(volume, "out.nc", time, p)
 ```
 """
@@ -300,78 +313,111 @@ end
     DaishoParameters() -> DaishoParameters
     DaishoParameters(path::AbstractString) -> DaishoParameters
 
-Construct a `DaishoParameters` instance. With no arguments, loads bundled
-defaults from `config/defaults.toml`. With a path, loads the bundled defaults
-and then deep-merges the user's TOML on top, so user files only need to
-specify keys they wish to override.
-"""
-function DaishoParameters()
-    return DaishoParameters(_load_toml_layered(nothing))
-end
+Construct a `DaishoParameters` instance. With no arguments, loads the bundled
+template from `config/defaults.toml`. With a path, loads only the user's TOML
+— there is no silent fallback to bundled defaults. Every section and key
+documented in the template must be present, otherwise an `ArgumentError` is
+raised naming the missing item.
 
-function DaishoParameters(path::AbstractString)
-    return DaishoParameters(_load_toml_layered(path))
-end
+Use [`print_config`](@ref) to write a complete starter template to a file you
+can edit.
+"""
+DaishoParameters() = DaishoParameters(_load_toml(DEFAULTS_TOML_PATH))
+DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 
 # Internal: build from an already-parsed Dict (used by ctors and tests).
 function DaishoParameters(d::AbstractDict)
     moments  = _fields_from_dict(_section(d, "fields"))
-    qc       = _struct_from_dict(QCParameters,         _section(d, "qc"))
-    gridding = _struct_from_dict(GriddingParameters,   _section(d, "gridding"))
+    qc       = _struct_from_dict(QCParameters,       _section(d, "qc");                  section="qc")
+    gridding = _struct_from_dict(GriddingParameters, _section(d, "gridding");            section="gridding")
     grid     = _grid_from_dict(_section(d, "grid"))
-    io       = _struct_from_dict(IOParameters,         _section(d, "io"))
+    io       = _struct_from_dict(IOParameters,       _section(d, "io");                  section="io")
     return DaishoParameters(moments, qc, gridding, grid, io)
 end
 
-function _load_toml_layered(user_path::Union{Nothing,AbstractString})
-    defaults = TOML.parsefile(DEFAULTS_TOML_PATH)
-    if user_path === nothing
-        return defaults
-    end
-    isfile(user_path) || throw(ArgumentError("Daisho parameter file not found: $user_path"))
-    user = TOML.parsefile(user_path)
-    return _deep_merge(defaults, user)
+"""
+    print_config([io::IO = stdout])
+    print_config(path::AbstractString; force::Bool=false) -> String
+
+Write the bundled Daisho parameter template (currently `config/defaults.toml`)
+to `io`, or copy it to a file at `path`. The file form refuses to overwrite an
+existing file unless `force=true`, and returns the destination path.
+
+`DaishoParameters(path)` requires every documented key to be present in the
+file you pass it, so the typical workflow is:
+
+```julia
+using Daisho
+print_config("mygrid.toml")          # write template
+# edit mygrid.toml for your radar, grid, and CF metadata
+p = DaishoParameters("mygrid.toml")  # strict load
+```
+"""
+function print_config(io::IO=stdout)
+    write(io, read(DEFAULTS_TOML_PATH))
+    return nothing
 end
 
-# Recursively merges `b` into `a`. Sub-tables merge key-by-key; leaves take
-# `b`'s value. Returns a new Dict (does not mutate).
-function _deep_merge(a::AbstractDict, b::AbstractDict)
-    out = Dict{String,Any}()
-    for (k, v) in a
-        out[String(k)] = v
+function print_config(path::AbstractString; force::Bool=false)
+    if isfile(path) && !force
+        throw(ArgumentError(
+            "print_config: refusing to overwrite existing file `$path` " *
+            "(pass `force=true` to overwrite)"))
     end
-    for (k, v) in b
-        ks = String(k)
-        if v isa AbstractDict && haskey(out, ks) && out[ks] isa AbstractDict
-            out[ks] = _deep_merge(out[ks], v)
-        else
-            out[ks] = v
-        end
-    end
-    return out
+    cp(DEFAULTS_TOML_PATH, path; force=true)
+    return path
 end
 
-_section(d::AbstractDict, key::String) =
-    haskey(d, key) ? d[key] : Dict{String,Any}()
+function _load_toml(path::AbstractString)
+    isfile(path) || throw(ArgumentError("Daisho parameter file not found: $path"))
+    return TOML.parsefile(path)
+end
 
-# Build any kwdef struct by pulling matching keys out of `d`. Unknown keys
-# are reported (so users notice typos). Missing keys fall back to the kwdef
-# default.
-function _struct_from_dict(::Type{T}, d::AbstractDict) where {T}
+# Look up a required sub-table. Missing sections are user errors, not
+# something to paper over with empty dicts.
+function _section(d::AbstractDict, key::String; parent::String="")
+    if !haskey(d, key)
+        full = isempty(parent) ? key : "$(parent).$(key)"
+        throw(ArgumentError(
+            "Missing required TOML section `[$(full)]`. " *
+            "Run `print_config(\"template.toml\")` to write a complete template."))
+    end
+    return d[key]
+end
+
+# Build a struct by pulling matching keys out of `d`. Unknown keys are
+# reported (so users notice typos); missing keys are reported (so silent
+# fallback to defaults can't happen).
+function _struct_from_dict(::Type{T}, d::AbstractDict; section::String="") where {T}
     fields = fieldnames(T)
+    field_set = Set(fields)
+    keysyms = Set(Symbol.(keys(d)))
+
+    unknown = setdiff(keysyms, field_set)
+    if !isempty(unknown)
+        throw(ArgumentError(
+            "Unknown key(s) $(_fmt_keys(unknown)) in section " *
+            "`[$(section)]` for $(T). " *
+            "Allowed keys: $(join(fields, ", "))"))
+    end
+
+    missing_keys = setdiff(field_set, keysyms)
+    if !isempty(missing_keys)
+        throw(ArgumentError(
+            "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
+            "`[$(section)]` for $(T). " *
+            "Run `print_config(\"template.toml\")` for a complete template."))
+    end
+
     kw = Dict{Symbol,Any}()
     for (k, v) in d
         sym = Symbol(k)
-        if sym in fields
-            kw[sym] = _coerce_field(T, sym, v)
-        else
-            throw(ArgumentError(
-                "Unknown key `$(k)` in section for $(T). " *
-                "Allowed keys: $(join(fields, ", "))"))
-        end
+        kw[sym] = _coerce_field(T, sym, v)
     end
     return T(; kw...)
 end
+
+_fmt_keys(keys) = "`" * join(sort(string.(collect(keys))), "`, `") * "`"
 
 # Coerce loaded values to the field's declared type. Catches the common
 # Int/Float64 mismatch (TOML's `0.0` is Float64, `0` is Int).
@@ -391,12 +437,17 @@ end
 # ── Section-specific loaders ────────────────────────────────────────────────
 
 function _fields_from_dict(d::AbstractDict)
-    names_raw = get(d, "names", String[])
-    names = String.(names_raw)
+    haskey(d, "names") || throw(ArgumentError(
+        "Missing required key `names` in section `[fields]`. " *
+        "Run `print_config(\"template.toml\")` for a complete template."))
+    haskey(d, "grid_type") || throw(ArgumentError(
+        "Missing required key `grid_type` in section `[fields]`. " *
+        "Run `print_config(\"template.toml\")` for a complete template."))
 
-    grid_type_raw = get(d, "grid_type", Dict{String,String}())
+    names = String.(d["names"])
+
     grid_type = Dict{String,Symbol}()
-    for (k, v) in grid_type_raw
+    for (k, v) in d["grid_type"]
         grid_type[String(k)] = Symbol(String(v))
     end
 
@@ -414,28 +465,31 @@ function _fields_from_dict(d::AbstractDict)
 end
 
 function _grid_from_dict(d::AbstractDict)
-    cartesian = _struct_from_dict(CartesianGridParameters, _section(d, "cartesian"))
-    latlon    = _struct_from_dict(LatLonGridParameters,    _section(d, "latlon"))
-    rhi       = _struct_from_dict(RhiGridParameters,       _section(d, "rhi"))
-    spectral  = _spectral_from_dict(_section(d, "spectral"))
-    metadata  = _struct_from_dict(MetadataParameters,      _section(d, "metadata"))
+    cartesian = _struct_from_dict(CartesianGridParameters, _section(d, "cartesian"; parent="grid"); section="grid.cartesian")
+    latlon    = _struct_from_dict(LatLonGridParameters,    _section(d, "latlon";    parent="grid"); section="grid.latlon")
+    rhi       = _struct_from_dict(RhiGridParameters,       _section(d, "rhi";       parent="grid"); section="grid.rhi")
+    spectral  = _spectral_from_dict(_section(d, "spectral"; parent="grid"))
+    metadata  = _struct_from_dict(MetadataParameters,      _section(d, "metadata";  parent="grid"); section="grid.metadata")
     return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi,
                           spectral=spectral, metadata=metadata)
 end
 
 function _spectral_from_dict(d::AbstractDict)
-    bc_dict = _section(d, "bc")
+    bc_dict = _section(d, "bc"; parent="grid.spectral")
     bc = SpectralBCParameters(
-        xL = _parse_bc(_section(bc_dict, "xL")),
-        xR = _parse_bc(_section(bc_dict, "xR")),
-        yL = _parse_bc(_section(bc_dict, "yL")),
-        yR = _parse_bc(_section(bc_dict, "yR")),
-        zL = _parse_bc(_section(bc_dict, "zL")),
-        zR = _parse_bc(_section(bc_dict, "zR")),
+        xL = _parse_bc(_section(bc_dict, "xL"; parent="grid.spectral.bc"); side="xL"),
+        xR = _parse_bc(_section(bc_dict, "xR"; parent="grid.spectral.bc"); side="xR"),
+        yL = _parse_bc(_section(bc_dict, "yL"; parent="grid.spectral.bc"); side="yL"),
+        yR = _parse_bc(_section(bc_dict, "yR"; parent="grid.spectral.bc"); side="yR"),
+        zL = _parse_bc(_section(bc_dict, "zL"; parent="grid.spectral.bc"); side="zL"),
+        zR = _parse_bc(_section(bc_dict, "zR"; parent="grid.spectral.bc"); side="zR"),
     )
-    # Strip bc out before forwarding to generic struct loader.
+    # The scalar struct loader requires every field to be present; `bc`
+    # comes from the per-side parsing above, not from `d` itself, so stuff a
+    # placeholder in to satisfy the missing-key check and ignore it below.
     rest = Dict{String,Any}(k => v for (k, v) in d if k != "bc")
-    base = _struct_from_dict(SpectralGridParameters, rest)
+    rest["bc"] = SpectralBCParameters()
+    base = _struct_from_dict(SpectralGridParameters, rest; section="grid.spectral")
     # Rebuild with parsed bc.
     return SpectralGridParameters(
         geometry   = base.geometry,
@@ -448,11 +502,11 @@ function _spectral_from_dict(d::AbstractDict)
     )
 end
 
-# Map a BC sub-table to a Springsteel BoundaryConditions. Empty table → NaturalBC().
-function _parse_bc(d::AbstractDict)
-    isempty(d) && return NaturalBC()
+# Map a BC sub-table to a Springsteel BoundaryConditions.
+function _parse_bc(d::AbstractDict; side::String="")
+    where_ = isempty(side) ? "BC sub-table" : "[grid.spectral.bc.$(side)]"
     haskey(d, "type") || throw(ArgumentError(
-        "BC sub-table missing required `type` key"))
+        "$(where_) missing required `type` key"))
     t = lowercase(String(d["type"]))
     if t == "natural"
         return NaturalBC()
