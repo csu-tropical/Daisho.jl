@@ -1,8 +1,15 @@
-# Daisho.jl default parameters.
+# Daisho.jl parameter template.
 #
-# Loaded by `DaishoParameters()` (no args). User TOML files passed to
-# `DaishoParameters(path)` are deep-merged over these defaults, so user files
-# only need to specify keys they wish to override.
+# This file is the canonical template for `DaishoParameters`. To start a new
+# configuration, copy it from inside Julia:
+#
+#     using Daisho
+#     print_config("mygrid.toml")
+#
+# Then edit `mygrid.toml` and load it with `DaishoParameters("mygrid.toml")`.
+# Loading is strict: every key documented below must be present in your file.
+# There is no silent fallback to defaults — missing or mis-typed keys raise an
+# error at load time, naming the offending section.
 #
 # Structure mirrors the `DaishoParameters` struct hierarchy exactly:
 #   [fields]               -> p.moments  (CfRadial 2.1: dropped raw/qc split)
@@ -105,24 +112,25 @@ type = "natural"
 [grid.spectral.bc.zR]
 type = "natural"
 
-# CF-1.12 global attributes copied into every gridded NetCDF output.
-# Override per-deployment in a user TOML; defaults below match historical
-# SEA-POL identity so existing workflows are unaffected. The `references`
-# slot is empty by default and only written to the file when set here.
+# CF-1.12 global attributes copied into every gridded NetCDF output. Every
+# key below must be present in your config; the values shipped here are
+# generic placeholders — edit them for your deployment. The `references`
+# slot may be left as `""`; the empty string suppresses the corresponding
+# NetCDF global attribute on write.
 [grid.metadata]
 Conventions      = "CF-1.12"
 history          = "v1.0"
-institution      = "Colorado State University"
-source           = "CSU SEA-POL radar"
-instrument       = "SEA-POL"
-title            = "Level 4 Gridded SEA-POL Radar Data"
-summary          = "Level 4 Gridded SEA-POL Radar Data"
-creator_name     = "Michael M. Bell"
-creator_email    = "mmbell@colostate.edu"
-creator_id       = "https://orcid.org/0000-0002-0496-331X"
-project          = "PICCOLO, BOWTIE, ORCESTRA"
-platform         = "RV METEOR"
-keywords         = "radar, precipitation, sea-pol"
+institution      = "Your Institution"
+source           = "Your radar"
+instrument       = "Radar"
+title            = "Gridded Radar Data"
+summary          = "Gridded Radar Data"
+creator_name     = "Data Creator"
+creator_email    = ""
+creator_id       = ""
+project          = ""
+platform         = ""
+keywords         = "radar, precipitation"
 processing_level = "Level 4"
 license          = "CC-BY-4.0"
 references       = ""

@@ -342,7 +342,7 @@
                     @test ds.attrib["references"]    == "https://example.org/refs"
                     # Untouched defaults still arrive on disk.
                     @test ds.attrib["Conventions"]   == "CF-1.12"
-                    @test ds.attrib["institution"]   == "Colorado State University"
+                    @test ds.attrib["institution"]   == "Your Institution"
                     @test ds.attrib["license"]       == "CC-BY-4.0"
                 finally
                     close(ds)
@@ -376,7 +376,7 @@
             ds = NCDataset(outfile, "r")
             try
                 @test !haskey(ds.attrib, "references")
-                @test ds.attrib["creator_name"] == "Michael M. Bell"
+                @test ds.attrib["creator_name"] == "Data Creator"
             finally
                 close(ds)
             end
