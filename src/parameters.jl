@@ -52,7 +52,7 @@ grid_type_index_dict(p) = Dict{Int,Symbol}(
 """
     QCParameters
 
-Quality-control thresholds applied by [`threshold_qc`](@ref).
+Quality-control thresholds applied by [`threshold_qc!`](@ref).
 
 # Fields
 - `sqi_threshold::Float64`: minimum signal quality index.
