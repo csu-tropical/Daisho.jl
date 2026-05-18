@@ -140,13 +140,19 @@ end
 """
     GridAccumulator(grid_spec, p::DaishoParameters)
 
-Allocate an accumulator using `p.moments.fields` for the column order and
-`p.moments.grid_type` for the interpolation hints. Field-folds defaults to all
-false; the caller can override with the explicit constructor when gridding a
-field-folds quantity (e.g. `VEL`).
+Allocate an accumulator from a `DaishoParameters`. Column order is the field
+names sorted by name (order-independent of the source TOML, matching
+[`field_index_dict`](@ref) so the accumulator columns and the writer's index
+map agree); interpolation is derived from each field's tags via
+[`interp_of`](@ref). Field-folds defaults to all false; the caller can override
+with the explicit constructor when gridding a field-folds quantity (e.g.
+`VEL`).
 """
 function GridAccumulator(grid_spec::GridSpec, p::DaishoParameters)
-    return GridAccumulator(grid_spec, p.moments.fields, p.moments.grid_type)
+    ordered = _ordered_fields(p)
+    return GridAccumulator(grid_spec,
+        [fs.name for fs in ordered],
+        Dict{String,Symbol}(fs.name => interp_of(fs) for fs in ordered))
 end
 
 # ── JLD2 IO ──────────────────────────────────────────────────────────────────
@@ -473,8 +479,8 @@ function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
                           ref_altitude::Float64)
     g  = accum.grid_spec
     gd = p.gridding
-    missing_key = gd.missing_key
-    valid_key   = gd.valid_key
+    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
+    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -620,8 +626,8 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               ref_altitude::Float64)
     g  = accum.grid_spec
     gd = p.gridding
-    missing_key = gd.missing_key
-    valid_key   = gd.valid_key
+    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
+    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -748,8 +754,8 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               ref_altitude::Float64)
     g  = accum.grid_spec
     gd = p.gridding
-    missing_key = gd.missing_key
-    valid_key   = gd.valid_key
+    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
+    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -856,8 +862,8 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
                                     ref_altitude::Float64)
     g  = accum.grid_spec
     gd = p.gridding
-    missing_key = gd.missing_key
-    valid_key   = gd.valid_key
+    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
+    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -965,8 +971,8 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
                                  ref_altitude::Float64)
     g  = accum.grid_spec
     gd = p.gridding
-    missing_key = gd.missing_key
-    valid_key   = gd.valid_key
+    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
+    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)

@@ -2274,11 +2274,14 @@ Parameter-struct overload reading from `p.grid.cartesian`, `p.gridding`, and
 """
 function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
-    g, gd = p.grid.cartesian, p.gridding
+    g = require_section(p, :grid, :cartesian; for_op="grid_radar_volume")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_volume")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_volume")
     grid_radar_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2290,12 +2293,15 @@ Parameter-struct overload reading from `p.grid.latlon`, `p.gridding`, and
 """
 function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractString,
                                    index_time, p::DaishoParameters; heading::Real=-9999.0)
-    g, gd = p.grid.latlon, p.gridding
+    g = require_section(p, :grid, :latlon; for_op="grid_radar_latlon_volume")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_latlon_volume")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_latlon_volume")
     grid_radar_latlon_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.lonmin, g.londim, g.latmin, g.latdim, g.degincr,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2306,11 +2312,14 @@ Parameter-struct overload reading from `p.grid.rhi`, `p.gridding`, and `p.moment
 """
 function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
                          index_time, p::DaishoParameters)
-    g, gd = p.grid.rhi, p.gridding
+    g = require_section(p, :grid, :rhi; for_op="grid_radar_rhi")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_rhi")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_rhi")
     grid_radar_rhi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key,
+        gd.beam_inflation, gd.power_threshold, mk, dk,
         p.grid.metadata)
 end
 
@@ -2323,11 +2332,14 @@ fields are ignored.
 """
 function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
                          index_time, p::DaishoParameters; heading::Real=-9999.0)
-    g, gd = p.grid.cartesian, p.gridding
+    g = require_section(p, :grid, :cartesian; for_op="grid_radar_ppi")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_ppi")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_ppi")
     grid_radar_ppi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key, heading,
+        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2340,11 +2352,14 @@ not applicable to composite gridding.
 """
 function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
                                index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
-    g, gd = p.grid.cartesian, p.gridding
+    g = require_section(p, :grid, :cartesian; for_op="grid_radar_composite")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_composite")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_composite")
     grid_radar_composite(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, gd.missing_key, gd.valid_key, mean_heading,
+        gd.beam_inflation, mk, dk, mean_heading,
         p.grid.metadata)
 end
 
@@ -2356,11 +2371,14 @@ plus `p.gridding` and `p.moments`.
 """
 function grid_radar_column(radar_volume::radar, output_file::AbstractString,
                             index_time, p::DaishoParameters)
-    g, gd = p.grid.cartesian, p.gridding
+    g = require_section(p, :grid, :cartesian; for_op="grid_radar_column")
+    gd = p.gridding
+    mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_column")
+    dk = field_with_tag(p, :define_detection; for_op="grid_radar_column")
     grid_radar_column(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, gd.missing_key, gd.valid_key,
+        gd.beam_inflation, gd.power_threshold, mk, dk,
         p.grid.metadata)
 end
 
@@ -2372,6 +2390,7 @@ end
 
 function grid_radar_volume(volume::Volume, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
+    require_section(p, :grid, :cartesian; for_op="grid_radar_volume")
     spec = build_grid_spec(:volume_3d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2390,6 +2409,7 @@ end
 
 function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
                                    index_time, p::DaishoParameters; heading::Real=-9999.0)
+    require_section(p, :grid, :latlon; for_op="grid_radar_latlon_volume")
     spec = build_grid_spec(:latlon_3d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2408,6 +2428,7 @@ end
 
 function grid_radar_rhi(volume::Volume, output_file::AbstractString,
                         index_time, p::DaishoParameters)
+    require_section(p, :grid, :rhi; for_op="grid_radar_rhi")
     spec = build_grid_spec(:rhi_2d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2424,6 +2445,7 @@ end
 
 function grid_radar_ppi(volume::Volume, output_file::AbstractString,
                         index_time, p::DaishoParameters; heading::Real=-9999.0)
+    require_section(p, :grid, :cartesian; for_op="grid_radar_ppi")
     spec = build_grid_spec(:ppi_2d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2441,6 +2463,7 @@ end
 
 function grid_radar_composite(volume::Volume, output_file::AbstractString,
                               index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
+    require_section(p, :grid, :cartesian; for_op="grid_radar_composite")
     spec = build_grid_spec(:composite_2d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2458,6 +2481,7 @@ end
 
 function grid_radar_column(volume::Volume, output_file::AbstractString,
                            index_time, p::DaishoParameters)
+    require_section(p, :grid, :cartesian; for_op="grid_radar_column")
     spec = build_grid_spec(:column_1d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)

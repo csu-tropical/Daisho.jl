@@ -763,7 +763,7 @@ Parameter-struct overload that builds a Springsteel spectral grid from
 `p.moments.fields` (1-based indices in source order).
 """
 function create_radar_grid(p::DaishoParameters)
-    s = p.grid.spectral
+    s = require_section(p, :grid, :spectral; for_op="create_radar_grid")
     moment_dict = field_index_dict(p)
     return create_radar_grid(s.geometry, moment_dict;
         xmin=s.xmin, xmax=s.xmax, xdim=s.xdim,
@@ -789,7 +789,8 @@ function grid_radar_volume_spectral(radar_volume, output_file::AbstractString,
     grid_radar_volume_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
         p.gridding.beam_inflation, p.gridding.power_threshold;
-        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_volume_spectral"),
+        valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_volume_spectral"),
         heading=heading, institution=institution, source=source,
         include_derivatives=include_derivatives)
 end
@@ -808,7 +809,8 @@ function grid_radar_ppi_spectral(radar_volume, output_file::AbstractString,
     grid_radar_ppi_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
         p.gridding.beam_inflation, p.gridding.power_threshold;
-        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_ppi_spectral"),
+        valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_ppi_spectral"),
         heading=heading, institution=institution, source=source,
         include_derivatives=include_derivatives)
 end
@@ -826,7 +828,8 @@ function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
     grid_radar_column_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
         p.gridding.beam_inflation, p.gridding.power_threshold;
-        missing_key=p.gridding.missing_key, valid_key=p.gridding.valid_key,
+        missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_column_spectral"),
+        valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_column_spectral"),
         institution=institution, source=source,
         include_derivatives=include_derivatives)
 end
@@ -837,7 +840,7 @@ function grid_radar_volume_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
+    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
     grid_radar_volume_spectral(legacy, output_file, index_time, sgrid, p;
         heading=heading, institution=institution, source=source,
         include_derivatives=include_derivatives)
@@ -847,7 +850,7 @@ function grid_radar_ppi_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
+    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
     grid_radar_ppi_spectral(legacy, output_file, index_time, sgrid, p;
         heading=heading, institution=institution, source=source,
         include_derivatives=include_derivatives)
@@ -856,7 +859,7 @@ end
 function grid_radar_column_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         institution::String="", source::String="", include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=p.moments.fields)
+    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
     grid_radar_column_spectral(legacy, output_file, index_time, sgrid, p;
         institution=institution, source=source,
         include_derivatives=include_derivatives)
