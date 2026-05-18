@@ -11,43 +11,112 @@ using TOML
 
 const DEFAULTS_TOML_PATH = joinpath(@__DIR__, "..", "config", "defaults.toml")
 
+# ── Field tag vocabulary ─────────────────────────────────────────────────────
+# Each field in `[fields]` maps to a flat array of tags drawn from this
+# allowlist. No tag is required. New per-field capabilities are added as new
+# tags + a consumer, never a schema change.
+
+const FIELD_TAG_VOCAB = (
+    :linear_interp, :weighted_interp, :nearest_interp,  # interpolation
+    :define_detection, :define_scanned,                 # role tags (consumed)
+    :velocity,                                          # reserved
+)
+const FIELD_INTERP_TAGS   = (:linear_interp, :weighted_interp, :nearest_interp)
+const FIELD_SINGULAR_TAGS = (:define_detection, :define_scanned, :velocity)
+
 # ── Section structs ──────────────────────────────────────────────────────────
+
+"""
+    FieldSpec
+
+One canonical field and the flat set of vocabulary tags it carries. Tags drive
+interpolation ([`interp_of`](@ref)) and gridding roles ([`field_with_tag`](@ref));
+order is insignificant.
+"""
+struct FieldSpec
+    name::String
+    tags::Set{Symbol}
+end
 
 """
     MomentParameters
 
-Canonical field names of interest plus a per-name gridding-interpolation hint.
-The CfRadial 2.1 refactor dropped the historical raw/qc distinction: a field
-is just a field, and its CfRadial relationships (e.g. `is_quality_field`,
+Canonical fields of interest, each a [`FieldSpec`](@ref) carrying a flat tag
+list. The CfRadial 2.1 refactor dropped the historical raw/qc distinction: a
+field is just a field, and its CfRadial relationships (e.g. `is_quality_field`,
 `qualified_variables`) are recorded in `Field.metadata`.
 
 # Fields
-- `fields::Vector{String}`: canonical field names of interest, in load order.
-- `grid_type::Dict{String,Symbol}`: per-name interpolation hint (`:linear`,
-  `:weighted`, `:nearest`).
+- `fields::Vector{FieldSpec}`: canonical fields of interest. Field order is
+  insignificant — internal column order is derived deterministically by sorted
+  field name.
 """
 struct MomentParameters
-    fields::Vector{String}
-    grid_type::Dict{String,Symbol}
+    fields::Vector{FieldSpec}
 end
+
+"""
+    has_tag(fs::FieldSpec, t::Symbol) -> Bool
+
+Whether field `fs` carries tag `t`.
+"""
+has_tag(fs::FieldSpec, t::Symbol) = t in fs.tags
+
+"""
+    interp_of(fs::FieldSpec) -> Symbol
+
+Interpolation mode derived from a field's tags: `:linear` (`linear_interp`),
+`:nearest` (`nearest_interp`), or `:weighted` (the default when no
+interpolation tag is present).
+"""
+function interp_of(fs::FieldSpec)
+    :linear_interp  in fs.tags && return :linear
+    :nearest_interp in fs.tags && return :nearest
+    return :weighted
+end
+
+# Deterministic, TOML-order-independent column order.
+_ordered_fields(p) = sort(p.moments.fields; by = fs -> fs.name)
 
 """
     field_index_dict(p::DaishoParameters) -> Dict{String,Int}
 
-Build a name→column-index dict from `p.moments.fields`. Used by drivers that
-need a moment_dict for the legacy gridding workers.
+Build a name→column-index dict over the fields sorted by name. Used by drivers
+that need a moment_dict for the legacy gridding workers. Column order is
+order-independent of the source TOML.
 """
-field_index_dict(p) = Dict{String,Int}(name => i for (i, name) in enumerate(p.moments.fields))
+field_index_dict(p) = Dict{String,Int}(fs.name => i
+    for (i, fs) in enumerate(_ordered_fields(p)))
 
 """
     grid_type_index_dict(p::DaishoParameters) -> Dict{Int,Symbol}
 
-Build a column-index→grid-type dict from `p.moments.fields` and
-`p.moments.grid_type`. Used by drivers that need a grid_type_dict for the
-legacy gridding workers.
+Build a column-index→interpolation-mode dict over the fields sorted by name
+(matching [`field_index_dict`](@ref)). Used by drivers that need a
+grid_type_dict for the legacy gridding workers.
 """
-grid_type_index_dict(p) = Dict{Int,Symbol}(
-    i => p.moments.grid_type[p.moments.fields[i]] for i in eachindex(p.moments.fields))
+grid_type_index_dict(p) = Dict{Int,Symbol}(i => interp_of(fs)
+    for (i, fs) in enumerate(_ordered_fields(p)))
+
+"""
+    field_with_tag(p::DaishoParameters, tag::Symbol; for_op::String="") -> String
+
+Resolve the single field carrying a singular role tag (e.g. `:define_scanned`,
+`:define_detection`). Point-of-use replacement for the old
+`missing_key`/`valid_key`: a non-gridding workflow need not declare these, so
+the error is raised here (naming the operation) rather than at load.
+"""
+function field_with_tag(p, tag::Symbol; for_op::String="")
+    m = [fs.name for fs in p.moments.fields if tag in fs.tags]
+    length(m) == 1 && return m[1]
+    if isempty(m)
+        throw(ArgumentError("[fields]: no field is tagged `$tag`" *
+            (isempty(for_op) ? "" : " (required by $for_op)") *
+            ". Add \"$tag\" to exactly one field's tag list."))
+    end
+    throw(ArgumentError("[fields]: tag `$tag` is on multiple fields " *
+        "$m; it must be on exactly one."))
+end
 
 """
     QCParameters
@@ -76,14 +145,16 @@ Engine-level gridding knobs shared across all gridding drivers.
 - `beam_inflation::Float64`: factor for inflating ROI with distance from radar
   (0.0 disables).
 - `power_threshold::Float64`: minimum beam power weight for a gate to contribute.
-- `missing_key::String`: moment name used to detect "no signal" gates.
-- `valid_key::String`: moment name used for valid-data gating.
+
+The two gate-role moments are no longer configured here: the field whose
+presence proves a gate was scanned (formerly `missing_key`) and the field
+whose presence proves a detectable echo (formerly `valid_key`) are now
+declared as the `define_scanned` / `define_detection` tags in `[fields]` and
+resolved via [`field_with_tag`](@ref).
 """
 Base.@kwdef struct GriddingParameters
     beam_inflation::Float64  = 0.01
     power_threshold::Float64 = 0.5
-    missing_key::String      = "SQI"
-    valid_key::String        = "DBZ"
 end
 
 """
@@ -267,13 +338,16 @@ end
 """
     IOParameters
 
-I/O fill values. Daisho preserves the distinction between true missing
-(`fill_value_missing`, no radar coverage) and clear air
-(`fill_value_clear`, scanned, no echo).
+I/O sentinels, named to mirror [`FieldMetadata`](@ref) and the CfRadial 2.1 /
+ODIM data model exactly. Daisho preserves the distinction between **true
+missing** (`fill_value`, CF `_FillValue` — gate not measured) and **undetect**
+(`undetect`, ODIM `_Undetect` — gate scanned, no detectable signal). These two
+values are authoritative across the gridding/finalize/NetCDF-write path; the
+defaults are not a universal convention and users will legitimately differ.
 """
 Base.@kwdef struct IOParameters
-    fill_value_missing::Float64 = -32768.0
-    fill_value_clear::Float64   =  -9999.0
+    fill_value::Float64 = -32768.0   # CF _FillValue  — true missing
+    undetect::Float64   =  -9999.0   # ODIM _Undetect — undetect (clear air)
 end
 
 """
@@ -437,31 +511,74 @@ end
 # ── Section-specific loaders ────────────────────────────────────────────────
 
 function _fields_from_dict(d::AbstractDict)
-    haskey(d, "names") || throw(ArgumentError(
-        "Missing required key `names` in section `[fields]`. " *
-        "Run `print_config(\"template.toml\")` for a complete template."))
-    haskey(d, "grid_type") || throw(ArgumentError(
-        "Missing required key `grid_type` in section `[fields]`. " *
-        "Run `print_config(\"template.toml\")` for a complete template."))
-
-    names = String.(d["names"])
-
-    grid_type = Dict{String,Symbol}()
-    for (k, v) in d["grid_type"]
-        grid_type[String(k)] = Symbol(String(v))
+    # Migration diagnostic: the old shape used a `names` array plus a
+    # `[fields.grid_type]` sub-table. Diagnose, don't parse it.
+    if haskey(d, "names") || haskey(d, "grid_type")
+        throw(ArgumentError(
+            "[fields] now maps each field to a flat array of tags, e.g.\n" *
+            "    DBZ = [\"linear_interp\", \"define_detection\"]\n" *
+            "    SQI = [\"weighted_interp\", \"define_scanned\"]\n" *
+            "The old `names = [...]` array and `[fields.grid_type]` sub-table " *
+            "are gone; interpolation is the `*_interp` tag. Also remove " *
+            "`missing_key`/`valid_key` from `[gridding]` and express them as " *
+            "the `define_scanned` / `define_detection` field tags. " *
+            "Run `print_config(\"template.toml\")` for the new template."))
     end
 
-    # Every named field must have a grid_type entry.
-    for name in names
-        if !haskey(grid_type, name)
-            known = join(sort(collect(keys(grid_type))), ", ")
-            throw(ArgumentError(
-                "[fields]: missing grid_type entry for field `$(name)`. " *
-                "Known grid_type keys: $(known)"))
+    isempty(d) && throw(ArgumentError(
+        "[fields]: at least one field must be declared."))
+
+    vocab = Set(FIELD_TAG_VOCAB)
+    interp = Set(FIELD_INTERP_TAGS)
+    specs = FieldSpec[]
+    for (name, raw) in d
+        raw isa AbstractArray || throw(ArgumentError(
+            "[fields]: field `$(name)` must map to an array of tags " *
+            "(a TOML array `[ ... ]`), got $(typeof(raw)). " *
+            "Example: $(name) = [\"weighted_interp\"]"))
+        tags = Set{Symbol}()
+        for x in raw
+            t = Symbol(String(x))
+            t in vocab || throw(ArgumentError(
+                "[fields]: unknown tag `$t` on field `$(name)`. " *
+                "Allowed tags: $(join(FIELD_TAG_VOCAB, ", "))"))
+            push!(tags, t)
         end
+        if length(intersect(tags, interp)) > 1
+            throw(ArgumentError(
+                "[fields]: field `$(name)` has more than one interpolation " *
+                "tag $(sort(collect(intersect(tags, interp)))); at most one of " *
+                "$(join(FIELD_INTERP_TAGS, ", ")) is allowed."))
+        end
+        push!(specs, FieldSpec(String(name), tags))
     end
 
-    return MomentParameters(names, grid_type)
+    # Each singular role tag may appear on at most one field. Presence is NOT
+    # required here — `field_with_tag` enforces presence at point-of-use.
+    for tag in FIELD_SINGULAR_TAGS
+        carriers = [fs.name for fs in specs if tag in fs.tags]
+        length(carriers) > 1 && throw(ArgumentError(
+            "[fields]: tag `$tag` is on multiple fields $(sort(carriers)); " *
+            "it must be on at most one."))
+    end
+
+    return MomentParameters(specs)
+end
+
+# Build GriddingParameters, with a targeted migration diagnostic for the old
+# missing_key/valid_key keys (clearer than _struct_from_dict's generic
+# "unknown key" message).
+function _gridding_from_dict(d::AbstractDict)
+    if haskey(d, "missing_key") || haskey(d, "valid_key")
+        throw(ArgumentError(
+            "`[gridding]` no longer takes `missing_key`/`valid_key`. The " *
+            "gate-role moments are now declared as field tags: tag the " *
+            "scanned-indicator field with `define_scanned` (was " *
+            "`missing_key`) and the detection field with `define_detection` " *
+            "(was `valid_key`) in `[fields]`. " *
+            "Run `print_config(\"template.toml\")` for the new template."))
+    end
+    return _struct_from_dict(GriddingParameters, d; section="gridding")
 end
 
 function _grid_from_dict(d::AbstractDict)
