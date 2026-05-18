@@ -1,6 +1,6 @@
 name = "Daisho"
 uuid = "0095e6a3-0a19-4629-8616-db2ab031b187"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Michael Bell <mmbell@colostate.edu>"]
 
 [deps]

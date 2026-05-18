@@ -59,7 +59,7 @@ end
 
 Pre-normalized weighted sums on a chosen grid. Each `grid_sweep!` call adds one
 sweep's contribution. `finalize_grid` divides by weights, converts linear→dBZ
-where appropriate, and applies the `-9999`/`-32768` sentinels.
+where appropriate, and applies the **undetect** / **true missing** sentinels.
 
 Layout: `weighted_sum[field_idx, axis_dims…]`. The trailing axis dims depend
 on `grid_spec.shape`.
@@ -1529,8 +1529,10 @@ end
 Normalize an accumulator into the grid shape the existing writers consume.
 `:weighted` fields divide by `weight_total`; `:linear` fields divide and then
 convert back to dBZ; `:nearest` carries through unchanged. Cells with no
-weight but with `coverage == 1` are flagged `-9999.0` (scanned, no echo).
-Cells with `coverage == 0` are flagged `-32768.0` (true missing).
+weight but with `coverage == 1` are flagged **undetect** (scanned, no echo).
+Cells with `coverage == 0` are flagged **true missing** (gate not measured).
+The actual sentinel values come from the accumulator's `undetect` /
+`fill_value` (sourced from `[io]`).
 """
 function finalize_grid(accum::GridAccumulator)
     out = fill(-32768.0, size(accum.weighted_sum))

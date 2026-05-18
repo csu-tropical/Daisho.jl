@@ -267,9 +267,9 @@ end
 Copy Daisho's gridded radar data into a Springsteel grid's physical array (slot 1).
 
 Handles fill value translation:
-- `-32768.0` (true missing — no radar coverage) → `NaN`
-- `-9999.0` (clear air — scanned, no echo) → preserved as `-9999.0`
-- Valid values → copied as-is
+- **true missing** (gate not measured, the io `fill_value`) → `NaN`
+- **undetect** (scanned, no echo, the io `undetect`) → preserved as-is
+- **valid** values → copied as-is
 
 # Arguments
 - `sgrid::SpringsteelGrid`: Target spectral grid.
@@ -759,8 +759,9 @@ end
     create_radar_grid(p::DaishoParameters)
 
 Parameter-struct overload that builds a Springsteel spectral grid from
-`p.grid.spectral` and `p.moments`. The Springsteel variable map is built from
-`p.moments.fields` (1-based indices in source order).
+`p.grid.spectral` and `p.moments`. The Springsteel variable map is built via
+[`field_index_dict`](@ref) (1-based indices in field-name-sorted order,
+order-independent of the source TOML). Requires the `[grid.spectral]` section.
 """
 function create_radar_grid(p::DaishoParameters)
     s = require_section(p, :grid, :spectral; for_op="create_radar_grid")

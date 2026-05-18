@@ -13,9 +13,13 @@
 
 Per-field metadata mirroring the CfRadial 2.1 §5.6 attribute table.
 
-`fill_value` (CF `_FillValue`) marks gates that were not measured (true missing).
-`undetect` (ODIM `_Undetect`) marks gates that were scanned but had no detectable
-signal (clear air). Both can be present, both can be absent.
+Three mutually exclusive gate states (CfRadial 2.1 / ODIM vocabulary):
+- **true missing** — gate not measured. Sentinel: `fill_value` (CF `_FillValue`).
+- **undetect** — gate scanned, no detectable signal. Sentinel: `undetect`
+  (ODIM `_Undetect`).
+- **valid** — gate scanned, signal detected (a real measured value).
+
+Both sentinels can be present, both can be absent.
 
 `extra_attrs` is the catch-all for non-spec attrs encountered in real files.
 The reader populates it; `update_cfradial` preserves it through to disk.

@@ -76,10 +76,15 @@ For radar data, `R0` (unconstrained) is typically appropriate since the domain e
 
 ## Fill Value Handling
 
-Radar data has two distinct missing states that are handled differently:
+Radar data distinguishes three mutually exclusive gate states (CfRadial 2.1 /
+ODIM vocabulary), two of which are non-valid and handled differently:
 
-- **`-32768.0`** (true missing): The radar did not scan this location. Converted to `NaN` in the spectral grid.
-- **`-9999.0`** (clear air): The radar scanned but detected no echo. Preserved as `-9999.0` in the output. This is physically meaningful information.
+- **true missing**: the gate was not measured. Sentinel `[io] fill_value`
+  (CF `_FillValue`, default `-32768.0`). Converted to `NaN` in the spectral grid.
+- **undetect**: the gate was scanned but no signal was detected. Sentinel
+  `[io] undetect` (ODIM `_Undetect`, default `-9999.0`). Preserved in the
+  output — this is physically meaningful information.
+- **valid**: the gate was scanned and a signal was detected (a real value).
 
 Before spectral transforms, both fill states are temporarily replaced with `0.0` to prevent spectral corruption, then restored afterward using a mask. This is a known approximation -- future variational analysis will handle data gaps properly via the cost function.
 

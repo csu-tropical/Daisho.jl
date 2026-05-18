@@ -36,31 +36,38 @@ p = DaishoParameters("mygrid.toml")    # strict load
 ```
 
 The `[fields]` block in the TOML replaces the old
-`initialize_moment_dictionaries` helper. It lists the canonical field names
-of interest plus a per-name interpolation hint used by the gridder:
+`initialize_moment_dictionaries` helper. Each field maps to a flat array of
+tags drawn from a documented vocabulary. No tag is required; field order and
+tag order are insignificant.
 
 ```toml
 [fields]
-names = ["DBZ", "ZDR", "KDP", "RHOHV", "VEL", "WIDTH", "PHIDP", "SQI"]
-
-[fields.grid_type]
-DBZ   = "linear"
-ZDR   = "linear"
-KDP   = "weighted"
-RHOHV = "weighted"
-VEL   = "weighted"
-WIDTH = "weighted"
-PHIDP = "weighted"
-SQI   = "weighted"
+DBZ   = ["linear_interp",   "define_detection"]
+ZDR   = ["linear_interp"]
+KDP   = ["weighted_interp"]
+RHOHV = ["weighted_interp"]
+VEL   = ["weighted_interp",  "velocity"]
+WIDTH = ["weighted_interp"]
+PHIDP = ["weighted_interp"]
+SQI   = ["weighted_interp",  "define_scanned"]
 ```
 
-Grid types control how each field is interpolated during gridding:
-`"linear"` (convert to linear units before averaging, e.g., reflectivity),
-`"weighted"` (weighted average in native units), or `"nearest"`
-(nearest-neighbor). Loading is strict: every key documented in the template
-must be present in your file. A missing or mis-typed key raises an
-`ArgumentError` at load time naming the offending section — there is no
-silent fallback to defaults.
+Interpolation tags (at most one per field; `weighted_interp` is the default
+when none is given): `linear_interp` (convert to linear units before
+averaging, e.g. reflectivity), `weighted_interp` (weighted average in native
+units), `nearest_interp` (winner-take-all). Role tags name the field whose
+presence proves a detectable echo (`define_detection`) or that the gate was
+scanned (`define_scanned`); `velocity` is reserved for forthcoming
+multi-Doppler synthesis.
+
+`[fields]` and `[io]` are mandatory; `[qc]`, `[gridding]`, and the `[grid.*]`
+sub-tables are optional and default-construct when omitted (an operation that
+needs a missing block raises a clear point-of-use error). Any block that *is*
+present is validated strictly — a missing, unknown, or mis-typed key raises
+an `ArgumentError` at load time naming the offending section. Configs in the
+pre-tag schema (the old `names`/`[fields.grid_type]`, `[gridding]`
+`missing_key`/`valid_key`, or `[io]` `fill_value_missing`/`fill_value_clear`)
+raise a targeted migration error pointing at the replacement.
 
 With `p` in hand, the read → QC → grid pipeline is:
 
