@@ -1,33 +1,20 @@
-# Daisho.jl default parameters.
+# Daisho.jl SEA-POL deployment parameters.
 #
-# Loaded by `DaishoParameters()` (no args). User TOML files passed to
-# `DaishoParameters(path)` are deep-merged over these defaults, so user files
-# only need to specify keys they wish to override.
-#
-# Structure mirrors the `DaishoParameters` struct hierarchy exactly:
-#   [fields]               -> p.moments  (CfRadial 2.1: dropped raw/qc split)
-#   [qc]                   -> p.qc
-#   [gridding]             -> p.gridding
-#   [grid.cartesian]       -> p.grid.cartesian
-#   [grid.latlon]          -> p.grid.latlon
-#   [grid.rhi]             -> p.grid.rhi
-#   [grid.spectral]        -> p.grid.spectral
-#   [grid.spectral.bc.*]   -> p.grid.spectral.bc.*  (sub-table per axis side)
-#   [grid.metadata]        -> p.grid.metadata  (CF global attrs for outputs)
-#   [io]                   -> p.io
+# A user configuration for the CSU SEA-POL radar. Load with
+# `DaishoParameters("config/seapol.toml")`. Structure and loading rules match
+# the bundled template (`print_config("template.toml")`): `[fields]`/`[io]`
+# mandatory, `[qc]`/`[gridding]`/`[grid.*]` optional, present blocks strict.
+# See `config/defaults.toml` for the full tag vocabulary and gate-state model.
 
 [fields]
-names = ["DBZ", "ZDR", "KDP", "RHOHV", "VEL", "WIDTH", "PHIDP", "SQI"]
-
-[fields.grid_type]
-DBZ   = "linear"
-ZDR   = "linear"
-KDP   = "weighted"
-RHOHV = "weighted"
-VEL   = "weighted"
-WIDTH = "weighted"
-PHIDP = "weighted"
-SQI   = "weighted"
+DBZ   = ["linear_interp",   "define_detection"]
+ZDR   = ["linear_interp"]
+KDP   = ["weighted_interp"]
+RHOHV = ["weighted_interp"]
+VEL   = ["weighted_interp",  "velocity"]
+WIDTH = ["weighted_interp"]
+PHIDP = ["weighted_interp"]
+SQI   = ["weighted_interp",  "define_scanned"]
 
 [qc]
 sqi_threshold        = 0.35
@@ -38,8 +25,6 @@ rhohv_threshold      = 0.7
 [gridding]
 beam_inflation  = 0.01
 power_threshold = 0.5
-missing_key     = "SQI"
-valid_key       = "DBZ"
 
 [grid.cartesian]
 xmin  = -125000.0
@@ -53,8 +38,6 @@ zincr =     500.0
 zdim  =        37
 
 [grid.latlon]
-# lon/lat domain bounds; degincr is the angular grid spacing.
-# Defaults left at 0 — populate per-experiment in user TOML.
 lonmin  = 0.0
 londim  = 0
 latmin  = 0.0
@@ -73,11 +56,9 @@ zincr =   250.0
 zdim  =      41
 
 [grid.spectral]
-# Spectral grid for Springsteel. xdim/ydim/zdim count B-spline cells (not
-# physical points); physical points = cells * mubar.
-geometry   = "RRR"     # "R" | "RR" | "RRR"
+geometry   = "RRR"
 mubar      = 3
-quadrature = "gauss"   # "gauss" | "regular"
+quadrature = "gauss"
 xmin       = -125000.0
 xmax       =  125000.0
 xdim       = 50
@@ -88,10 +69,6 @@ zmin       = 0.0
 zmax       = 15000.0
 zdim       = 10
 
-# Boundary conditions per axis side. Each sub-table has a `type` key plus any
-# numeric parameters required by that BC. Recognized types:
-#   natural | dirichlet | neumann | second_derivative | robin | periodic
-#   exponential | cauchy | antisymmetric | symmetric | zeros
 [grid.spectral.bc.xL]
 type = "natural"
 [grid.spectral.bc.xR]
@@ -105,10 +82,6 @@ type = "natural"
 [grid.spectral.bc.zR]
 type = "natural"
 
-# CF-1.12 global attributes copied into every gridded NetCDF output.
-# Override per-deployment in a user TOML; defaults below match historical
-# SEA-POL identity so existing workflows are unaffected. The `references`
-# slot is empty by default and only written to the file when set here.
 [grid.metadata]
 Conventions      = "CF-1.12"
 history          = "v1.0"
@@ -128,5 +101,5 @@ license          = "CC-BY-4.0"
 references       = ""
 
 [io]
-fill_value_missing = -32768.0   # true missing — no radar coverage
-fill_value_clear   =  -9999.0   # scanned, no echo (clear air)
+fill_value = -32768.0   # CF _FillValue  — true missing (gate not measured)
+undetect   =  -9999.0   # ODIM _Undetect — undetect (scanned, no echo)

@@ -7,12 +7,18 @@
 #     print_config("mygrid.toml")
 #
 # Then edit `mygrid.toml` and load it with `DaishoParameters("mygrid.toml")`.
-# Loading is strict: every key documented below must be present in your file.
-# There is no silent fallback to defaults — missing or mis-typed keys raise an
-# error at load time, naming the offending section.
 #
-# Structure mirrors the `DaishoParameters` struct hierarchy exactly:
-#   [fields]               -> p.moments  (CfRadial 2.1: dropped raw/qc split)
+# Loading rules:
+#   * `[fields]` and `[io]` are MANDATORY (no sensible default).
+#   * `[qc]`, `[gridding]`, and the `[grid.*]` sub-tables are OPTIONAL — they
+#     default-construct when omitted. An operation that actually needs a
+#     missing block raises a clear error naming the operation and the block.
+#   * Any block that IS present is validated strictly: unknown or mis-typed
+#     keys raise an error at load time, naming the offending section. There is
+#     no silent fallback to defaults for a present-but-incomplete block.
+#
+# Structure mirrors the `DaishoParameters` struct hierarchy:
+#   [fields]               -> p.moments      (flat per-field tag array)
 #   [qc]                   -> p.qc
 #   [gridding]             -> p.gridding
 #   [grid.cartesian]       -> p.grid.cartesian
@@ -22,19 +28,46 @@
 #   [grid.spectral.bc.*]   -> p.grid.spectral.bc.*  (sub-table per axis side)
 #   [grid.metadata]        -> p.grid.metadata  (CF global attrs for outputs)
 #   [io]                   -> p.io
+#
+# ── [fields] tag vocabulary ──────────────────────────────────────────────────
+# Each field maps to a flat ARRAY of tags `[ ... ]`. No tag is required;
+# field order and tag order are insignificant (internal column order is
+# derived deterministically by sorted field name).
+#
+# Interpolation (gridding-domain; AT MOST ONE per field; default `weighted`):
+#   linear_interp    convert to linear units before averaging, back to dB
+#                    after (reflectivity-like).
+#   weighted_interp  weighted average in native units (the default).
+#   nearest_interp   winner-take-all (keep the highest-weight gate).
+#
+# Role tags (consumed when a gridding driver runs; AT MOST ONE field each;
+# required only at point-of-use, not at load):
+#   define_detection  the field whose PRESENCE at a gate proves a detectable
+#                      echo. Such gates set a valid cell (was `valid_key`).
+#   define_scanned    the field whose PRESENCE at a gate proves the gate was
+#                      scanned. Marks the cell scanned (was `missing_key`).
+#
+# Reserved (a known tag, consumed by nothing yet):
+#   velocity          future multi-Doppler radial-velocity selector.
+#
+# ── Three gate states (CfRadial 2.1 / ODIM) ──────────────────────────────────
+#   true missing  gate not measured        -> [io] fill_value (CF _FillValue)
+#   undetect      scanned, no echo (clear)  -> [io] undetect  (ODIM _Undetect)
+#   valid         scanned, signal detected  -> the measured value
+# `undetect` is DERIVED, not a tag: a cell that is define_scanned-present but
+# has no define_detection gate is scanned-but-no-echo. Clear air is the
+# absence of an echo, so no field can "define" it — this asymmetry is
+# intentional.
 
 [fields]
-names = ["DBZ", "ZDR", "KDP", "RHOHV", "VEL", "WIDTH", "PHIDP", "SQI"]
-
-[fields.grid_type]
-DBZ   = "linear"
-ZDR   = "linear"
-KDP   = "weighted"
-RHOHV = "weighted"
-VEL   = "weighted"
-WIDTH = "weighted"
-PHIDP = "weighted"
-SQI   = "weighted"
+DBZ   = ["linear_interp",   "define_detection"]
+ZDR   = ["linear_interp"]
+KDP   = ["weighted_interp"]
+RHOHV = ["weighted_interp"]
+VEL   = ["weighted_interp",  "velocity"]
+WIDTH = ["weighted_interp"]
+PHIDP = ["weighted_interp"]
+SQI   = ["weighted_interp",  "define_scanned"]
 
 [qc]
 sqi_threshold        = 0.35
@@ -45,8 +78,6 @@ rhohv_threshold      = 0.7
 [gridding]
 beam_inflation  = 0.01
 power_threshold = 0.5
-missing_key     = "SQI"
-valid_key       = "DBZ"
 
 [grid.cartesian]
 xmin  = -125000.0
@@ -135,6 +166,9 @@ processing_level = "Level 4"
 license          = "CC-BY-4.0"
 references       = ""
 
+# Output sentinels, named to match the CfRadial 2.1 / ODIM data model and
+# FieldMetadata exactly. These are authoritative across the gridding /
+# finalize / NetCDF-write path; the defaults are NOT a universal convention.
 [io]
-fill_value_missing = -32768.0   # true missing — no radar coverage
-fill_value_clear   =  -9999.0   # scanned, no echo (clear air)
+fill_value = -32768.0   # CF _FillValue  — true missing (gate not measured)
+undetect   =  -9999.0   # ODIM _Undetect — undetect (scanned, no echo)
