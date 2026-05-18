@@ -355,7 +355,15 @@ end
 
 Top-level immutable runtime configuration loaded from a TOML file. Construct
 via `DaishoParameters()` for the bundled template or `DaishoParameters(path)`
-for a user file (strict — every key in the template must be present).
+for a user file.
+
+`[fields]` and `[io]` are mandatory (no sensible default: every driver needs
+fields, and the two `[io]` sentinels distinguish true-missing vs undetect on
+every NetCDF write). `[qc]`, `[gridding]`, and the `[grid.*]` sub-tables are
+optional and default-construct when absent; an operation that actually needs a
+missing block raises a clear point-of-use error (see [`require_section`](@ref))
+rather than silently gridding with template numbers. Validation *within* any
+present block stays strict.
 
 # Fields
 - `moments::MomentParameters`
@@ -363,6 +371,9 @@ for a user file (strict — every key in the template must be present).
 - `gridding::GriddingParameters`
 - `grid::GridParameters`
 - `io::IOParameters`
+- `provided::Set{Symbol}`: which optional top-level sections (`:qc`,
+  `:gridding`, `:grid`) were actually present in the loaded TOML. Absence is
+  tracked explicitly — it is *not* inferred from default values.
 
 # Examples
 ```julia
@@ -379,6 +390,7 @@ struct DaishoParameters
     gridding::GriddingParameters
     grid::GridParameters
     io::IOParameters
+    provided::Set{Symbol}
 end
 
 # ── Loader ───────────────────────────────────────────────────────────────────
@@ -389,9 +401,10 @@ end
 
 Construct a `DaishoParameters` instance. With no arguments, loads the bundled
 template from `config/defaults.toml`. With a path, loads only the user's TOML
-— there is no silent fallback to bundled defaults. Every section and key
-documented in the template must be present, otherwise an `ArgumentError` is
-raised naming the missing item.
+— there is no silent fallback to bundled defaults. `[fields]` and `[io]` must
+be present; `[qc]`, `[gridding]`, and `[grid.*]` are optional and
+default-construct when absent. Any block that *is* present is validated
+strictly (unknown or missing keys raise an `ArgumentError` naming the item).
 
 Use [`print_config`](@ref) to write a complete starter template to a file you
 can edit.
@@ -400,13 +413,41 @@ DaishoParameters() = DaishoParameters(_load_toml(DEFAULTS_TOML_PATH))
 DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 
 # Internal: build from an already-parsed Dict (used by ctors and tests).
+# `[fields]`/`[io]` mandatory; `[qc]`/`[gridding]`/`[grid.*]` optional. The
+# `provided` set records which optional sections were actually present — never
+# inferred from default values, since a defaulted block still has usable
+# numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
+    provided = Set{Symbol}()
+    for s in (:qc, :gridding, :grid)
+        haskey(d, string(s)) && push!(provided, s)
+    end
+
     moments  = _fields_from_dict(_section(d, "fields"))
-    qc       = _struct_from_dict(QCParameters,       _section(d, "qc");                  section="qc")
-    gridding = _struct_from_dict(GriddingParameters, _section(d, "gridding");            section="gridding")
-    grid     = _grid_from_dict(_section(d, "grid"))
-    io       = _struct_from_dict(IOParameters,       _section(d, "io");                  section="io")
-    return DaishoParameters(moments, qc, gridding, grid, io)
+    qc       = haskey(d, "qc")       ? _struct_from_dict(QCParameters, d["qc"]; section="qc") : QCParameters()
+    gridding = haskey(d, "gridding") ? _gridding_from_dict(d["gridding"])                     : GriddingParameters()
+    grid     = haskey(d, "grid")     ? _grid_from_dict(d["grid"])                             : GridParameters()
+    io       = _io_from_dict(_section(d, "io"))
+    return DaishoParameters(moments, qc, gridding, grid, io, provided)
+end
+
+"""
+    require_section(p, root::Symbol, sub::Symbol...; for_op::String) -> Any
+
+Point-of-use accessor for an optional section. Raises a clear `ArgumentError`
+naming the operation and the missing block if `root` was absent from the
+loaded TOML; otherwise returns `p.root` drilled through any `sub` fields.
+"""
+function require_section(p, root::Symbol, sub::Symbol...; for_op::String)
+    root in p.provided || throw(ArgumentError(
+        "Operation `$for_op` needs the `[$root]` section, but it was " *
+        "absent from the loaded TOML. Add it (run " *
+        "`print_config(\"template.toml\")` for the full template)."))
+    obj = getfield(p, root)
+    for s in sub
+        obj = getfield(obj, s)
+    end
+    return obj
 end
 
 """
@@ -581,12 +622,28 @@ function _gridding_from_dict(d::AbstractDict)
     return _struct_from_dict(GriddingParameters, d; section="gridding")
 end
 
+# Build IOParameters (mandatory). Targeted migration diagnostic for the old
+# fill_value_missing/fill_value_clear keys (clearer than the generic message).
+function _io_from_dict(d::AbstractDict)
+    if haskey(d, "fill_value_missing") || haskey(d, "fill_value_clear")
+        throw(ArgumentError(
+            "`[io]` keys were renamed to `fill_value` / `undetect` to match " *
+            "the CfRadial 2.1 / ODIM data model: `fill_value_missing` → " *
+            "`fill_value` (CF _FillValue, true missing), `fill_value_clear` " *
+            "→ `undetect` (ODIM _Undetect, scanned no echo). " *
+            "Run `print_config(\"template.toml\")` for the new template."))
+    end
+    return _struct_from_dict(IOParameters, d; section="io")
+end
+
+# Each `[grid.*]` sub-table is independently optional and defaults when absent;
+# any sub-table that is present is still validated strictly.
 function _grid_from_dict(d::AbstractDict)
-    cartesian = _struct_from_dict(CartesianGridParameters, _section(d, "cartesian"; parent="grid"); section="grid.cartesian")
-    latlon    = _struct_from_dict(LatLonGridParameters,    _section(d, "latlon";    parent="grid"); section="grid.latlon")
-    rhi       = _struct_from_dict(RhiGridParameters,       _section(d, "rhi";       parent="grid"); section="grid.rhi")
-    spectral  = _spectral_from_dict(_section(d, "spectral"; parent="grid"))
-    metadata  = _struct_from_dict(MetadataParameters,      _section(d, "metadata";  parent="grid"); section="grid.metadata")
+    cartesian = haskey(d, "cartesian") ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian") : CartesianGridParameters()
+    latlon    = haskey(d, "latlon")    ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon")    : LatLonGridParameters()
+    rhi       = haskey(d, "rhi")       ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi")       : RhiGridParameters()
+    spectral  = haskey(d, "spectral")  ? _spectral_from_dict(d["spectral"])                                                  : SpectralGridParameters()
+    metadata  = haskey(d, "metadata")  ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
     return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi,
                           spectral=spectral, metadata=metadata)
 end
