@@ -416,4 +416,112 @@
         @test dst.weighted_sum[1, 2, 2, 2] == 0.99
         @test dst.weight_total[1, 2, 2, 2] == 0.9
     end
+
+    @testset "[io] sentinels are authoritative" begin
+        @testset "GridAccumulator(spec, p) carries custom [io]" begin
+            p0 = DaishoParameters()
+            p = Daisho.DaishoParameters(p0.moments, p0.qc, p0.gridding, p0.grid,
+                Daisho.IOParameters(fill_value = -777.0, undetect = -8888.0),
+                p0.provided)
+            acc = GridAccumulator(_spec(:volume_3d), p)
+            @test acc.fill_value == -777.0
+            @test acc.undetect == -8888.0
+        end
+
+        @testset "finalize_grid emits exactly the accumulator sentinels" begin
+            acc = GridAccumulator(_spec(:volume_3d), ["DBZ"],
+                Dict("DBZ" => :weighted);
+                fill_value = -777.0, undetect = -8888.0)
+            # Valid cell: scanned + detected, real weighted value.
+            acc.coverage[1, 1, 1, 1]     = Int8(2)
+            acc.weight_total[1, 1, 1, 1] = 2.0
+            acc.weighted_sum[1, 1, 1, 1] = 7.0      # → 3.5
+            # Scanned-no-echo cell → undetect.
+            acc.coverage[1, 2, 2, 2]     = Int8(1)
+            # Unscanned cell → true missing (coverage 0, the default).
+            grid = finalize_grid(acc)
+            @test grid[1, 1, 1, 1] == 3.5
+            @test grid[1, 2, 2, 2] == -8888.0
+            @test grid[1, 2, 3, 4] == -777.0
+        end
+
+        @testset "merge refuses mismatched sentinels" begin
+            spec = _spec(:volume_3d)
+            a = GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted);
+                fill_value = -32768.0, undetect = -9999.0)
+            b = GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted);
+                fill_value = -777.0, undetect = -9999.0)
+            @test_throws ArgumentError merge_accumulators!(a, b)
+            c = GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted);
+                fill_value = -32768.0, undetect = -8888.0)
+            @test_throws ArgumentError merge_accumulators!(a, c)
+        end
+
+        @testset "load_accumulator rejects schema mismatch" begin
+            spec = _spec(:column_1d)
+            acc = GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted))
+            bad = Daisho.GridAccumulator(
+                grid_spec = acc.grid_spec, fields = acc.fields,
+                grid_type = acc.grid_type, field_folds = acc.field_folds,
+                weighted_sum = acc.weighted_sum, weight_total = acc.weight_total,
+                coverage = acc.coverage, sweeps = acc.sweeps,
+                schema_version = 1,
+                fill_value = acc.fill_value, undetect = acc.undetect)
+            mktemp() do path, io
+                close(io)
+                save_accumulator(path, bad)
+                err = try; load_accumulator(path); nothing; catch e; e; end
+                @test err isa ArgumentError
+                @test occursin("schema version", err.msg)
+            end
+        end
+
+        @testset "gridded NetCDF carries custom _FillValue/_Undetect" begin
+            p0 = DaishoParameters()
+            small_cart = Daisho.CartesianGridParameters(
+                xmin = -1500.0, xincr = 500.0, xdim = 7,
+                ymin = -1500.0, yincr = 500.0, ydim = 7,
+                zmin = 500.0,   zincr = 500.0, zdim = 3)
+            mk(io) = Daisho.DaishoParameters(p0.moments, p0.qc, p0.gridding,
+                Daisho.GridParameters(cartesian = small_cart,
+                                      latlon = p0.grid.latlon,
+                                      rhi = p0.grid.rhi,
+                                      spectral = p0.grid.spectral),
+                io, p0.provided)
+            v = synthetic_volume(n_sweeps = 1, n_rays = 12, n_gates = 4)
+            # Custom sentinels.
+            p = mk(Daisho.IOParameters(fill_value = -777.0, undetect = -8888.0))
+            f1 = tempname() * "_customio.nc"
+            try
+                Daisho.grid_radar_volume(v, f1, v.time_coverage_start, p)
+                ds = NCDataset(f1, "r")
+                try
+                    @test haskey(ds, "DBZ")
+                    a = ds["DBZ"].attrib
+                    @test Float32(a["_FillValue"]) == Float32(-777.0)
+                    @test Float32(a["_Undetect"]) == Float32(-8888.0)
+                finally
+                    close(ds)
+                end
+            finally
+                rm(f1, force = true)
+            end
+            # Default sentinels regression guard.
+            pd = mk(Daisho.IOParameters())
+            f2 = tempname() * "_defaultio.nc"
+            try
+                Daisho.grid_radar_volume(v, f2, v.time_coverage_start, pd)
+                ds = NCDataset(f2, "r")
+                try
+                    a = ds["DBZ"].attrib
+                    @test Float32(a["_FillValue"]) == Float32(-32768.0)
+                    @test Float32(a["_Undetect"]) == Float32(-9999.0)
+                finally
+                    close(ds)
+                end
+            finally
+                rm(f2, force = true)
+            end
+        end
+    end
 end

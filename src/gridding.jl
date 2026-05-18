@@ -689,6 +689,11 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
     balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
+    # NOTE: the -32768.0 (true missing) / -9999.0 (undetect) literals here and
+    # in the sibling legacy `grid_*` workers are the legacy-path defaults. This
+    # `radar`/`moment_dict` API has no `DaishoParameters` in scope, so `[io]`
+    # fill_value/undetect do NOT reach here; the accumulator/finalize_grid path
+    # is the one driven by `[io]`.
     n_moments = length(moment_dict)
     radar_grid = fill(-32768.0,n_moments,size(gridpoints,1),size(gridpoints,2),size(gridpoints,3))
     weights = zeros(Float64,n_moments,size(gridpoints,1),size(gridpoints,2),size(gridpoints,3))
@@ -1530,8 +1535,18 @@ function _global_attrib_dict(m::MetadataParameters; extra=Pair{String,Any}[])
     return attrs
 end
 
+# Override the shared `common_attrib` sentinels with the run's `[io]` values
+# and add the ODIM `_Undetect` attribute (`common_attrib` only carries CF
+# `_FillValue`/`missing_value`). `merge` returns a fresh OrderedDict, so the
+# module-level `common_attrib` is never mutated.
+_with_io_sentinels(attrib, fill_value::Real, undetect::Real) =
+    merge(attrib, OrderedDict(
+        "_FillValue"    => Float32(fill_value),
+        "missing_value" => Float32(fill_value),
+        "_Undetect"     => Float32(undetect)))
+
 """
-    write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading, metadata=MetadataParameters())
+    write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude, reference_longitude, mean_heading, metadata=MetadataParameters(); fill_value=-32768.0, undetect=-9999.0)
 
 Write a gridded 3D radar volume to a CF-1.12 compliant NetCDF file.
 
@@ -1553,7 +1568,7 @@ pre-existing file at the output path is deleted first.
 - `mean_heading::AbstractFloat`: Mean platform heading in degrees.
 - `metadata::MetadataParameters`: CF-1.12 global attributes (institution, creator, project, platform, …). Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
+function write_gridded_radar_volume(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0)
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1664,6 +1679,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
         else
             var_attrib = merge(common_attrib, variable_attrib_dict["UNKNOWN"])
         end
+        var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("X", "Y", "Z", "time"), attrib = var_attrib)
         ncvar[:] = ncgrid[moment_dict[key],:,:,:]
     end
@@ -1692,7 +1708,7 @@ azimuth angle, and all radar moment variables. Any pre-existing file at the outp
 - `reference_longitude::AbstractFloat`: Longitude of the projection origin (degrees).
 - `metadata::MetadataParameters`: CF-1.12 global attributes. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
+function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0)
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1799,6 +1815,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
         else
             var_attrib = merge(common_attrib, variable_attrib_dict["UNKNOWN"])
         end
+        var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("R", "Z", "time"), attrib = var_attrib)
         ncvar[:] = ncgrid[moment_dict[key],:,:]
     end
@@ -1828,7 +1845,7 @@ Also used for writing composite grids. Any pre-existing file at the output path 
 - `mean_heading::AbstractFloat`: Mean platform heading in degrees.
 - `metadata::MetadataParameters`: CF-1.12 global attributes. The PPI writer also injects `scan_name` from `radar_volume`. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
+function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0)
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1935,6 +1952,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         else
             var_attrib = merge(common_attrib, variable_attrib_dict["UNKNOWN"])
         end
+        var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("X", "Y", "time"), attrib = var_attrib)
         ncvar[:] = ncgrid[moment_dict[key],:,:]
     end
@@ -1964,7 +1982,7 @@ radar moment variables. Any pre-existing file at the output path is deleted firs
 - `reference_longitude::AbstractFloat`: Longitude of the column location (degrees).
 - `metadata::MetadataParameters`: CF-1.12 global attributes. Defaults to `MetadataParameters()`.
 """
-function write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters())
+function write_gridded_radar_column(file, index_time, start_time, stop_time, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0)
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -2047,6 +2065,7 @@ function write_gridded_radar_column(file, index_time, start_time, stop_time, gri
         else
             var_attrib = merge(common_attrib, variable_attrib_dict["UNKNOWN"])
         end
+        var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("Z", "time"), attrib = var_attrib)
         ncvar[:,1] = radar_grid[moment_dict[key],:]
     end
@@ -2403,7 +2422,7 @@ function grid_radar_volume(volume::Volume, output_file::AbstractString,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
-        p.grid.metadata)
+        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
 
@@ -2422,7 +2441,7 @@ function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
-        p.grid.metadata)
+        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
 
@@ -2439,7 +2458,8 @@ function grid_radar_rhi(volume::Volume, output_file::AbstractString,
     gridpoints = _gridpoints_rhi_array(spec)
     write_gridded_radar_rhi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, p.grid.metadata)
+        spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
+        fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
 
@@ -2457,7 +2477,7 @@ function grid_radar_ppi(volume::Volume, output_file::AbstractString,
     write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
-        p.grid.metadata)
+        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
 
@@ -2475,7 +2495,7 @@ function grid_radar_composite(volume::Volume, output_file::AbstractString,
     write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(mean_heading),
-        p.grid.metadata)
+        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
 
@@ -2493,6 +2513,7 @@ function grid_radar_column(volume::Volume, output_file::AbstractString,
     write_gridded_radar_column(output_file, index_time,
         volume.time_coverage_start, volume.time_coverage_end,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
-        spec.reference_latitude, spec.reference_longitude, p.grid.metadata)
+        spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
+        fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end

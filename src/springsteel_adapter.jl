@@ -283,18 +283,22 @@ function populate_physical! end
 
 # 3D: RRR_Grid
 function populate_physical!(sgrid::RRR_Grid,
-        radar_grid::AbstractArray, moment_dict::Dict)
+        radar_grid::AbstractArray, moment_dict::Dict;
+        fill_value::Real = -32768.0)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
     kDim = sgrid.params.kDim
 
+    # `fill_value` must match the true-missing sentinel of whatever produced
+    # `radar_grid`. The legacy `grid_*` workers feeding the spectral path emit
+    # -32768.0; the accumulator/finalize_grid path emits `[io] fill_value`.
     for (name, var_idx) in moment_dict
         g = 1
         for i in 1:iDim
             for j in 1:jDim
                 for k in 1:kDim
                     val = radar_grid[var_idx, k, j, i]
-                    if val == -32768.0
+                    if val == fill_value
                         sgrid.physical[g, var_idx, 1] = NaN
                     else
                         sgrid.physical[g, var_idx, 1] = val
@@ -309,7 +313,8 @@ end
 
 # 2D: RR_Grid
 function populate_physical!(sgrid::RR_Grid,
-        radar_grid::AbstractArray, moment_dict::Dict)
+        radar_grid::AbstractArray, moment_dict::Dict;
+        fill_value::Real = -32768.0)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
 
@@ -318,7 +323,7 @@ function populate_physical!(sgrid::RR_Grid,
         for i in 1:iDim
             for j in 1:jDim
                 val = radar_grid[var_idx, j, i]
-                if val == -32768.0
+                if val == fill_value
                     sgrid.physical[g, var_idx, 1] = NaN
                 else
                     sgrid.physical[g, var_idx, 1] = val
@@ -332,13 +337,14 @@ end
 
 # 1D: R_Grid
 function populate_physical!(sgrid::R_Grid,
-        radar_grid::AbstractArray, moment_dict::Dict)
+        radar_grid::AbstractArray, moment_dict::Dict;
+        fill_value::Real = -32768.0)
     iDim = sgrid.params.iDim
 
     for (name, var_idx) in moment_dict
         for i in 1:iDim
             val = radar_grid[var_idx, i]
-            if val == -32768.0
+            if val == fill_value
                 sgrid.physical[i, var_idx, 1] = NaN
             else
                 sgrid.physical[i, var_idx, 1] = val

@@ -5,7 +5,9 @@
 # one volume → one gridded NetCDF" path for workflows like airborne P3 and
 # multi-Doppler retrieval, while preserving the existing weighting math.
 
-const GRID_ACCUMULATOR_SCHEMA_VERSION = 1
+# v2: GridAccumulator carries the io fill_value/undetect sentinels. v1 files
+# (no such fields) are intentionally incompatible — regenerate them.
+const GRID_ACCUMULATOR_SCHEMA_VERSION = 2
 
 """
     GridSpec
@@ -74,6 +76,8 @@ Base.@kwdef struct GridAccumulator
     coverage::Array{Int8}
     sweeps::Vector{SweepProvenance}
     schema_version::Int
+    fill_value::Float64 = -32768.0   # CF _FillValue  — true missing
+    undetect::Float64   =  -9999.0   # ODIM _Undetect — undetect (clear air)
 end
 
 # ── Array shape helpers ──────────────────────────────────────────────────────
@@ -111,12 +115,16 @@ end
 Allocate an empty accumulator on the given grid for an explicit list of fields.
 `field_folds` defaults to all-false; supply `true` per-field for radial
 velocities and other folding quantities to make `merge_accumulators!` refuse to
-combine them across distinct sweeps.
+combine them across distinct sweeps. `fill_value` / `undetect` are the
+true-missing / undetect output sentinels (defaults match the `[io]` defaults);
+`finalize_grid` emits exactly these.
 """
 function GridAccumulator(grid_spec::GridSpec,
                           fields::Vector{String},
                           grid_type::Dict{String,Symbol};
-                          field_folds::Vector{Bool} = fill(false, length(fields)))
+                          field_folds::Vector{Bool} = fill(false, length(fields)),
+                          fill_value::Float64 = -32768.0,
+                          undetect::Float64 = -9999.0)
     length(field_folds) == length(fields) ||
         throw(ArgumentError("GridAccumulator: field_folds must have one entry per field"))
     for f in fields
@@ -134,6 +142,8 @@ function GridAccumulator(grid_spec::GridSpec,
         coverage        = zeros(Int8, dims),
         sweeps          = SweepProvenance[],
         schema_version  = GRID_ACCUMULATOR_SCHEMA_VERSION,
+        fill_value      = fill_value,
+        undetect        = undetect,
     )
 end
 
@@ -152,7 +162,8 @@ function GridAccumulator(grid_spec::GridSpec, p::DaishoParameters)
     ordered = _ordered_fields(p)
     return GridAccumulator(grid_spec,
         [fs.name for fs in ordered],
-        Dict{String,Symbol}(fs.name => interp_of(fs) for fs in ordered))
+        Dict{String,Symbol}(fs.name => interp_of(fs) for fs in ordered);
+        fill_value = p.io.fill_value, undetect = p.io.undetect)
 end
 
 # ── JLD2 IO ──────────────────────────────────────────────────────────────────
@@ -220,6 +231,14 @@ function merge_accumulators!(dst::GridAccumulator, src::GridAccumulator)
         throw(ArgumentError("merge_accumulators!: grid_type mismatch"))
     dst.field_folds == src.field_folds ||
         throw(ArgumentError("merge_accumulators!: field_folds mismatch"))
+    dst.fill_value == src.fill_value ||
+        throw(ArgumentError("merge_accumulators!: fill_value mismatch " *
+            "($(dst.fill_value) vs $(src.fill_value)) — accumulators built " *
+            "under different [io] sentinel conventions cannot be merged"))
+    dst.undetect == src.undetect ||
+        throw(ArgumentError("merge_accumulators!: undetect mismatch " *
+            "($(dst.undetect) vs $(src.undetect)) — accumulators built " *
+            "under different [io] sentinel conventions cannot be merged"))
 
     n_fields = length(dst.fields)
     trailing = ntuple(d -> Colon(), ndims(dst.weighted_sum) - 1)
@@ -1535,7 +1554,9 @@ The actual sentinel values come from the accumulator's `undetect` /
 `fill_value` (sourced from `[io]`).
 """
 function finalize_grid(accum::GridAccumulator)
-    out = fill(-32768.0, size(accum.weighted_sum))
+    fill_value = accum.fill_value
+    undetect   = accum.undetect
+    out = fill(fill_value, size(accum.weighted_sum))
     n_fields = length(accum.fields)
     trailing_size = size(accum.weighted_sum)[2:end]
     @inbounds for m in 1:n_fields
@@ -1550,14 +1571,14 @@ function finalize_grid(accum::GridAccumulator)
                     out[m, ix] = s
                 elseif mode === :linear
                     avg = s / w
-                    out[m, ix] = avg > 0.0 ? 10.0 * log10(avg) : -9999.0
+                    out[m, ix] = avg > 0.0 ? 10.0 * log10(avg) : undetect
                 else
                     out[m, ix] = s / w
                 end
             elseif cov == Int8(1)
-                out[m, ix] = -9999.0
+                out[m, ix] = undetect
             else
-                out[m, ix] = -32768.0
+                out[m, ix] = fill_value
             end
         end
     end
