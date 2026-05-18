@@ -247,7 +247,7 @@
                                       latlon = small_latlon,
                                       rhi = small_rhi,
                                       spectral = p.grid.spectral),
-                p.io)
+                p.io, p.provided)
         end
 
         p = _small_p()
@@ -316,7 +316,7 @@
                                   rhi = small_rhi,
                                   spectral = p_default.grid.spectral,
                                   metadata = custom_md),
-            p_default.io)
+            p_default.io, p_default.provided)
         v = synthetic_volume(n_sweeps = 2, n_rays = 24, n_gates = 6)
         for (shape, driver) in (
             (:volume_3d,    Daisho.grid_radar_volume),
@@ -368,7 +368,7 @@
                                   rhi = p_default.grid.rhi,
                                   spectral = p_default.grid.spectral,
                                   metadata = p_default.grid.metadata),
-            p_default.io)
+            p_default.io, p_default.provided)
         v = synthetic_volume(n_sweeps = 1, n_rays = 12, n_gates = 4)
         outfile = tempname() * "_md_default.nc"
         try
@@ -406,7 +406,7 @@
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
                                   spectral = p.grid.spectral),
-            p.io)
+            p.io, p.provided)
         outfile = tempname() * "_seapol.nc"
         try
             acc = Daisho.grid_radar_volume(v, outfile, v.time_coverage_start, p)

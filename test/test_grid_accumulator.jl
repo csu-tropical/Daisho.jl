@@ -61,12 +61,13 @@
         @test_throws ArgumentError GridAccumulator(bad_spec, fields, gtype)
     end
 
-    @testset "DaishoParameters constructor uses TOML order" begin
+    @testset "DaishoParameters constructor uses sorted field order" begin
         p = DaishoParameters()
         spec = _spec(:volume_3d)
         acc = GridAccumulator(spec, p)
-        @test acc.fields == p.moments.fields
-        @test acc.grid_type == p.moments.grid_type
+        ordered = Daisho._ordered_fields(p)
+        @test acc.fields == [fs.name for fs in ordered]
+        @test acc.grid_type == Dict(fs.name => Daisho.interp_of(fs) for fs in ordered)
         @test length(acc.field_folds) == length(p.moments.fields)
         @test all(.!acc.field_folds)
     end
@@ -211,7 +212,7 @@
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
                                   spectral = p.grid.spectral),
-            p.io)
+            p.io, p.provided)
 
         # Two-sweep synthetic volume with rich content — DBZ/VEL/SQI/DBZ_QC
         # exists with reasonable defaults. Distribute SQI=0.5 so missing_key
@@ -224,14 +225,15 @@
         # ourselves if we called it here.
         legacy_file = tempname() * "_legacy.nc"
         try
-            legacy_r, _ = as_legacy_radar(v; field_names = p.moments.fields)
+            ordered_names = [fs.name for fs in Daisho._ordered_fields(p)]
+            legacy_r, _ = as_legacy_radar(v; field_names = ordered_names)
             Daisho.grid_radar_volume(legacy_r, legacy_file, v.time_coverage_start, p)
             ds = NCDataset(legacy_file, "r")
             try
                 # Reconstruct legacy radar_grid from variables. The writer
                 # writes one variable per moment; we can read them back.
                 legacy_grids = Dict{String,Array{Float64,4}}()
-                for fname in p.moments.fields
+                for fname in ordered_names
                     if haskey(ds, fname)
                         raw = ds[fname][:, :, :, :]
                         legacy_grids[fname] = Float64.(coalesce.(raw, -32768.0))
@@ -260,7 +262,7 @@
                 # legacy "nearest gate SQI" coverage bug pixels. Instead, check
                 # that cells where both paths report a valid value (i.e.
                 # neither is -32768 nor -9999) agree closely.
-                for (m, fname) in enumerate(p.moments.fields)
+                for (m, fname) in enumerate(acc.fields)
                     haskey(legacy_grids, fname) || continue
                     leg = legacy_grids[fname]
                     # legacy_grids dims: (X, Y, Z, time). Permute to (Z, Y, X).
@@ -269,7 +271,7 @@
                         a = grid[m, ix]
                         b = leg_zyx[ix]
                         if a > -9000 && b > -9000
-                            mode = p.moments.grid_type[fname]
+                            mode = acc.grid_type[fname]
                             tol = mode === :linear ? 1e-3 : 1e-6
                             @test isapprox(a, b; atol = tol)
                         end
@@ -296,7 +298,7 @@
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
                                   spectral = p.grid.spectral),
-            p.io)
+            p.io, p.provided)
         v = synthetic_volume(n_sweeps = 2, n_rays = 36, n_gates = 6)
 
         gs = GridSpec(

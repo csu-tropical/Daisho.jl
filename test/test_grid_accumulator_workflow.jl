@@ -10,7 +10,7 @@
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
                                   spectral = p.grid.spectral),
-            p.io)
+            p.io, p.provided)
     end
 
     @testset "round-trip per-sweep persistence == direct gridding" begin
@@ -41,7 +41,7 @@
             ds_direct = NCDataset(direct_out, "r")
             ds_leg    = NCDataset(leg_out, "r")
             try
-                for fname in p.moments.fields
+                for fname in (fs.name for fs in p.moments.fields)
                     haskey(ds_direct, fname) || continue
                     haskey(ds_leg, fname)    || continue
                     d = Float64.(coalesce.(ds_direct[fname][:, :, :, :], -32768.0))
@@ -103,7 +103,7 @@
             ds_a = NCDataset(rolling_out, "r")
             ds_b = NCDataset(combined_out, "r")
             try
-                for fname in p.moments.fields
+                for fname in (fs.name for fs in p.moments.fields)
                     haskey(ds_a, fname) || continue
                     haskey(ds_b, fname) || continue
                     da = Float64.(coalesce.(ds_a[fname][:, :, :, :], -32768.0))
@@ -139,13 +139,14 @@
         gs = build_grid_spec(:volume_3d, v, p)
 
         # Build an accumulator with field_folds=true for VEL by hand.
-        ff = Bool[fname == "VEL" for fname in p.moments.fields]
-        acc1 = GridAccumulator(gs, p.moments.fields, p.moments.grid_type;
-                                field_folds = ff)
-        acc2 = GridAccumulator(gs, p.moments.fields, p.moments.grid_type;
-                                field_folds = ff)
+        _ordered = Daisho._ordered_fields(p)
+        _names = [fs.name for fs in _ordered]
+        _gtype = Dict(fs.name => Daisho.interp_of(fs) for fs in _ordered)
+        ff = Bool[n == "VEL" for n in _names]
+        acc1 = GridAccumulator(gs, _names, _gtype; field_folds = ff)
+        acc2 = GridAccumulator(gs, _names, _gtype; field_folds = ff)
         # Populate something in VEL so the merge attempt has content.
-        vel_idx = findfirst(==("VEL"), p.moments.fields)
+        vel_idx = findfirst(==("VEL"), _names)
         if vel_idx !== nothing
             acc1.weighted_sum[vel_idx, 1, 1, 1] = 1.0
             acc1.weight_total[vel_idx, 1, 1, 1] = 1.0

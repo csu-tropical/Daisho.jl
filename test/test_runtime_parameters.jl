@@ -43,24 +43,29 @@ using TOML
         @test p.qc.rhohv_threshold == 0.7
         @test p.gridding.beam_inflation == 0.01
         @test p.gridding.power_threshold == 0.5
-        @test p.gridding.missing_key == "SQI"
-        @test p.gridding.valid_key == "DBZ"
-        @test p.io.fill_value_missing == -32768.0
-        @test p.io.fill_value_clear == -9999.0
+        @test Daisho.field_with_tag(p, :define_scanned) == "SQI"
+        @test Daisho.field_with_tag(p, :define_detection) == "DBZ"
+        @test p.io.fill_value == -32768.0
+        @test p.io.undetect == -9999.0
     end
 
-    @testset "MomentParameters fields + grid_type" begin
+    @testset "MomentParameters fields + tags" begin
         p = DaishoParameters()
-        @test p.moments.fields[1] == "DBZ"
-        @test "SQI" in p.moments.fields
-        @test p.moments.grid_type["DBZ"] == :linear
-        @test p.moments.grid_type["KDP"] == :weighted
+        names = [fs.name for fs in p.moments.fields]
+        @test "DBZ" in names
+        @test "SQI" in names
+        dbz = first(fs for fs in p.moments.fields if fs.name == "DBZ")
+        kdp = first(fs for fs in p.moments.fields if fs.name == "KDP")
+        @test Daisho.interp_of(dbz) == :linear
+        @test Daisho.interp_of(kdp) == :weighted
+        @test Daisho.has_tag(dbz, :define_detection)
         fid = Daisho.field_index_dict(p)
         gtd = Daisho.grid_type_index_dict(p)
+        # Sorted-by-name column order: DBZ is alphabetically first of the 8.
         @test fid["DBZ"] == 1
         @test gtd[1] == :linear
-        @test gtd[findfirst(==("KDP"), p.moments.fields)] == :weighted
-        @test length(p.moments.fields) == length(p.moments.grid_type)
+        @test gtd[fid["KDP"]] == :weighted
+        @test length(fid) == length(p.moments.fields)
     end
 
     @testset "Cartesian grid template values" begin
@@ -143,9 +148,9 @@ using TOML
         @test_throws ArgumentError DaishoParameters("/no/such/path/asdfqwer.toml")
     end
 
-    @testset "Missing top-level section raises ArgumentError" begin
-        # Build a complete config, then strip out [qc] to confirm strict
-        # loading rejects it.
+    @testset "Optional [qc] absent → defaults + not in provided" begin
+        # [qc] is now optional: a config without it default-constructs
+        # QCParameters and records its absence in p.provided.
         mktemp() do path, io
             close(io)
             base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
@@ -153,14 +158,70 @@ using TOML
             open(path, "w") do f
                 TOML.print(f, base)
             end
+            p = DaishoParameters(path)
+            @test p.qc == QCParameters()
+            @test !(:qc in p.provided)
+        end
+    end
+
+    @testset "Optional [gridding]/[grid] absent → defaults + provided" begin
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            delete!(base, "gridding")
+            delete!(base, "grid")
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
+            p = DaishoParameters(path)
+            @test p.gridding == GriddingParameters()
+            @test !(:gridding in p.provided)
+            @test !(:grid in p.provided)
+            # A driver that needs [grid] raises a point-of-use error.
             err = try
-                DaishoParameters(path)
+                Daisho.require_section(p, :grid, :cartesian; for_op="grid_radar_volume")
                 nothing
             catch e
                 e
             end
             @test err isa ArgumentError
-            @test occursin("[qc]", err.msg)
+            @test occursin("grid_radar_volume", err.msg)
+            @test occursin("[grid]", err.msg)
+        end
+    end
+
+    @testset "Missing [grid.latlon] while [grid.cartesian] present → defaulted" begin
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            delete!(base["grid"], "latlon")
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
+            p = DaishoParameters(path)
+            @test p.grid.latlon == LatLonGridParameters()
+            @test p.grid.cartesian.xdim == 501
+        end
+    end
+
+    @testset "Mandatory [fields]/[io] absent → ArgumentError" begin
+        for sect in ("fields", "io")
+            mktemp() do path, io
+                close(io)
+                base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+                delete!(base, sect)
+                open(path, "w") do f
+                    TOML.print(f, base)
+                end
+                err = try
+                    DaishoParameters(path)
+                    nothing
+                catch e
+                    e
+                end
+                @test err isa ArgumentError
+                @test occursin(sect, err.msg)
+            end
         end
     end
 
@@ -196,16 +257,148 @@ using TOML
         end
     end
 
-    @testset "Field name without grid_type raises ArgumentError" begin
+    # Replace the whole [fields] table (deep-merge would otherwise keep the
+    # template's 8 fields). `fields` maps name => Vector of tag strings.
+    function _write_config_with_fields(path, fields::AbstractDict,
+                                       overrides::AbstractDict=Dict{String,Any}())
+        base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+        base["fields"] = Dict{String,Any}(String(k) => v for (k, v) in fields)
+        merged = _deep_merge_dict(base, overrides)
+        open(path, "w") do io
+            TOML.print(io, merged)
+        end
+        return path
+    end
+
+    @testset "New-shape parse → FieldSpec.tags and interp_of" begin
         mktemp() do path, io
             close(io)
-            _write_full_config(path, Dict(
-                "fields" => Dict(
-                    "names" => ["DBZ", "MISSING_FIELD"],
-                    "grid_type" => Dict("DBZ" => "linear"),
-                ),
+            _write_config_with_fields(path, Dict(
+                "DBZ" => ["linear_interp", "define_detection"],
+                "VEL" => ["nearest_interp", "velocity"],
+                "SQI" => ["weighted_interp", "define_scanned"],
+            ))
+            p = DaishoParameters(path)
+            byname = Dict(fs.name => fs for fs in p.moments.fields)
+            @test Daisho.interp_of(byname["DBZ"]) == :linear
+            @test Daisho.interp_of(byname["VEL"]) == :nearest
+            @test Daisho.interp_of(byname["SQI"]) == :weighted
+            @test Daisho.has_tag(byname["VEL"], :velocity)
+            @test Daisho.field_with_tag(p, :define_detection) == "DBZ"
+            @test Daisho.field_with_tag(p, :define_scanned) == "SQI"
+            @test Daisho.field_with_tag(p, :velocity) == "VEL"
+        end
+    end
+
+    @testset "Unknown tag rejected (names vocab)" begin
+        mktemp() do path, io
+            close(io)
+            _write_config_with_fields(path, Dict("DBZ" => ["bogus_tag"]))
+            err = try; DaishoParameters(path); nothing; catch e; e; end
+            @test err isa ArgumentError
+            @test occursin("bogus_tag", err.msg)
+            @test occursin("linear_interp", err.msg)
+        end
+    end
+
+    @testset "Two interpolation tags on one field rejected" begin
+        mktemp() do path, io
+            close(io)
+            _write_config_with_fields(path,
+                Dict("DBZ" => ["linear_interp", "nearest_interp"]))
+            @test_throws ArgumentError DaishoParameters(path)
+        end
+    end
+
+    @testset "Duplicate singular tag rejected at load" begin
+        mktemp() do path, io
+            close(io)
+            _write_config_with_fields(path, Dict(
+                "DBZ" => ["linear_interp", "define_detection"],
+                "ZDR" => ["linear_interp", "define_detection"],
             ))
             @test_throws ArgumentError DaishoParameters(path)
+        end
+    end
+
+    @testset "Zero define_* loads, field_with_tag raises with op name" begin
+        mktemp() do path, io
+            close(io)
+            _write_config_with_fields(path, Dict(
+                "DBZ" => ["linear_interp"],
+                "VEL" => ["weighted_interp"],
+            ))
+            p = DaishoParameters(path)   # loads fine
+            err = try
+                Daisho.field_with_tag(p, :define_detection; for_op="grid_radar_volume")
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin("grid_radar_volume", err.msg)
+            @test occursin("define_detection", err.msg)
+        end
+    end
+
+    @testset "Empty [fields] rejected" begin
+        mktemp() do path, io
+            close(io)
+            _write_config_with_fields(path, Dict{String,Any}())
+            @test_throws ArgumentError DaishoParameters(path)
+        end
+    end
+
+    @testset "Migration diagnostics for legacy shapes" begin
+        # Legacy [fields] shape.
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["fields"] = Dict("names" => ["DBZ"],
+                                  "grid_type" => Dict("DBZ" => "linear"))
+            open(path, "w") do f; TOML.print(f, base); end
+            err = try; DaishoParameters(path); nothing; catch e; e; end
+            @test err isa ArgumentError
+            @test occursin("flat array of tags", err.msg) ||
+                  occursin("define_detection", err.msg)
+        end
+        # Legacy [gridding] keys.
+        mktemp() do path, io
+            close(io)
+            _write_full_config(path,
+                Dict("gridding" => Dict("missing_key" => "SQI")))
+            err = try; DaishoParameters(path); nothing; catch e; e; end
+            @test err isa ArgumentError
+            @test occursin("define_scanned", err.msg)
+        end
+        # Legacy [io] keys.
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["io"] = Dict("fill_value_missing" => -32768.0,
+                              "fill_value_clear" => -9999.0)
+            open(path, "w") do f; TOML.print(f, base); end
+            err = try; DaishoParameters(path); nothing; catch e; e; end
+            @test err isa ArgumentError
+            @test occursin("fill_value", err.msg) && occursin("undetect", err.msg)
+        end
+    end
+
+    @testset "Order-independence of column maps and accumulator fields" begin
+        f_a = ["DBZ" => ["linear_interp", "define_detection"],
+               "VEL" => ["weighted_interp", "velocity"],
+               "SQI" => ["weighted_interp", "define_scanned"]]
+        mktemp() do p1, io1
+            close(io1)
+            mktemp() do p2, io2
+                close(io2)
+                _write_config_with_fields(p1, Dict(f_a))
+                _write_config_with_fields(p2, Dict(reverse(f_a)))
+                pa = DaishoParameters(p1)
+                pb = DaishoParameters(p2)
+                @test Daisho.field_index_dict(pa) == Daisho.field_index_dict(pb)
+                @test Daisho.grid_type_index_dict(pa) == Daisho.grid_type_index_dict(pb)
+            end
         end
     end
 
@@ -220,23 +413,23 @@ using TOML
     @testset "create_radar_grid(p) builds correct geometry" begin
         mktemp() do path, io
             close(io)
-            _write_full_config(path, Dict(
-                "fields" => Dict(
-                    "names" => ["DBZ", "VEL"],
-                    "grid_type" => Dict("DBZ" => "linear", "VEL" => "weighted"),
+            _write_config_with_fields(path, Dict(
+                    "DBZ" => ["linear_interp"],
+                    "VEL" => ["weighted_interp"],
                 ),
-                "grid" => Dict("spectral" => Dict(
+                Dict("grid" => Dict("spectral" => Dict(
                     "geometry" => "R",
                     "xmin" => 0.0,
                     "xmax" => 1000.0,
                     "xdim" => 4,
-                )),
-            ))
+                ))),
+            )
             p = DaishoParameters(path)
             sgrid = Daisho.create_radar_grid(p)
             @test sgrid isa R_Grid
             @test sgrid.params.iDim == 4 * 3
             @test length(sgrid.params.vars) == 2
+            # Sorted column order: DBZ before VEL.
             @test sgrid.params.vars["DBZ"] == 1
             @test sgrid.params.vars["VEL"] == 2
         end
