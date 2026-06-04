@@ -417,3 +417,186 @@ function _grid_sweep_wind_3d!(acc::WindGridAccumulator, sweep::SweepGroup,
     end
     return acc
 end
+
+# ── Finalize: solve, sandwich error, frame rotation, non-destructive QC ───────
+
+"""
+    finalize_wind(acc::WindGridAccumulator, p::DaishoParameters;
+                  frame::SynthesisFrame = CartesianFrame()) -> SynthesisOutput
+
+Solve the per-gridpoint dual-Doppler normal system and produce the single-stage
+retrieval product. For each grid point (§2.3–2.4 of the stage-1 plan):
+
+1. Point estimate `[u; v] = (AᵀWA)⁻¹ · AᵀWb` from the packed 2×2 `AᵀWA`, with
+   `D = S_aa·S_bb − S_ab²` the determinant (→0 along the baseline).
+2. Equal-variance "sandwich" covariance `cov_cart = σ²_vr · Ci · M2 · Ci`
+   (`σ²_vr = velocity_variance`; at equal gate weights `M2 = AᵀWA` and this
+   collapses to `σ²_vr·Ci`, the CEDRIC Eq-13 `Σg²` form).
+3. Rotation into the active output frame: `[c1; c2] = R·[u; v]`,
+   `cov_frame = R·cov_cart·Rᵀ`, with `R = rotation_at(frame, x, y, z)`; the
+   in-frame σ are `sqrt` of the covariance diagonal.
+
+Masking is **non-destructive**: where the system is solvable, `comp1, comp2,
+sigma1, sigma2` are always written, and `quality_flag` records, independently
+per component, which `max_sigma` threshold was exceeded. Two intrinsic
+(non-tunable) states blank the components to `fill_value`: **no data** (no
+weighted gate reached the point) and **singular** (`D ≤ 0` / non-finite cov,
+e.g. a single look direction or a baseline point). Stage 1 solves `n_unknowns ==
+2` only.
+"""
+function finalize_wind(acc::WindGridAccumulator, p::DaishoParameters;
+                       frame::SynthesisFrame = CartesianFrame())
+    acc.n_unknowns == 2 || throw(ArgumentError(
+        "finalize_wind: stage-1 solve supports n_unknowns=2 only; got " *
+        "$(acc.n_unknowns) (the 3-unknown path is scaffolded but not shipped)."))
+    g = acc.grid_spec
+    σ2 = p.synthesis.velocity_variance
+    length(p.synthesis.max_sigma) >= 2 || throw(ArgumentError(
+        "finalize_wind: [synthesis] max_sigma needs ≥2 components for the " *
+        "2-unknown solve, got $(length(p.synthesis.max_sigma))."))
+    max_s1 = p.synthesis.max_sigma[1]
+    max_s2 = p.synthesis.max_sigma[2]
+    fv = acc.fill_value
+
+    nz, ny, nx = wind_accumulator_dims(g)
+    comp1  = fill(fv, nz, ny, nx)
+    comp2  = fill(fv, nz, ny, nx)
+    sigma1 = fill(fv, nz, ny, nx)
+    sigma2 = fill(fv, nz, ny, nx)
+    det    = zeros(Float64, nz, ny, nx)
+    qflag  = zeros(Int8, nz, ny, nx)
+    ngat   = copy(acc.gate_count)
+
+    xax, yax, zax = g.x_axis, g.y_axis, g.z_axis
+
+    @inbounds for i in 1:nx, j in 1:ny, k in 1:nz
+        if acc.gate_count[k, j, i] == Int32(0) || acc.weight_total[k, j, i] <= 0.0
+            qflag[k, j, i] = QFLAG_NODATA          # no weighted gate reached here
+            continue
+        end
+        Saa = acc.AtWA[1, k, j, i]; Sab = acc.AtWA[2, k, j, i]; Sbb = acc.AtWA[3, k, j, i]
+        Sav = acc.AtWb[1, k, j, i]; Sbv = acc.AtWb[2, k, j, i]
+        D = Saa * Sbb - Sab * Sab
+        det[k, j, i] = D
+        # Singular guard. A single look direction makes AᵀWA rank-1, so D = S_aa·
+        # S_bb − S_ab² collapses to numerical roundoff (~eps·S_aa·S_bb), not a
+        # clean 0; left unchecked it produces a falsely-confident (0,0) with
+        # σ=0. The scale-relative test catches that intrinsic rank deficiency,
+        # while a *physically* near-baseline pair (small but real crossing
+        # angle) keeps a positive D ≫ the floor and survives — its instability
+        # surfaces as a large σ caught by the per-component thresholds, not here.
+        if !isfinite(D) || D <= 1e-12 * Saa * Sbb
+            qflag[k, j, i] = QFLAG_SINGULAR        # degenerate geometry / baseline
+            continue
+        end
+        invD = 1.0 / D
+        # Ci = (AᵀWA)⁻¹ (symmetric): [c11 c12; c12 c22].
+        c11 =  Sbb * invD; c12 = -Sab * invD; c22 = Saa * invD
+        u = c11 * Sav + c12 * Sbv
+        v = c12 * Sav + c22 * Sbv
+        # Sandwich covariance cov_cart = σ²·Ci·M2·Ci.
+        Taa = acc.M2[1, k, j, i]; Tab = acc.M2[2, k, j, i]; Tbb = acc.M2[3, k, j, i]
+        p11 = c11 * Taa + c12 * Tab; p12 = c11 * Tab + c12 * Tbb
+        p21 = c12 * Taa + c22 * Tab; p22 = c12 * Tab + c22 * Tbb
+        cov11 = σ2 * (p11 * c11 + p12 * c12)
+        cov12 = σ2 * (p11 * c12 + p12 * c22)
+        cov21 = σ2 * (p21 * c11 + p22 * c12)
+        cov22 = σ2 * (p21 * c12 + p22 * c22)
+        # Rotate into the output frame: x_frame = R·x, cov_frame = R·cov·Rᵀ.
+        R = rotation_at(frame, xax[i], yax[j], zax[k])
+        r11 = R[1, 1]; r12 = R[1, 2]; r21 = R[2, 1]; r22 = R[2, 2]
+        c1 = r11 * u + r12 * v
+        c2 = r21 * u + r22 * v
+        rc11 = r11 * cov11 + r12 * cov21; rc12 = r11 * cov12 + r12 * cov22
+        rc21 = r21 * cov11 + r22 * cov21; rc22 = r21 * cov12 + r22 * cov22
+        cf11 = rc11 * r11 + rc12 * r12
+        cf22 = rc21 * r21 + rc22 * r22
+        if !isfinite(cf11) || !isfinite(cf22) || cf11 < 0.0 || cf22 < 0.0
+            qflag[k, j, i] = QFLAG_SINGULAR
+            continue
+        end
+        s1 = sqrt(cf11); s2 = sqrt(cf22)
+        comp1[k, j, i] = c1; comp2[k, j, i] = c2
+        sigma1[k, j, i] = s1; sigma2[k, j, i] = s2
+        f = Int8(0)
+        s1 > max_s1 && (f |= QFLAG_SIGMA1)          # in-frame, independent
+        s2 > max_s2 && (f |= QFLAG_SIGMA2)
+        qflag[k, j, i] = f
+    end
+
+    return SynthesisOutput(
+        grid_spec = g,
+        component_names = component_names(frame),
+        comp1 = comp1, comp2 = comp2, sigma1 = sigma1, sigma2 = sigma2,
+        det = det, n_gates = ngat, quality_flag = qflag,
+        fill_value = fv, undetect = acc.undetect)
+end
+
+# ── Persistence + multi-file merge ───────────────────────────────────────────
+
+"""
+    save_wind_accumulator(path, accum::WindGridAccumulator) -> path
+
+Persist a `WindGridAccumulator` to JLD2. Reload with [`load_wind_accumulator`](@ref).
+Mirrors [`save_accumulator`](@ref).
+"""
+function save_wind_accumulator(path::AbstractString, accum::WindGridAccumulator)
+    JLD2.jldopen(path, "w") do f
+        f["wind_accumulator"] = accum
+    end
+    return path
+end
+
+"""
+    load_wind_accumulator(path) -> WindGridAccumulator
+
+Read a `WindGridAccumulator` saved by [`save_wind_accumulator`](@ref). Raises if
+the on-disk `schema_version` does not match `WIND_ACCUMULATOR_SCHEMA_VERSION`.
+"""
+function load_wind_accumulator(path::AbstractString)
+    accum = JLD2.jldopen(path, "r") do f
+        f["wind_accumulator"]
+    end
+    accum.schema_version == WIND_ACCUMULATOR_SCHEMA_VERSION || throw(ArgumentError(
+        "load_wind_accumulator: schema version $(accum.schema_version) on " *
+        "$(path); expected $(WIND_ACCUMULATOR_SCHEMA_VERSION)"))
+    return accum
+end
+
+"""
+    merge_wind_accumulators!(dst, src) -> dst
+
+Combine `src` into `dst` in place. Because the accumulation is **linear** —
+every plane is a simple sum of per-gate rank-1 updates — the merge is an
+elementwise add of `AtWA`/`AtWb`/`M2`/`weight_total`/`gate_count` and a concat
+of `sweeps`. This is what makes the streaming model valid across files and
+radars: gridding sweeps A and B into one accumulator equals gridding them
+separately and merging. Strict compatibility is required (identical `grid_spec`,
+`velocity_field`, `n_unknowns`, and `[io]` sentinels); no silent coercion.
+"""
+function merge_wind_accumulators!(dst::WindGridAccumulator, src::WindGridAccumulator)
+    _grid_spec_equal(dst.grid_spec, src.grid_spec) ||
+        throw(ArgumentError("merge_wind_accumulators!: grid_spec mismatch"))
+    dst.velocity_field == src.velocity_field ||
+        throw(ArgumentError("merge_wind_accumulators!: velocity_field mismatch " *
+            "($(dst.velocity_field) vs $(src.velocity_field))"))
+    dst.n_unknowns == src.n_unknowns ||
+        throw(ArgumentError("merge_wind_accumulators!: n_unknowns mismatch " *
+            "($(dst.n_unknowns) vs $(src.n_unknowns))"))
+    dst.fill_value == src.fill_value ||
+        throw(ArgumentError("merge_wind_accumulators!: fill_value mismatch " *
+            "($(dst.fill_value) vs $(src.fill_value)) — accumulators built under " *
+            "different [io] sentinel conventions cannot be merged"))
+    dst.undetect == src.undetect ||
+        throw(ArgumentError("merge_wind_accumulators!: undetect mismatch " *
+            "($(dst.undetect) vs $(src.undetect)) — accumulators built under " *
+            "different [io] sentinel conventions cannot be merged"))
+
+    dst.AtWA         .+= src.AtWA
+    dst.AtWb         .+= src.AtWb
+    dst.M2           .+= src.M2
+    dst.weight_total .+= src.weight_total
+    dst.gate_count   .+= src.gate_count
+    append!(dst.sweeps, src.sweeps)
+    return dst
+end

@@ -57,6 +57,7 @@ export grid_sweep_to_file, finalize_accumulator_file, combine_accumulator_files
 # Multi-Doppler wind synthesis (stage 1)
 export WindGridAccumulator, wind_accumulator_dims, SynthesisOutput
 export SynthesisFrame, CartesianFrame, component_names, rotation_at
-export grid_sweep_wind!
+export grid_sweep_wind!, finalize_wind
+export save_wind_accumulator, load_wind_accumulator, merge_wind_accumulators!
 
 end # module Daisho
