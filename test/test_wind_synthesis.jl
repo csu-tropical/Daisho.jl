@@ -620,4 +620,59 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             dst, WindGridAccumulator(spec, "VEL"; fill_value = -1.0))
     end
 
+    # ── Phase 5: NetCDF output ──────────────────────────────────────────────
+
+    @testset "write_wind_synthesis NetCDF output" begin
+        p = _p_synth(var = 1.0, ms = [5.0, 5.0])
+        volA, volB = make_synthetic_dual_doppler(u = 8.0, v = -3.0)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = 16.0, reference_longitude = -24.0,
+            x_axis = [-2000.0, 0.0, 2000.0],
+            y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        acc = WindGridAccumulator(spec, "VEL")
+        for s in eachindex(volA.sweeps); grid_sweep_wind!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep_wind!(acc, volB, s, p); end
+        out = finalize_wind(acc, p)
+
+        nx, ny, nz = length(spec.x_axis), length(spec.y_axis), length(spec.z_axis)
+        file = tempname() * ".nc"
+        try
+            write_wind_synthesis(file, out, p; index_time = DateTime(2024, 1, 1, 0, 0, 0))
+            ds = NCDataset(file, "r")
+            try
+                @test ds.dim["X"] == nx
+                @test ds.dim["Y"] == ny
+                @test ds.dim["Z"] == nz
+                @test ds.dim["time"] == 1
+                for vn in ("U", "V", "USTD", "VSTD", "DET", "NGATES", "QFLAG",
+                           "X", "Y", "Z", "time", "latitude", "longitude", "grid_mapping")
+                    @test haskey(ds, vn)
+                end
+                @test size(ds["U"]) == (nx, ny, nz, 1)
+                @test ds["U"].attrib["standard_name"] == "eastward_wind"
+                @test ds["V"].attrib["standard_name"] == "northward_wind"
+                @test haskey(ds["U"].attrib, "_FillValue")
+                @test ds["QFLAG"].attrib["flag_masks"] == Int8[1, 2, 4, 8]
+                @test eltype(ds["NGATES"].var[:, :, :, 1]) <: Integer
+                @test ds["grid_mapping"].attrib["grid_mapping_name"] == "transverse_mercator"
+                # Round-trip a recovered value at a solved cell.
+                solved = nothing
+                for ci in CartesianIndices(out.quality_flag)
+                    if out.quality_flag[ci] == Int8(0); solved = ci; break; end
+                end
+                @test solved !== nothing
+                if solved !== nothing
+                    k, j, i = solved.I
+                    @test Float32(out.comp1[k, j, i]) ≈ ds["U"][i, j, k, 1] atol = 1e-4
+                    @test Float32(out.comp2[k, j, i]) ≈ ds["V"][i, j, k, 1] atol = 1e-4
+                end
+            finally
+                close(ds)
+            end
+        finally
+            isfile(file) && rm(file)
+        end
+    end
+
 end

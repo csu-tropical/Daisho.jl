@@ -252,7 +252,7 @@ end
 Add one sweep's dual-Doppler contribution to `acc`. For every gate whose
 `:velocity` value is present and whose interpolation weight is positive, the
 effective line-of-sight angles `(az, el)` (from the shared
-[`_gate_grid_geometry`](@ref) kernel) form the Cartesian coefficient vector
+`_gate_grid_geometry` kernel) form the Cartesian coefficient vector
 `g = [sin az·cos el, cos az·cos el]`, and the gate applies the rank-1 updates
 
     AtWA += w·ggᵀ,   AtWb += w·v_r·g,   M2 += w²·ggᵀ
@@ -599,4 +599,137 @@ function merge_wind_accumulators!(dst::WindGridAccumulator, src::WindGridAccumul
     dst.gate_count   .+= src.gate_count
     append!(dst.sweeps, src.sweeps)
     return dst
+end
+
+# ── NetCDF output ────────────────────────────────────────────────────────────
+
+# CF standard_name / long_name for a wind component, by output-frame name.
+# Known Cartesian names map to CF standard names; anything else (future
+# plane/polar frames, e.g. VT/VR) falls back to a generic long_name.
+function _cf_component_attrs(name::AbstractString)
+    if name == "U"
+        return ("eastward_wind", "Eastward wind component")
+    elseif name == "V"
+        return ("northward_wind", "Northward wind component")
+    elseif name == "W"
+        return ("upward_air_velocity", "Upward wind component")
+    else
+        return (nothing, "$(name) wind component")
+    end
+end
+
+"""
+    write_wind_synthesis(file, out::SynthesisOutput, p::DaishoParameters;
+                         index_time, start_time=index_time, stop_time=index_time) -> file
+
+Write a [`SynthesisOutput`](@ref) to a CF-1.12 gridded NetCDF file, mirroring the
+`write_gridded_radar_volume` layout (X/Y/Z + time dims, projected coordinates, a
+Transverse Mercator `grid_mapping`, and per-point latitude/longitude). Field
+names follow the active output frame's [`component_names`](@ref): the two
+components, their `*STD` uncertainties, plus `DET`, `NGATES`, and `QFLAG`. For
+the stage-1 `CartesianFrame` these are `U, V, USTD, VSTD, DET, NGATES, QFLAG`
+(with CF `standard_name` `eastward_wind`/`northward_wind`); a polar/plane frame
+later emits its own names (e.g. `VT, VR`) through the same adapter. CF global
+attributes come from `[grid.metadata]`. Any pre-existing file is deleted first.
+"""
+function write_wind_synthesis(file::AbstractString, out::SynthesisOutput,
+                              p::DaishoParameters;
+                              index_time::DateTime,
+                              start_time::DateTime = index_time,
+                              stop_time::DateTime = index_time)
+    g = out.grid_spec
+    (g.shape === :volume_3d || g.shape === :latlon_3d) || throw(ArgumentError(
+        "write_wind_synthesis: stage-1 output supports :volume_3d and " *
+        ":latlon_3d only, got $(g.shape)"))
+    nz, ny, nx = size(out.comp1)
+
+    rm(file, force = true)
+    ds = NCDataset(file, "c", attrib = _global_attrib_dict(p.grid.metadata))
+    try
+        ds.dim["time"] = 1
+        ds.dim["X"] = nx
+        ds.dim["Y"] = ny
+        ds.dim["Z"] = nz
+
+        defVar(ds, "time", Float64, ("time",); attrib = OrderedDict(
+            "standard_name" => "time", "long_name" => "Data time",
+            "units" => "seconds since 1970-01-01T00:00:00Z", "axis" => "T"))[:] =
+            datetime2unix(index_time)
+        defVar(ds, "start_time", Float64, ("time",); attrib = OrderedDict(
+            "standard_name" => "start_time", "long_name" => "Data start time",
+            "units" => "seconds since 1970-01-01T00:00:00Z"))[:] =
+            datetime2unix(start_time)
+        defVar(ds, "stop_time", Float64, ("time",); attrib = OrderedDict(
+            "standard_name" => "stop_time", "long_name" => "Data stop time",
+            "units" => "seconds since 1970-01-01T00:00:00Z"))[:] =
+            datetime2unix(stop_time)
+
+        defVar(ds, "X", Float32, ("X",); attrib = OrderedDict(
+            "standard_name" => "projection_x_coordinate", "units" => "m",
+            "axis" => "X"))[:] = Float32.(g.x_axis)
+        defVar(ds, "Y", Float32, ("Y",); attrib = OrderedDict(
+            "standard_name" => "projection_y_coordinate", "units" => "m",
+            "axis" => "Y"))[:] = Float32.(g.y_axis)
+        defVar(ds, "Z", Float32, ("Z",); attrib = OrderedDict(
+            "standard_name" => "altitude", "long_name" => "constant altitude levels",
+            "units" => "m", "positive" => "up", "axis" => "Z"))[:] = Float32.(g.z_axis)
+
+        latlon = _compute_latlon_grid(g)   # (ny, nx, 2)
+        defVar(ds, "latitude", Float32, ("X", "Y", "time"); attrib = OrderedDict(
+            "standard_name" => "latitude", "units" => "degrees_north"))[:, :, 1] =
+            Float32.(latlon[:, :, 1]')
+        defVar(ds, "longitude", Float32, ("X", "Y", "time"); attrib = OrderedDict(
+            "standard_name" => "longitude", "units" => "degrees_east"))[:, :, 1] =
+            Float32.(latlon[:, :, 2]')
+
+        defVar(ds, "grid_mapping", Int32, (); attrib = OrderedDict(
+            "grid_mapping_name" => "transverse_mercator",
+            "scale_factor_at_central_meridian" => 1.0,
+            "longitude_of_central_meridian" => g.reference_longitude,
+            "latitude_of_projection_origin" => g.reference_latitude,
+            "reference_ellipsoid_name" => "GRS80",
+            "false_easting" => 0.0, "false_northing" => 0.0))[:] = Int32(-32768)
+
+        # (nz, ny, nx) → (nx, ny, nz) for the X,Y,Z,time variables.
+        _xyz(A) = permutedims(A, (3, 2, 1))
+        c1, c2 = out.component_names
+        s1, s2 = c1 * "STD", c2 * "STD"
+        fv = Float32(out.fill_value)
+
+        function _wind_field!(name, data, long_name; std_name = nothing,
+                              units = "m s-1")
+            attrs = OrderedDict{String,Any}("long_name" => long_name,
+                "units" => units, "grid_mapping" => "grid_mapping",
+                "coordinates" => "longitude latitude",
+                "_FillValue" => fv)
+            std_name === nothing || (attrs["standard_name"] = std_name)
+            defVar(ds, name, Float32, ("X", "Y", "Z", "time"); attrib = attrs)[:, :, :, 1] =
+                Float32.(_xyz(data))
+        end
+
+        sn1, ln1 = _cf_component_attrs(c1)
+        sn2, ln2 = _cf_component_attrs(c2)
+        _wind_field!(c1, out.comp1, ln1; std_name = sn1)
+        _wind_field!(c2, out.comp2, ln2; std_name = sn2)
+        _wind_field!(s1, out.sigma1, "$(c1) normalized uncertainty (standard deviation)")
+        _wind_field!(s2, out.sigma2, "$(c2) normalized uncertainty (standard deviation)")
+        _wind_field!("DET", out.det, "Normal-equation determinant (baseline conditioning)";
+                     units = "1")
+
+        defVar(ds, "NGATES", Int32, ("X", "Y", "Z", "time"); attrib = OrderedDict(
+            "long_name" => "Number of contributing gates",
+            "grid_mapping" => "grid_mapping",
+            "coordinates" => "longitude latitude"))[:, :, :, 1] = _xyz(out.n_gates)
+
+        defVar(ds, "QFLAG", Int8, ("X", "Y", "Z", "time"); attrib = OrderedDict(
+            "long_name" => "Quality flag (bitwise)",
+            "flag_masks" => Int8[QFLAG_SIGMA1, QFLAG_SIGMA2, QFLAG_SINGULAR, QFLAG_NODATA],
+            "flag_meanings" => "sigma1_above_threshold sigma2_above_threshold " *
+                               "singular_geometry no_data",
+            "grid_mapping" => "grid_mapping",
+            "coordinates" => "longitude latitude"))[:, :, :, 1] = _xyz(out.quality_flag)
+    finally
+        close(ds)
+    end
+    return file
 end

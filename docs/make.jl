@@ -15,11 +15,13 @@ makedocs(
             "guide/quality_control.md",
             "guide/gridding.md",
             "guide/spectral_gridding.md",
+            "guide/wind_synthesis.md",
             "guide/srtm.md",
         ],
         "Theory" => [
             "theory/beam_geometry.md",
             "theory/gridding_algo.md",
+            "theory/wind_synthesis.md",
         ],
         "API Reference" => "api.md",
     ],
