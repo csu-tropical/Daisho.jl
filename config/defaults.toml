@@ -19,6 +19,7 @@
 #
 # Structure mirrors the `DaishoParameters` struct hierarchy:
 #   [fields]               -> p.moments      (flat per-field tag array)
+#   [io]                   -> p.io
 #   [qc]                   -> p.qc
 #   [gridding]             -> p.gridding
 #   [grid.cartesian]       -> p.grid.cartesian
@@ -27,7 +28,6 @@
 #   [grid.spectral]        -> p.grid.spectral
 #   [grid.spectral.bc.*]   -> p.grid.spectral.bc.*  (sub-table per axis side)
 #   [grid.metadata]        -> p.grid.metadata  (CF global attrs for outputs)
-#   [io]                   -> p.io
 #
 # ── [fields] tag vocabulary ──────────────────────────────────────────────────
 # Each field maps to a flat ARRAY of tags `[ ... ]`. No tag is required;
@@ -61,13 +61,15 @@
 
 [fields]
 DBZ   = ["linear_interp",   "define_detection"]
-ZDR   = ["linear_interp"]
-KDP   = ["weighted_interp"]
-RHOHV = ["weighted_interp"]
 VEL   = ["weighted_interp",  "velocity"]
 WIDTH = ["weighted_interp"]
-PHIDP = ["weighted_interp"]
 SQI   = ["weighted_interp",  "define_scanned"]
+
+# Output flags, named to match the CfRadial 2.1 / ODIM data model and
+# FieldMetadata exactly.
+[io]
+fill_value = -32768.0   # CF _FillValue  — true missing (gate not measured)
+undetect   =  -9999.0   # ODIM _Undetect — undetect (scanned, no echo)
 
 [qc]
 sqi_threshold        = 0.35
@@ -165,10 +167,3 @@ keywords         = "radar, precipitation"
 processing_level = "Level 4"
 license          = "CC-BY-4.0"
 references       = ""
-
-# Output sentinels, named to match the CfRadial 2.1 / ODIM data model and
-# FieldMetadata exactly. These are authoritative across the gridding /
-# finalize / NetCDF-write path; the defaults are NOT a universal convention.
-[io]
-fill_value = -32768.0   # CF _FillValue  — true missing (gate not measured)
-undetect   =  -9999.0   # ODIM _Undetect — undetect (scanned, no echo)
