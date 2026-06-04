@@ -179,6 +179,55 @@ function create_synthetic_cfradial(filepath;
 end
 
 """
+Build two single-PPI `Volume`s viewing a shared domain from two stationary
+radars, for dual-Doppler wind-synthesis tests. Each gate's `VEL` value is the
+analytic radial projection of a uniform wind `(u, v)` onto the beam,
+
+    VEL = u·sin(az)·cos(el) + v·cos(az)·cos(el)
+
+(CEDRIC appendix F Eq 1 with W = 0), using the beam's own azimuth/elevation, so
+gridding + solve must recover `(u, v)` at well-conditioned points. Radar A sits
+south of the grid origin and radar B to the west, giving a ~90° beam-crossing
+angle near the origin. Returns `(volA, volB)`.
+"""
+function make_synthetic_dual_doppler(; u::Real = 8.0, v::Real = -3.0,
+        ref_lat::Real = 16.0, ref_lon::Real = -24.0,
+        radarA_lat::Real = ref_lat - 0.20, radarA_lon::Real = ref_lon,
+        radarB_lat::Real = ref_lat,        radarB_lon::Real = ref_lon - 0.20,
+        azimuths = collect(0.0:2.0:358.0),
+        elevation::Real = 0.5,
+        ranges = collect(2000.0:500.0:60000.0))
+    function _vol(lat, lon, name)
+        n_rays = length(azimuths); n_gates = length(ranges)
+        t0 = DateTime(2024, 1, 1, 0, 0, 0)
+        ts = [t0 + Second(i - 1) for i in 1:n_rays]
+        az = collect(Float64, azimuths); el = fill(Float64(elevation), n_rays)
+        data = Array{Float32}(undef, n_rays, n_gates)
+        for r in 1:n_rays
+            azr = deg2rad(az[r]); elr = deg2rad(el[r])
+            a = sin(azr) * cos(elr); b = cos(azr) * cos(elr)
+            vr = Float32(u * a + v * b)
+            for gcol in 1:n_gates
+                data[r, gcol] = vr
+            end
+        end
+        sweep = SweepGroup(
+            sweep_number = 0, sweep_mode = "azimuth_surveillance",
+            fixed_angle = Float64(elevation), time = ts,
+            range = collect(Float64, ranges), azimuth = az, elevation = el)
+        add_field!(sweep, "VEL", data, FieldMetadata(units = "m/s", long_name = "VEL"))
+        return Volume(
+            instrument_name = name, site_name = name, title = "synthetic",
+            institution = "Test", source = "Test", history = "Test",
+            time_coverage_start = t0, time_coverage_end = ts[end],
+            latitude = Float64(lat), longitude = Float64(lon), altitude = 0.0,
+            sweeps = [sweep])
+    end
+    return (_vol(radarA_lat, radarA_lon, "RADARA"),
+            _vol(radarB_lat, radarB_lon, "RADARB"))
+end
+
+"""
 Build a deterministic CfRadial 2.1 `Volume` for round-trip tests, with the
 moment fields named in `fields`.
 """

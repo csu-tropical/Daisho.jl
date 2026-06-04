@@ -148,6 +148,150 @@ using TOML
         end
     end
 
+    # ── Phase 2: streaming accumulation ─────────────────────────────────────
+
+    # One-ray/one-gate sweep with a chosen beam (az, el, range) and velocity.
+    function _one_gate_sweep(; az, el, r, vr)
+        sweep = SweepGroup(
+            sweep_number = 0, sweep_mode = "azimuth_surveillance",
+            fixed_angle = Float64(el),
+            time = [DateTime(2024, 1, 1, 0, 0, 0)],
+            range = [Float64(r)], azimuth = [Float64(az)], elevation = [Float64(el)],
+        )
+        add_field!(sweep, "VEL", reshape([Float32(vr)], 1, 1),
+                   FieldMetadata(units = "m/s", long_name = "VEL"))
+        return sweep
+    end
+
+    @testset "single gate → exact rank-1 normal system" begin
+        p = DaishoParameters()
+        lat0, lon0 = 16.0, -24.0
+        vr = 5.0
+
+        # East-pointing beam (az=90°): a = sin(az)cos(el) ≈ 1, b ≈ 0, so u is
+        # well-determined and v is not. The single gate lands on the (y=0,
+        # x≈20 km) column only.
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = lat0, reference_longitude = lon0,
+            x_axis = [18000.0, 20000.0, 22000.0],
+            y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = [0.0, 47.2])
+        acc = WindGridAccumulator(spec, "VEL")
+        sweep = _one_gate_sweep(az = 90.0, el = 0.0, r = 20000.0, vr = vr)
+        grid_sweep_wind!(acc, sweep, p;
+            ref_latitude = lat0, ref_longitude = lon0, ref_altitude = 0.0)
+
+        # Exactly the (j=2, i=2) column receives the gate (both z levels).
+        for ix in CartesianIndices((2, 3, 3))
+            k, j, i = ix.I
+            expected = (j == 2 && i == 2) ? Int32(1) : Int32(0)
+            @test acc.gate_count[k, j, i] == expected
+        end
+        @test length(acc.sweeps) == 1
+
+        for k in 1:2
+            w = acc.weight_total[k, 2, 2]
+            @test w > 0.0
+            Saa, Sab, Sbb = acc.AtWA[1, k, 2, 2], acc.AtWA[2, k, 2, 2], acc.AtWA[3, k, 2, 2]
+            Taa, Tab, Tbb = acc.M2[1, k, 2, 2],   acc.M2[2, k, 2, 2],   acc.M2[3, k, 2, 2]
+            Sav, Sbv = acc.AtWb[1, k, 2, 2], acc.AtWb[2, k, 2, 2]
+            # Single gate ⇒ rank-1: det == 0 and M2 == w·AtWA exactly.
+            @test Saa * Sbb - Sab^2 ≈ 0.0 atol = 1e-9
+            @test Taa ≈ w * Saa atol = 1e-12
+            @test Tab ≈ w * Sab atol = 1e-12
+            @test Tbb ≈ w * Sbb atol = 1e-12
+            # a ≈ 1, b ≈ 0 for the east beam: S_aa ≈ w, S_bb ≈ 0, S_ab ≈ 0.
+            @test Saa ≈ w atol = 1e-3
+            @test Sbb ≈ 0.0 atol = 1e-3
+            @test Sab ≈ 0.0 atol = 1e-3
+            # AtWb = w·v_r·g ⇒ S_av ≈ w·v_r, S_bv ≈ 0.
+            @test Sav ≈ w * vr atol = 1e-3
+            @test Sbv ≈ 0.0 atol = 1e-3
+        end
+    end
+
+    @testset "single gate → coefficient roles (north beam)" begin
+        p = DaishoParameters()
+        lat0, lon0 = 16.0, -24.0
+        vr = -7.0
+        # North-pointing beam (az=0°): a ≈ 0, b ≈ 1, so v is well-determined.
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = lat0, reference_longitude = lon0,
+            x_axis = [-2000.0, 0.0, 2000.0],
+            y_axis = [18000.0, 20000.0, 22000.0],
+            z_axis = [0.0, 47.2])
+        acc = WindGridAccumulator(spec, "VEL")
+        sweep = _one_gate_sweep(az = 0.0, el = 0.0, r = 20000.0, vr = vr)
+        grid_sweep_wind!(acc, sweep, p;
+            ref_latitude = lat0, ref_longitude = lon0, ref_altitude = 0.0)
+        # The gate lands on the (y≈20 km, x=0) column: (j=2, i=2).
+        @test acc.gate_count[1, 2, 2] == Int32(1)
+        w = acc.weight_total[1, 2, 2]
+        @test acc.AtWA[3, 1, 2, 2] ≈ w atol = 1e-3   # S_bb ≈ w (b ≈ 1)
+        @test acc.AtWA[1, 1, 2, 2] ≈ 0.0 atol = 1e-3 # S_aa ≈ 0 (a ≈ 0)
+        @test acc.AtWb[2, 1, 2, 2] ≈ w * vr atol = 1e-3
+        @test acc.AtWb[1, 1, 2, 2] ≈ 0.0 atol = 1e-3
+    end
+
+    # Grid sized to actually capture synthetic_volume's low, near-range gates
+    # (ranges 400–1500 m, el 1–2° ⇒ beam heights ~7–55 m).
+    function _near_radar_spec(v)
+        return GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0),
+            z_axis = [0.0, 60.0, 120.0])
+    end
+
+    @testset "two sweeps accumulate additively" begin
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = _near_radar_spec(v)
+
+        comb = WindGridAccumulator(spec, "VEL")
+        grid_sweep_wind!(comb, v, 1, p)
+        grid_sweep_wind!(comb, v, 2, p)
+
+        a = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(a, v, 1, p)
+        b = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(b, v, 2, p)
+
+        @test comb.AtWA == a.AtWA .+ b.AtWA
+        @test comb.AtWb == a.AtWb .+ b.AtWb
+        @test comb.M2 == a.M2 .+ b.M2
+        @test comb.weight_total == a.weight_total .+ b.weight_total
+        @test comb.gate_count == a.gate_count .+ b.gate_count
+        @test length(comb.sweeps) == 2
+        # Something actually landed (guards against an all-zero vacuous pass).
+        @test sum(comb.gate_count) > 0
+    end
+
+    @testset "missing velocity gates are skipped" begin
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 1, n_rays = 72, n_gates = 12)
+        spec = _near_radar_spec(v)
+
+        full = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(full, v, 1, p)
+        @test sum(full.gate_count) > 0   # baseline has coverage
+
+        # All-missing velocity ⇒ nothing accumulates.
+        vnan = deepcopy(v)
+        fill!(vnan.sweeps[1].fields["VEL"].data, NaN32)
+        none = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(none, vnan, 1, p)
+        @test all(none.AtWA .== 0.0)
+        @test all(none.AtWb .== 0.0)
+        @test all(none.M2 .== 0.0)
+        @test all(none.weight_total .== 0.0)
+        @test all(none.gate_count .== Int32(0))
+
+        # Half-missing velocity ⇒ strictly fewer contributing gates.
+        vhalf = deepcopy(v)
+        d = vhalf.sweeps[1].fields["VEL"].data
+        d[1:2:end, :] .= NaN32
+        half = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(half, vhalf, 1, p)
+        @test sum(half.gate_count) < sum(full.gate_count)
+        @test sum(half.gate_count) > 0
+    end
+
     @testset "shared gate-geometry kernel parity" begin
         # The kernel must reproduce the exact inline formula the scalar gridding
         # path used before extraction. Hold a reference copy here and compare.
