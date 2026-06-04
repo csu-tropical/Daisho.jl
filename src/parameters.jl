@@ -351,6 +351,33 @@ Base.@kwdef struct IOParameters
 end
 
 """
+    SynthesisParameters
+
+Stage-1 dual-Doppler wind-retrieval QC, loaded from the optional `[synthesis]`
+block. Quality is judged **only** by the per-component normalized uncertainty
+(CEDRIC DTEST style), evaluated **in the output frame** — there is no radar or
+gate count threshold, since geometry adequacy already shows up in σ. Masking is
+non-destructive: where the system is solvable, the components and their σ are
+always written; the quality flag records which σ threshold(s) failed.
+
+# Fields
+- `velocity_variance::Float64`: assumed radial-velocity variance `σ²_vr` (m/s)²;
+  `1.0` ⇒ normalized (CEDRIC USTD/VSTD) σ units. It only rescales the
+  covariance to physical units and never enters the gridding weights.
+- `max_sigma::Vector{Float64}`: per-output-component maximum normalized σ,
+  indexed by frame component. The thresholds are **independent** (one component
+  may be well-determined while the other is not). For the stage-1
+  `CartesianFrame`, `max_sigma[1]`/`max_sigma[2]` are σ_u / σ_v (TOML keys
+  `max_sigma_1` / `max_sigma_2`); for future plane/polar frames they bind to
+  in-plane/cross-plane or tangential/radial. Storing a vector means adding a
+  named frame needs no schema change.
+"""
+Base.@kwdef struct SynthesisParameters
+    velocity_variance::Float64 = 1.0
+    max_sigma::Vector{Float64} = [2.0, 2.0]
+end
+
+"""
     DaishoParameters
 
 Top-level immutable runtime configuration loaded from a TOML file. Construct
@@ -371,9 +398,10 @@ present block stays strict.
 - `gridding::GriddingParameters`
 - `grid::GridParameters`
 - `io::IOParameters`
+- `synthesis::SynthesisParameters`
 - `provided::Set{Symbol}`: which optional top-level sections (`:qc`,
-  `:gridding`, `:grid`) were actually present in the loaded TOML. Absence is
-  tracked explicitly — it is *not* inferred from default values.
+  `:gridding`, `:grid`, `:synthesis`) were actually present in the loaded TOML.
+  Absence is tracked explicitly — it is *not* inferred from default values.
 
 # Examples
 ```julia
@@ -390,8 +418,17 @@ struct DaishoParameters
     gridding::GriddingParameters
     grid::GridParameters
     io::IOParameters
+    synthesis::SynthesisParameters
     provided::Set{Symbol}
 end
+
+# Back-compat convenience: callers that built a `DaishoParameters` before the
+# `[synthesis]` block existed pass six positional args (…, io, provided). Inject
+# a default synthesis block so those call sites keep working.
+DaishoParameters(moments::MomentParameters, qc::QCParameters,
+                 gridding::GriddingParameters, grid::GridParameters,
+                 io::IOParameters, provided::Set{Symbol}) =
+    DaishoParameters(moments, qc, gridding, grid, io, SynthesisParameters(), provided)
 
 # ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -419,16 +456,17 @@ DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 # numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
     provided = Set{Symbol}()
-    for s in (:qc, :gridding, :grid)
+    for s in (:qc, :gridding, :grid, :synthesis)
         haskey(d, string(s)) && push!(provided, s)
     end
 
-    moments  = _fields_from_dict(_section(d, "fields"))
-    qc       = haskey(d, "qc")       ? _struct_from_dict(QCParameters, d["qc"]; section="qc") : QCParameters()
-    gridding = haskey(d, "gridding") ? _gridding_from_dict(d["gridding"])                     : GriddingParameters()
-    grid     = haskey(d, "grid")     ? _grid_from_dict(d["grid"])                             : GridParameters()
-    io       = _io_from_dict(_section(d, "io"))
-    return DaishoParameters(moments, qc, gridding, grid, io, provided)
+    moments   = _fields_from_dict(_section(d, "fields"))
+    qc        = haskey(d, "qc")        ? _struct_from_dict(QCParameters, d["qc"]; section="qc") : QCParameters()
+    gridding  = haskey(d, "gridding")  ? _gridding_from_dict(d["gridding"])                     : GriddingParameters()
+    grid      = haskey(d, "grid")      ? _grid_from_dict(d["grid"])                             : GridParameters()
+    io        = _io_from_dict(_section(d, "io"))
+    synthesis = haskey(d, "synthesis") ? _synthesis_from_dict(d["synthesis"])                   : SynthesisParameters()
+    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, provided)
 end
 
 """
@@ -634,6 +672,26 @@ function _io_from_dict(d::AbstractDict)
             "Run `print_config(\"template.toml\")` for the new template."))
     end
     return _struct_from_dict(IOParameters, d; section="io")
+end
+
+# Build SynthesisParameters from the flat `[synthesis]` keys. The per-component
+# σ thresholds live under the scalar TOML keys `max_sigma_1` / `max_sigma_2`
+# (more legible than a TOML array) but are stored as the `max_sigma` vector.
+# Strict: unknown or missing keys raise, matching the rest of the loader.
+function _synthesis_from_dict(d::AbstractDict)
+    allowed = ("velocity_variance", "max_sigma_1", "max_sigma_2")
+    unknown = setdiff(Set(Symbol.(keys(d))), Set(Symbol.(allowed)))
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[synthesis]`. " *
+        "Allowed keys: $(join(allowed, ", "))"))
+    missing_keys = setdiff(Set(Symbol.(allowed)), Set(Symbol.(keys(d))))
+    isempty(missing_keys) || throw(ArgumentError(
+        "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
+        "`[synthesis]`. Run `print_config(\"template.toml\")` for a complete template."))
+    return SynthesisParameters(
+        velocity_variance = Float64(d["velocity_variance"]),
+        max_sigma = [Float64(d["max_sigma_1"]), Float64(d["max_sigma_2"])],
+    )
 end
 
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;

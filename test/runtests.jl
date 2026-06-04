@@ -27,4 +27,5 @@ include("test_helpers.jl")
     include("test_cfradial_bridge.jl")
     include("test_grid_accumulator.jl")
     include("test_grid_accumulator_workflow.jl")
+    include("test_wind_synthesis.jl")
 end

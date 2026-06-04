@@ -81,6 +81,20 @@ rhohv_threshold      = 0.7
 beam_inflation  = 0.01
 power_threshold = 0.5
 
+# Stage-1 dual-Doppler retrieval QC. Quality is judged ONLY by the per-component
+# normalized uncertainty (CEDRIC DTEST style), evaluated IN THE OUTPUT FRAME;
+# there is no radar count or gate count threshold — geometry adequacy already
+# shows up in sigma. Masking is NON-DESTRUCTIVE: where solvable, the components
+# and their sigmas are always written; the quality flag records which sigma
+# threshold(s) failed so stage 2 can still recover those points.
+[synthesis]
+velocity_variance = 1.0   # assumed σ_vr² (m/s)²; 1.0 → normalized (CEDRIC USTD/VSTD) units
+# Frame is Cartesian for stage 1, so component 1/2 = U/V. The two thresholds are
+# independent (component 1 may be well-determined while component 2 is not). For
+# future plane/polar frames these bind to in-plane/cross-plane or tangential/radial.
+max_sigma_1       = 2.0   # max normalized σ on output component 1 (U for CartesianFrame)
+max_sigma_2       = 2.0   # max normalized σ on output component 2 (V for CartesianFrame)
+
 [grid.cartesian]
 xmin  = -125000.0
 xincr =     500.0

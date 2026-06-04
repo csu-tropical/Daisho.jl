@@ -23,6 +23,7 @@ include("cfradial_bridge.jl")
 include("SRTM.jl")
 include("qualitycontrol.jl")
 include("grid_accumulator.jl")
+include("wind_synthesis.jl")
 include("gridding.jl")
 include("springsteel_adapter.jl")
 
@@ -33,6 +34,7 @@ export GridParameters, CartesianGridParameters, LatLonGridParameters
 export RhiGridParameters, SpectralGridParameters, SpectralBCParameters
 export MetadataParameters
 export IOParameters
+export SynthesisParameters
 
 # CfRadial 2.1 data model
 export Volume, SweepGroup, Field, FieldMetadata
@@ -51,5 +53,10 @@ export GridSpec, SweepProvenance, GridAccumulator
 export save_accumulator, load_accumulator, merge_accumulators!
 export grid_sweep!, finalize_grid, build_grid_spec
 export grid_sweep_to_file, finalize_accumulator_file, combine_accumulator_files
+
+# Multi-Doppler wind synthesis (stage 1)
+export WindGridAccumulator, wind_accumulator_dims, SynthesisOutput
+export SynthesisFrame, CartesianFrame, component_names, rotation_at
+export grid_sweep_wind!
 
 end # module Daisho

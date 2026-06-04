@@ -367,6 +367,48 @@ end
 @inline _ray_of(flat::Int, n_gates::Int)        = ((flat - 1) ÷ n_gates) + 1
 @inline _gate_in_ray(flat::Int, n_gates::Int)   = ((flat - 1) % n_gates) + 1
 
+# Per-gate geometry + interpolation weight at one grid point. Shared by the
+# scalar accumulator (`_grid_sweep_3d!`) and the wind-synthesis accumulator
+# (`grid_sweep_wind!`) so both compute identical effective angles and weights.
+#
+# `gridpt_az` is the effective azimuth (clockwise from +y / true north) and
+# `gridpt_el` the refraction-corrected elevation from the gate's radar origin to
+# the grid point — the line-of-sight direction where the wind is estimated.
+# `total_weight = range_weight · angle_weight` is the existing Gaussian
+# beam-pattern × range interpolation weight. A return of `total_weight ≤ 0`
+# (including the `|sine_h| ≥ 1` non-physical case) signals the gate does not
+# contribute and should be skipped.
+@inline function _gate_grid_geometry(grid_z::Float64, yx_point,
+                                     radar_zyx, beams, g_flat::Int,
+                                     horizontal_roi::Float64, vertical_roi::Float64,
+                                     power_threshold::Float64)
+    # Refraction-corrected height angle.
+    dz = grid_z - radar_zyx[g_flat][1]
+    r  = beams[g_flat, 3]
+    sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2 * r * Reff)
+    abs(sine_h) < 1.0 || return (NaN, NaN, 0.0)
+    gridpt_el = asin(sine_h)
+
+    # Effective azimuth from gate origin to gridpoint.
+    dx = yx_point[2] - radar_zyx[g_flat][3]
+    dy = yx_point[1] - radar_zyx[g_flat][2]
+    gridpt_az = (pi / 2.0) - atan(dy, dx)
+    gridpt_az < 0 && (gridpt_az += 2 * pi)
+
+    angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
+                                  [gridpt_az, gridpt_el])
+    angle_weight = exp(-angle_diff * 79.43)
+    angle_weight < power_threshold && (angle_weight = 0.0)
+
+    gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
+    range_weight = gridpt_r / r
+    if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
+        range_weight = 0.0
+    end
+    total_weight = range_weight * angle_weight
+    return (gridpt_az, gridpt_el, total_weight)
+end
+
 # ── grid_sweep! dispatcher ───────────────────────────────────────────────────
 
 """
@@ -584,30 +626,9 @@ function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
                 vk = _gate_value(sweep, valid_key, ray, gate_in)
                 ismissing(vk) && continue
 
-                # Refraction-corrected height angle.
-                dz = grid_z - radar_zyx[g_flat][1]
-                r  = beams[g_flat, 3]
-                sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2 * r * Reff)
-                abs(sine_h) < 1.0 || continue
-                gridpt_el = asin(sine_h)
-
-                # Effective azimuth from gate origin to gridpoint.
-                dx = yx_point[2] - radar_zyx[g_flat][3]
-                dy = yx_point[1] - radar_zyx[g_flat][2]
-                gridpt_az = (pi / 2.0) - atan(dy, dx)
-                gridpt_az < 0 && (gridpt_az += 2 * pi)
-
-                angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
-                                              [gridpt_az, gridpt_el])
-                angle_weight = exp(-angle_diff * 79.43)
-                angle_weight < power_threshold && (angle_weight = 0.0)
-
-                gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
-                range_weight = gridpt_r / r
-                if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
-                    range_weight = 0.0
-                end
-                total_weight = range_weight * angle_weight
+                _, _, total_weight = _gate_grid_geometry(grid_z, yx_point,
+                    radar_zyx, beams, g_flat,
+                    horizontal_roi, vertical_roi, power_threshold)
                 total_weight > 0.0 || continue
 
                 # Accumulate per-field.
