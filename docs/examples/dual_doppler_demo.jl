@@ -9,9 +9,10 @@
 # reflectivity field overlaid with the (U, V) wind vectors at one altitude.
 #
 # The reflectivity field is whatever carries the `define_detection` tag in the
-# config (not hard-coded). Alongside the PNG it writes a NetCDF (same basename,
-# .nc) holding U, V, USTD, VSTD, DET, NGATES, and QFLAG on every level, so you
-# can inspect other altitudes and the diagnostics without re-running.
+# config (not hard-coded). Alongside the PNG it writes two NetCDFs (same
+# basename): `*_wind.nc` with U, V, USTD, VSTD, DET, NGATES, QFLAG on every
+# level, and `*_grid.nc` with the gridded scalar fields (reflectivity, etc.), so
+# you can inspect other altitudes and compare coverage without re-running.
 #
 # Both products are built on ONE shared grid (taken from the first volume's
 # reference position with the [grid.cartesian] spec), so every radar — and the
@@ -47,6 +48,8 @@ using Daisho
 using CairoMakie
 using Printf
 using Dates
+
+CairoMakie.activate!(type = "png")   # ensure the file backend is CairoMakie
 
 """Collect CfRadial files (.nc / .cf) in `dir`, sorted by name."""
 function find_cfradial_files(dir::AbstractString)
@@ -110,6 +113,11 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
                           z_index = nothing, config = nothing)
     p = config === nothing ? DaishoParameters() : DaishoParameters(config)
 
+    # CairoMakie's save() needs a recognized image extension; default to .png.
+    if !(lowercase(splitext(out_path)[2]) in (".png", ".pdf", ".svg"))
+        out_path *= ".png"
+    end
+
     files = find_cfradial_files(dir)
     isempty(files) && error("No CfRadial (.nc/.cf) files found in $dir")
     @info "Found $(length(files)) CfRadial file(s)"
@@ -146,14 +154,27 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
                                        for_op = "dual_doppler_demo reflectivity plot")
     refl_col = Daisho.field_index_dict(p)[refl_field]
 
-    # Save the full 3D synthesis product to NetCDF (U, V, USTD, VSTD, DET,
-    # NGATES, QFLAG, all levels) so other altitudes can be inspected without
-    # re-running, and the diagnostics can explain sparse coverage.
     itime = vols[1].time_coverage_start
     index_time = itime isa DateTime ? itime : DateTime(1970, 1, 1)
-    nc_path = splitext(out_path)[1] * ".nc"
-    write_wind_synthesis(nc_path, wind, p; index_time = index_time)
-    @info "Wrote $nc_path (U, V, USTD, VSTD, DET, NGATES, QFLAG)"
+    base = splitext(out_path)[1]
+
+    # 1) Wind product + diagnostics (all levels): U, V, USTD, VSTD, DET, NGATES, QFLAG.
+    wind_nc = base * "_wind.nc"
+    write_wind_synthesis(wind_nc, wind, p; index_time = index_time)
+    @info "Wrote $wind_nc (U, V, USTD, VSTD, DET, NGATES, QFLAG)"
+
+    # 2) Gridded scalar fields (reflectivity, etc.) on the SAME grid. The scalar
+    # gridding pipeline is independent of the wind solve and grids every
+    # configured field with its interpolation mode; we save it so reflectivity
+    # coverage can be compared against the wind diagnostics.
+    grid_nc = base * "_grid.nc"
+    Daisho.write_gridded_radar_volume(grid_nc, index_time, index_time, index_time,
+        Daisho._gridpoints_volume_array(grid_spec), dbz_grid,
+        Daisho._compute_latlon_grid(grid_spec), Daisho.field_index_dict(p),
+        grid_spec.reference_latitude, grid_spec.reference_longitude, 0.0,
+        p.grid.metadata; fill_value = p.io.fill_value, undetect = p.io.undetect)
+    @info "Wrote $grid_nc ($(join(sort(collect(keys(Daisho.field_index_dict(p)))), ", ")))"
+
     print_coverage_diagnostics(wind)
 
     nz = length(grid_spec.z_axis)
