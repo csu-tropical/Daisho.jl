@@ -55,16 +55,16 @@ using TOML
         @test "DBZ" in names
         @test "SQI" in names
         dbz = first(fs for fs in p.moments.fields if fs.name == "DBZ")
-        kdp = first(fs for fs in p.moments.fields if fs.name == "KDP")
+        width = first(fs for fs in p.moments.fields if fs.name == "WIDTH")
         @test Daisho.interp_of(dbz) == :linear
-        @test Daisho.interp_of(kdp) == :weighted
+        @test Daisho.interp_of(width) == :weighted
         @test Daisho.has_tag(dbz, :define_detection)
         fid = Daisho.field_index_dict(p)
         gtd = Daisho.grid_type_index_dict(p)
-        # Sorted-by-name column order: DBZ is alphabetically first of the 8.
+        # Sorted-by-name column order: DBZ is alphabetically first.
         @test fid["DBZ"] == 1
         @test gtd[1] == :linear
-        @test gtd[fid["KDP"]] == :weighted
+        @test gtd[fid["WIDTH"]] == :weighted
         @test length(fid) == length(p.moments.fields)
     end
 
@@ -258,7 +258,7 @@ using TOML
     end
 
     # Replace the whole [fields] table (deep-merge would otherwise keep the
-    # template's 8 fields). `fields` maps name => Vector of tag strings.
+    # template's default fields). `fields` maps name => Vector of tag strings.
     function _write_config_with_fields(path, fields::AbstractDict,
                                        overrides::AbstractDict=Dict{String,Any}())
         base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
