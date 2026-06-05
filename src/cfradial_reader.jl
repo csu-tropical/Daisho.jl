@@ -237,30 +237,23 @@ function _parse_iso8601_or_nothing(s)
     end
 end
 
-# Apply scale_factor/add_offset and return Float32 matrix. Preserve fill-value
-# positions as fill (not NaN) so that downstream code can distinguish missing
-# vs clear-air via metadata.fill_value/undetect.
+# Unpack a RAW field array (read via `var.var`, i.e. the stored values without
+# NCDatasets' CF decoding) into a Float32 matrix: apply `scale_factor`/
+# `add_offset` exactly once and map `_FillValue` positions (and any `missing`)
+# to NaN — true-missing. Reading the raw values ourselves and decoding here is
+# deliberate: indexing the CFVariable directly (`var[:, :]`) would already apply
+# the scale, and unpacking again would double-scale (off by `scale_factor`).
 function _unpack_field_data(raw, scale_factor, add_offset, fill_value)
-    if scale_factor === nothing && add_offset === nothing
-        # Convert Missing to NaN, return Float32.
-        out = Array{Float32}(undef, size(raw))
-        @inbounds for i in eachindex(raw)
-            v = raw[i]
-            out[i] = ismissing(v) ? Float32(NaN) : Float32(v)
-        end
-        return out
-    end
+    has_scale = !(scale_factor === nothing && add_offset === nothing)
     sc = Float64(scale_factor === nothing ? 1.0 : scale_factor)
     of = Float64(add_offset === nothing ? 0.0 : add_offset)
     out = Array{Float32}(undef, size(raw))
     @inbounds for i in eachindex(raw)
         v = raw[i]
-        if ismissing(v)
-            out[i] = Float32(NaN)
-        elseif fill_value !== nothing && v == fill_value
-            out[i] = Float32(fill_value)
+        if ismissing(v) || (fill_value !== nothing && v == fill_value)
+            out[i] = Float32(NaN)                       # true missing → NaN
         else
-            out[i] = Float32(Float64(v) * sc + of)
+            out[i] = has_scale ? Float32(Float64(v) * sc + of) : Float32(v)
         end
     end
     return out
@@ -718,7 +711,7 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
         if length(dnames) == 2 &&
            (("time" in dnames) && ("range" in dnames))
             metadata = _read_field_metadata(var)
-            raw = var[:, :]
+            raw = var.var[:, :]   # raw stored values; we unpack ourselves
             raw = _normalize_field_layout(var, raw, n_rays, n_gates)
             data = _unpack_field_data(raw, metadata.scale_factor,
                                       metadata.add_offset, metadata.fill_value)
@@ -1080,7 +1073,7 @@ function _read_cfradial1(ds, file)
         for fname in field_vars
             var = ds[fname]
             metadata = _read_field_metadata(var)
-            raw = var[:, :]
+            raw = var.var[:, :]   # raw stored values; we unpack ourselves
             raw = _normalize_field_layout(var, raw, n_total_rays, n_gates)
             # Slice the (time, range) matrix to this sweep.
             sliced = raw[idx, :]

@@ -112,6 +112,60 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         rm(tmp)
     end
 
+    @testset "packed Int16 field is unpacked exactly once" begin
+        # Regression: a field stored as scaled Int16 (scale_factor) must be
+        # decoded to physical units exactly once. The reader reads the RAW
+        # stored values (var.var) and applies the scale itself; reading the
+        # CF-decoded values and scaling again would be off by scale_factor.
+        tmp = tempname() * ".nc"
+        # raw stored Int16 (range × time); physical = raw * 0.01, -32768 = fill.
+        raw = Int16[ 5000   2500   1000;
+                        0  -1000   3000;
+                   -32768   4000   4500;
+                      100    200    300 ]
+        NCDatasets.NCDataset(tmp, "c") do ds
+            ds.attrib["Conventions"] = "CF/Radial-1.4"
+            ds.attrib["instrument_name"] = "PACK"
+            ds.attrib["site_name"] = "PACK"
+            ds.attrib["time_coverage_start"] = "2024-01-01T00:00:00Z"
+            ds.attrib["time_coverage_end"] = "2024-01-01T00:01:00Z"
+            ds.attrib["title"] = "packed"
+            ds.attrib["institution"] = ""; ds.attrib["source"] = ""
+            ds.attrib["history"] = ""; ds.attrib["references"] = ""
+            ds.attrib["comment"] = ""; ds.attrib["scan_name"] = ""
+            ds.attrib["platform_is_mobile"] = "false"
+            ds.attrib["ray_times_increase"] = "true"
+            NCDatasets.defDim(ds, "time", 3)
+            NCDatasets.defDim(ds, "range", 4)
+            NCDatasets.defDim(ds, "sweep", 1)
+            NCDatasets.defVar(ds, "time", Float64[0.0, 1.0, 2.0], ("time",);
+                attrib = DataStructures.OrderedDict("units" => "seconds since 2024-01-01T00:00:00Z"))
+            NCDatasets.defVar(ds, "range", Float32[400.0, 500.0, 600.0, 700.0], ("range",))
+            NCDatasets.defVar(ds, "azimuth", Float32[0.0, 120.0, 240.0], ("time",))
+            NCDatasets.defVar(ds, "elevation", Float32[1.0, 1.0, 1.0], ("time",))
+            NCDatasets.defVar(ds, "latitude", 16.0, ())
+            NCDatasets.defVar(ds, "longitude", -24.0, ())
+            NCDatasets.defVar(ds, "altitude", 50.0, ())
+            NCDatasets.defVar(ds, "sweep_start_ray_index", Int32[0], ("sweep",))
+            NCDatasets.defVar(ds, "sweep_end_ray_index", Int32[2], ("sweep",))
+            NCDatasets.defVar(ds, "fixed_angle", Float32[1.0], ("sweep",))
+            dv = NCDatasets.defVar(ds, "DBZ", Int16, ("range", "time");
+                attrib = DataStructures.OrderedDict(
+                    "scale_factor" => Float32(0.01), "add_offset" => Float32(0.0),
+                    "_FillValue" => Int16(-32768), "units" => "dBZ"))
+            dv.var[:, :] = raw   # write RAW stored ints (bypass CF packing)
+        end
+        v = read_cfradial(tmp)
+        d = v.sweeps[1].fields["DBZ"].data            # (time, range)
+        finite = filter(!isnan, vec(d))
+        @test maximum(finite) ≈ 50.0 atol = 1e-4      # 5000 * 0.01, NOT 0.5
+        @test minimum(finite) ≈ -10.0 atol = 1e-4     # -1000 * 0.01
+        @test 25.0 in round.(finite; digits = 4)      # 2500 * 0.01 present
+        @test count(isnan, vec(d)) == 1               # the single _FillValue → NaN
+        @test v.sweeps[1].fields["DBZ"].metadata.scale_factor ≈ 0.01 atol = 1e-6
+        rm(tmp)
+    end
+
     @testset "required-missing raises ArgumentError" begin
         tmp = tempname() * ".nc"
         NCDatasets.NCDataset(tmp, "c") do ds
