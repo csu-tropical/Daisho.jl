@@ -5,8 +5,13 @@
 # Reads every CfRadial file in a directory, grids reflectivity (the existing
 # scalar GridAccumulator path) and projects each radar's radial velocity into a
 # shared dual-Doppler normal system (the WindGridAccumulator path), solves for
-# the horizontal wind (u, v), and plots DBZ filled contours overlaid with the
-# (U, V) wind vectors at one altitude.
+# the horizontal wind (u, v), writes the full 3D result to NetCDF, and plots the
+# reflectivity field overlaid with the (U, V) wind vectors at one altitude.
+#
+# The reflectivity field is whatever carries the `define_detection` tag in the
+# config (not hard-coded). Alongside the PNG it writes a NetCDF (same basename,
+# .nc) holding U, V, USTD, VSTD, DET, NGATES, and QFLAG on every level, so you
+# can inspect other altitudes and the diagnostics without re-running.
 #
 # Both products are built on ONE shared grid (taken from the first volume's
 # reference position with the [grid.cartesian] spec), so every radar — and the
@@ -25,18 +30,23 @@
 #
 # Notes:
 #   * Reflectivity is gridded through the standard path, which only fills a cell
-#     where the config's `define_scanned` / `define_detection` fields are
-#     present in the data. With the bundled defaults those are SQI / DBZ — if
-#     your files lack SQI, tag DBZ with both roles in your config, e.g.
-#       DBZ = ["linear_interp", "define_detection", "define_scanned"]
-#   * Velocity must be the `velocity`-tagged field (VEL in the defaults) and is
-#     assumed dealiased (positive away from the radar).
+#     where the config's `define_scanned` AND `define_detection` fields are
+#     present in the data. If your files have reflectivity but no separate
+#     scanned-indicator field, tag the reflectivity field with both roles, e.g.
+#       DZ = ["linear_interp", "define_detection", "define_scanned"]
+#   * Velocity must be the `velocity`-tagged field and is assumed dealiased
+#     (positive away from the radar).
 #   * The bundled defaults use a 125 km / 500 m grid (501×501×37); for a quick
 #     look pass a coarser config.toml.
+#   * Sparse output? Check the printed coverage breakdown (or NGATES/QFLAG in the
+#     NetCDF): mostly "singular" → beams aren't crossing (geometry / too few
+#     elevations); mostly "no data" → grid too large/off-center or ROI too small
+#     for the gate spacing; mostly "σ above threshold" → raise max_sigma_*.
 
 using Daisho
 using CairoMakie
 using Printf
+using Dates
 
 """Collect CfRadial files (.nc / .cf) in `dir`, sorted by name."""
 function find_cfradial_files(dir::AbstractString)
@@ -70,6 +80,29 @@ function cartesian_grid_spec(p, ref_lat, ref_lon)
         x_axis = collect(Float64, g.xmin .+ (0:(g.xdim - 1)) .* g.xincr),
         y_axis = collect(Float64, g.ymin .+ (0:(g.ydim - 1)) .* g.yincr),
         z_axis = collect(Float64, g.zmin .+ (0:(g.zdim - 1)) .* g.zincr))
+end
+
+"""Print a breakdown of the per-cell quality flag and gate coverage — the first
+thing to look at when the retrieval is sparse. (The same fields are in the
+NetCDF as NGATES / DET / QFLAG.)"""
+function print_coverage_diagnostics(wind)
+    qf = wind.quality_flag
+    ng = wind.n_gates
+    total = length(qf)
+    good     = count(==(Int8(0)), qf)
+    nodata   = count(f -> (f & Daisho.QFLAG_NODATA)   != 0, qf)
+    singular = count(f -> (f & Daisho.QFLAG_SINGULAR) != 0, qf)
+    sigma    = total - good - nodata - singular            # solvable but σ too high
+    covered  = count(>(Int32(0)), ng)
+    pct(x) = 100 * x / total
+    @info "Coverage diagnostics over all $total grid cells:"
+    @info @sprintf("  solvable & within σ  : %9d (%.2f%%)", good, pct(good))
+    @info @sprintf("  σ above threshold    : %9d (%.2f%%)", sigma, pct(sigma))
+    @info @sprintf("  singular geometry    : %9d (%.2f%%)  ← one look / no beam crossing", singular, pct(singular))
+    @info @sprintf("  no data              : %9d (%.2f%%)  ← no weighted gate reached cell", nodata, pct(nodata))
+    @info @sprintf("  cells with ≥1 gate   : %9d (%.2f%%); max gates in a cell = %d",
+                   covered, pct(covered), maximum(ng))
+    return nothing
 end
 
 """Run the dual-Doppler analysis over `dir` and write a plot to `out_path`."""
@@ -107,10 +140,21 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
     dbz_grid = finalize_grid(dbz_acc)              # (n_fields, nz, ny, nx)
     wind     = finalize_wind(wind_acc, p)          # SynthesisOutput
 
-    fidx = Daisho.field_index_dict(p)
-    haskey(fidx, "DBZ") ||
-        error("Config has no DBZ field (fields: $(sort(collect(keys(fidx)))))")
-    dbz_col = fidx["DBZ"]
+    # Reflectivity = whatever field carries the `define_detection` tag (no
+    # hard-coded name), so the plot tracks the user's config.
+    refl_field = Daisho.field_with_tag(p, :define_detection;
+                                       for_op = "dual_doppler_demo reflectivity plot")
+    refl_col = Daisho.field_index_dict(p)[refl_field]
+
+    # Save the full 3D synthesis product to NetCDF (U, V, USTD, VSTD, DET,
+    # NGATES, QFLAG, all levels) so other altitudes can be inspected without
+    # re-running, and the diagnostics can explain sparse coverage.
+    itime = vols[1].time_coverage_start
+    index_time = itime isa DateTime ? itime : DateTime(1970, 1, 1)
+    nc_path = splitext(out_path)[1] * ".nc"
+    write_wind_synthesis(nc_path, wind, p; index_time = index_time)
+    @info "Wrote $nc_path (U, V, USTD, VSTD, DET, NGATES, QFLAG)"
+    print_coverage_diagnostics(wind)
 
     nz = length(grid_spec.z_axis)
     k = z_index === nothing ? cld(nz, 2) : clamp(Int(z_index), 1, nz)
@@ -119,21 +163,23 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
     @info "Level $k of $nz (z = $(grid_spec.z_axis[k]) m): " *
           "$nsolved well-conditioned wind points"
 
-    plot_dual_doppler(grid_spec, dbz_grid, dbz_col, wind, k, p; out_path = out_path)
+    plot_dual_doppler(grid_spec, dbz_grid, refl_col, wind, k, p;
+                      refl_field = refl_field, out_path = out_path)
     @info "Wrote $out_path"
     return out_path
 end
 
-"""Plot DBZ filled contours + (U, V) vectors at level `k`."""
-function plot_dual_doppler(grid_spec, dbz_grid, dbz_col, wind, k, p; out_path)
+"""Plot reflectivity filled contours + (U, V) vectors at level `k`."""
+function plot_dual_doppler(grid_spec, dbz_grid, refl_col, wind, k, p;
+                           refl_field = "reflectivity", out_path)
     xs = grid_spec.x_axis ./ 1000          # km
     ys = grid_spec.y_axis ./ 1000
     z_km = grid_spec.z_axis[k] / 1000
 
-    # DBZ slice → (nx, ny) for Makie; mask true-missing and undetect to NaN.
+    # Reflectivity slice → (nx, ny) for Makie; mask true-missing/undetect to NaN.
     dbz = Array{Float64}(undef, length(xs), length(ys))
     @inbounds for i in eachindex(xs), j in eachindex(ys)
-        v = dbz_grid[dbz_col, k, j, i]
+        v = dbz_grid[refl_col, k, j, i]
         dbz[i, j] = (v == p.io.fill_value || v == p.io.undetect) ? NaN : v
     end
 
@@ -144,7 +190,7 @@ function plot_dual_doppler(grid_spec, dbz_grid, dbz_col, wind, k, p; out_path)
 
     cf = contourf!(ax, xs, ys, dbz; levels = 0:5:60, colormap = :turbo,
                    extendlow = :transparent, extendhigh = :auto)
-    Colorbar(fig[1, 2], cf; label = "Reflectivity (dBZ)")
+    Colorbar(fig[1, 2], cf; label = "$refl_field (dBZ)")
 
     # Subsample to ~28 vectors across; only plot well-conditioned points
     # (quality_flag == 0: solvable and both σ within threshold).
