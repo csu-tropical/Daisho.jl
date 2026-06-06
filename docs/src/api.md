@@ -145,7 +145,8 @@ Daisho.grid_column
 ```@docs
 Daisho.GridSpec
 Daisho.SweepProvenance
-Daisho.GridAccumulator
+Daisho.ScalarGridAccumulator
+Daisho.build_accumulator
 Daisho.build_grid_spec
 Daisho.grid_sweep!
 Daisho.finalize_grid
@@ -162,7 +163,6 @@ Daisho.finalize_accumulator_file
 ```@docs
 Daisho.WindGridAccumulator
 Daisho.wind_accumulator_dims
-Daisho.grid_sweep_wind!
 Daisho.finalize_wind
 Daisho.SynthesisOutput
 Daisho.SynthesisFrame
@@ -179,6 +179,7 @@ Daisho.write_wind_synthesis
 ### Gridded Data I/O
 
 ```@docs
+Daisho.write_grid_products
 Daisho.write_gridded_radar_volume
 Daisho.write_gridded_radar_rhi
 Daisho.write_gridded_radar_ppi

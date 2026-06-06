@@ -7,8 +7,11 @@ independently. See [the theory page](../theory/wind_synthesis.md) for the math.
 
 ## Workflow
 
-The accumulator mirrors the [multi-sweep gridding accumulator](gridding.md):
-allocate once, grid sweeps from any radars into it, then finalize.
+The wind is produced by the same single-pass accumulator that grids the scalar
+fields (see [multi-sweep gridding](gridding.md)): allocate once, grid sweeps from
+any radars into it, then finalize. [`build_accumulator`](@ref) returns a
+[`WindGridAccumulator`](@ref) whenever a field carries the `velocity` tag — so
+one geometry pass produces **both** the gridded scalars and the dual-Doppler wind.
 
 ```julia
 using Daisho
@@ -19,22 +22,28 @@ p = DaishoParameters("mygrid.toml")          # needs a :velocity-tagged field
 # A Cartesian grid the wind is solved on.
 spec = build_grid_spec(:volume_3d, volume_radarA, p)
 
-# One accumulator collects contributions from every radar/sweep.
-acc = WindGridAccumulator(spec, p)
+# velocity-tagged config ⇒ a WindGridAccumulator (gridded scalars + wind solve).
+acc = build_accumulator(spec, p)
 
 for s in eachindex(volume_radarA.sweeps)
-    grid_sweep_wind!(acc, volume_radarA, s, p)
+    grid_sweep!(acc, volume_radarA, s, p)
 end
 for s in eachindex(volume_radarB.sweeps)
-    grid_sweep_wind!(acc, volume_radarB, s, p)
+    grid_sweep!(acc, volume_radarB, s, p)
 end
 
 # Solve every grid point, with the default Cartesian (U, V) output frame.
 out = finalize_wind(acc, p)
 
-# Write a CF-1.12 gridded NetCDF: U, V, USTD, VSTD, DET, NGATES, QFLAG.
-write_wind_synthesis("wind.nc", out, p; index_time = volume_radarA.time_coverage_start)
+# Write one CF-1.12 gridded NetCDF: every scalar field PLUS the wind product
+# (U, V, USTD, VSTD, DET, NGATES, QFLAG) on the shared grid.
+write_grid_products("analysis.nc", acc, p; index_time = volume_radarA.time_coverage_start)
 ```
+
+The embedded scalar grid is reached via `acc.scalar` (e.g.
+`finalize_grid(acc.scalar)` for the gridded fields in memory).
+[`write_wind_synthesis`](@ref) remains available to write a wind-only NetCDF from
+a [`SynthesisOutput`](@ref).
 
 There is **no radar-index argument** — nothing about the synthesis depends on
 which radar a gate came from. Sweeps from different radars are gridded into the

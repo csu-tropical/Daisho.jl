@@ -2,22 +2,23 @@
 #
 # Dual-Doppler wind-synthesis demo.
 #
-# Reads every CfRadial file in a directory, grids reflectivity (the existing
-# scalar GridAccumulator path) and projects each radar's radial velocity into a
-# shared dual-Doppler normal system (the WindGridAccumulator path), solves for
-# the horizontal wind (u, v), writes the full 3D result to NetCDF, and plots the
+# Reads every CfRadial file in a directory and grids every configured field plus
+# the dual-Doppler horizontal wind (u, v) in ONE single-pass accumulator
+# (`build_accumulator` returns a `WindGridAccumulator` whenever a field carries
+# the `velocity` tag). It writes the full 3D result — gridded scalars AND the
+# wind product — to a single NetCDF with `write_grid_products`, and plots the
 # reflectivity field overlaid with the (U, V) wind vectors at one altitude.
 #
 # The reflectivity field is whatever carries the `define_detection` tag in the
-# config (not hard-coded). Alongside the PNG it writes two NetCDFs (same
-# basename): `*_wind.nc` with U, V, USTD, VSTD, DET, NGATES, QFLAG on every
-# level, and `*_grid.nc` with the gridded scalar fields (reflectivity, etc.), so
-# you can inspect other altitudes and compare coverage without re-running.
+# config (not hard-coded). Alongside the PNG it writes one NetCDF (same
+# basename): `*.nc` with the gridded scalar fields (reflectivity, etc.) AND
+# U, V, USTD, VSTD, DET, NGATES, QFLAG on every level, so you can inspect other
+# altitudes and compare coverage without re-running.
 #
-# Both products are built on ONE shared grid (taken from the first volume's
-# reference position with the [grid.cartesian] spec), so every radar — and the
-# wind solve — line up. The wind workers project each radar's gates relative to
-# that common origin, so no per-radar bookkeeping is needed here.
+# Everything is built on ONE shared grid (taken from the centroid of the radar
+# positions with the [grid.cartesian] spec) in a single geometry pass, so every
+# radar — and the wind solve — line up. Gates are projected relative to that
+# common origin, so no per-radar bookkeeping is needed here.
 #
 # Usage:
 #   julia --project=. docs/examples/dual_doppler_demo.jl <cfradial_dir> \
@@ -134,19 +135,19 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
         length(grid_spec.x_axis), length(grid_spec.y_axis), length(grid_spec.z_axis),
         ref_lat, ref_lon)
 
-    dbz_acc  = GridAccumulator(grid_spec, p)       # scalar fields, incl. DBZ
-    wind_acc = WindGridAccumulator(grid_spec, p)   # VEL → (u, v)
+    # One accumulator, one geometry pass: the config's velocity tag selects the
+    # WindGridAccumulator (gridded scalars + dual-Doppler wind together).
+    acc = build_accumulator(grid_spec, p)
 
     for (f, vol) in zip(files, vols)
         @info "Gridding $(basename(f)): $(vol.instrument_name), $(length(vol.sweeps)) sweep(s)"
         for s in eachindex(vol.sweeps)
-            grid_sweep!(dbz_acc, vol, s, p)
-            grid_sweep_wind!(wind_acc, vol, s, p)
+            grid_sweep!(acc, vol, s, p)
         end
     end
 
-    dbz_grid = finalize_grid(dbz_acc)              # (n_fields, nz, ny, nx)
-    wind     = finalize_wind(wind_acc, p)          # SynthesisOutput
+    dbz_grid = finalize_grid(acc.scalar)           # (n_fields, nz, ny, nx)
+    wind     = finalize_wind(acc, p)               # SynthesisOutput
 
     # Reflectivity = whatever field carries the `define_detection` tag (no
     # hard-coded name), so the plot tracks the user's config.
@@ -158,22 +159,14 @@ function run_dual_doppler(dir::AbstractString; out_path = "dual_doppler.png",
     index_time = itime isa DateTime ? itime : DateTime(1970, 1, 1)
     base = splitext(out_path)[1]
 
-    # 1) Wind product + diagnostics (all levels): U, V, USTD, VSTD, DET, NGATES, QFLAG.
-    wind_nc = base * "_wind.nc"
-    write_wind_synthesis(wind_nc, wind, p; index_time = index_time)
-    @info "Wrote $wind_nc (U, V, USTD, VSTD, DET, NGATES, QFLAG)"
-
-    # 2) Gridded scalar fields (reflectivity, etc.) on the SAME grid. The scalar
-    # gridding pipeline is independent of the wind solve and grids every
-    # configured field with its interpolation mode; we save it so reflectivity
-    # coverage can be compared against the wind diagnostics.
-    grid_nc = base * "_grid.nc"
-    Daisho.write_gridded_radar_volume(grid_nc, index_time, index_time, index_time,
-        Daisho._gridpoints_volume_array(grid_spec), dbz_grid,
-        Daisho._compute_latlon_grid(grid_spec), Daisho.field_index_dict(p),
-        grid_spec.reference_latitude, grid_spec.reference_longitude, 0.0,
-        p.grid.metadata; fill_value = p.io.fill_value, undetect = p.io.undetect)
-    @info "Wrote $grid_nc ($(join(sort(collect(keys(Daisho.field_index_dict(p)))), ", ")))"
+    # One combined NetCDF: gridded scalar fields (reflectivity, etc.) AND the
+    # wind product (U, V, USTD, VSTD, DET, NGATES, QFLAG) on the SAME grid, so
+    # reflectivity coverage and the wind diagnostics line up cell-for-cell.
+    out_nc = base * ".nc"
+    write_grid_products(out_nc, acc, p; index_time = index_time)
+    @info "Wrote $out_nc (" *
+          join(sort(acc.scalar.fields), ", ") *
+          " + U, V, USTD, VSTD, DET, NGATES, QFLAG)"
 
     print_coverage_diagnostics(wind)
 

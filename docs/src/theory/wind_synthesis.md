@@ -2,7 +2,7 @@
 
 Stage 1 is a gridpoint-independent, overdetermined, weighted least-squares
 **dual-Doppler horizontal wind retrieval** `(u, v)`, streamed through an
-accumulator that mirrors the [`GridAccumulator`](@ref) model and carries a
+accumulator that mirrors the [`ScalarGridAccumulator`](@ref) model and carries a
 preserved per-component uncertainty. It follows CEDRIC appendix F (Miller &
 Anderson, 1991), §1, "Cartesian components of motion from radial velocities".
 

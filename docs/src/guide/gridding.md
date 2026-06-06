@@ -90,11 +90,13 @@ Gridded data is written as CF-compliant NetCDF files with:
 
 ## Per-sweep gridding and accumulator-based combination
 
-The Volume drivers above build a [`GridAccumulator`](@ref Daisho.GridAccumulator)
+The Volume drivers above build a [`ScalarGridAccumulator`](@ref Daisho.ScalarGridAccumulator)
 internally, fold every sweep of the volume into it, and finalize once. The
 accumulator is also exposed as a first-class object so callers can grid one
 sweep at a time, persist intermediate state to JLD2, and combine sweeps from
-many files later. This is the natural workflow for airborne radars where each
+many files later. (To grid the scalar fields *and* the dual-Doppler wind in one
+pass, use [`build_accumulator`](@ref Daisho.build_accumulator) — see the
+[wind synthesis guide](wind_synthesis.md).) This is the natural workflow for airborne radars where each
 CfRadial file is one sweep along a flight track, and for multi-Doppler retrieval
 inputs where sweeps from different radars need to land on a common grid.
 
