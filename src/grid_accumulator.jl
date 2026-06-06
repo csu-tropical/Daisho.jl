@@ -624,6 +624,43 @@ _acc_sweeps(acc::ScalarGridAccumulator)    = acc.sweeps
 _geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
     (keys.valid_key,)
 
+# ── Grid-provider seam (developer note: Springsteel quadrature-node grids) ───
+#
+# The unified traversal is factored so the grid-point *provider* (where the
+# analysis points live and how the accumulator planes are indexed) is separable
+# from the per-cell accumulation math. Three pieces span the seam:
+#
+#   1. `GridSpec.shape` selects the provider. `grid_sweep!` dispatches on it;
+#      `:volume_3d`/`:latlon_3d` route to the Cartesian provider+traversal below.
+#   2. A per-cell handle (`CartesianCell` here) carries the opaque cell index plus
+#      whatever scalars a consumer needs (here `grid_z`/`eff_v_roi`). It is passed
+#      to `accumulate_cell!` and is the *only* place the grid topology appears.
+#   3. `accumulate_cell!(acc, cell, sweep, scanned_gates, contribs, keys, p)` is
+#      dispatched on both the accumulator type *and* the cell-handle type, so a
+#      new provider's cells select new methods without touching the existing ones.
+#
+# The accumulator structs are already topology-agnostic: `weighted_sum` /
+# `weight_total` / `coverage` (and the wind planes) are plain `Array{Float64}`,
+# shaped by `accumulator_dims` / `wind_accumulator_dims` from the `GridSpec`.
+# Nothing here hardcodes the `(nz, ny, nx)` lattice except the `CartesianCell`
+# methods and the Cartesian 3D writer — both of which a node provider simply adds
+# alongside.
+#
+# A Springsteel quadrature-node provider (deferred; its own follow-on plan) plugs
+# in as:
+#   • a node `GridSpec.shape` (e.g. `:springsteel_nodes`) and `accumulator_dims`/
+#     `wind_accumulator_dims` returning `(n_fields, n_nodes)` / `(n_nodes,)`;
+#   • a node traversal `_grid_sweep_products_nodes!` that materializes the
+#     quadrature-node coordinates from the GridSpec, queries the BallTree per node,
+#     and builds a `NodeCell{node_index, …}` + per-node `GateContribution`s
+#     (reusing `_gate_grid_geometry`, `SweepKeys`, `_geometry_trigger_fields`);
+#   • `accumulate_cell!(acc, ::NodeCell, …)` methods (the per-cell coverage /
+#     weighted-accumulation / rank-1 wind math is identical — only the plane
+#     indexing changes from `[m, k, j, i]` to `[m, n]`);
+#   • a `grid_sweep!` shape branch routing to the node traversal, and a node-aware
+#     `write_grid_products` path.
+# No part of the current Cartesian path needs to change to add it.
+
 function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                           p::DaishoParameters,
                           ref_latitude::Float64, ref_longitude::Float64,
