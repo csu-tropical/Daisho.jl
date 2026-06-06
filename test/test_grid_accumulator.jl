@@ -545,6 +545,76 @@ end
         end
     end
 
+    @testset "beamwidth scales the angular gate weight" begin
+        @test Daisho._beam_coef(1.0) == Daisho.BEAM_COEF_1DEG
+        @test Daisho._beam_coef(2.0) ≈ Daisho.BEAM_COEF_1DEG / 2
+        @test Daisho._beam_coef(0.0) == Daisho.BEAM_COEF_1DEG    # non-positive ⇒ 1° fallback
+        @test Daisho._beam_coef(-3.0) == Daisho.BEAM_COEF_1DEG
+
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0), z_axis = [0.0, 60.0, 120.0])
+        rl, ro, ra = Float64(v.latitude), Float64(v.longitude), Float64(v.altitude)
+
+        # beam_width = 1.0 reproduces the default (no-kwarg, legacy 79.43) gridding.
+        acc_def = GridAccumulator(spec, p); acc_bw1 = GridAccumulator(spec, p)
+        for s in eachindex(v.sweeps)
+            grid_sweep!(acc_def, v.sweeps[s], p; ref_latitude = rl, ref_longitude = ro,
+                        ref_altitude = ra)
+            grid_sweep!(acc_bw1, v.sweeps[s], p; ref_latitude = rl, ref_longitude = ro,
+                        ref_altitude = ra, beam_width = 1.0)
+        end
+        @test acc_def.weighted_sum == acc_bw1.weighted_sum
+        @test acc_def.coverage == acc_bw1.coverage
+        @test any(acc_def.coverage .== Int8(2))   # non-vacuous baseline
+
+        # A wider 2° beam admits a superset of gates at higher angular weight ⇒
+        # strictly more total weight, at least as many covered cells, and a
+        # different weighted field.
+        acc_bw2 = GridAccumulator(spec, p)
+        for s in eachindex(v.sweeps)
+            grid_sweep!(acc_bw2, v.sweeps[s], p; ref_latitude = rl, ref_longitude = ro,
+                        ref_altitude = ra, beam_width = 2.0)
+        end
+        @test sum(acc_bw2.weight_total) > sum(acc_def.weight_total)
+        @test count(>(Int8(0)), acc_bw2.coverage) >= count(>(Int8(0)), acc_def.coverage)
+        @test acc_bw2.weighted_sum != acc_def.weighted_sum
+    end
+
+    @testset "Volume overload reads beamwidth from radar_parameters" begin
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 1, n_rays = 72, n_gates = 12)
+        sweep = v.sweeps[1]
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0), z_axis = [0.0, 60.0, 120.0])
+
+        vol_bw = Volume(latitude = v.latitude, longitude = v.longitude,
+            altitude = v.altitude, time_coverage_start = v.time_coverage_start,
+            time_coverage_end = v.time_coverage_end,
+            instrument_name = "BW", sweeps = [sweep],
+            radar_parameters = RadarParameters(beam_width_h = 2.0))
+        vol_no = Volume(latitude = v.latitude, longitude = v.longitude,
+            altitude = v.altitude, time_coverage_start = v.time_coverage_start,
+            time_coverage_end = v.time_coverage_end,
+            instrument_name = "NOBW", sweeps = [sweep])
+        @test Daisho._volume_beam_width(vol_bw) == 2.0
+        @test Daisho._volume_beam_width(vol_no) == 1.0   # absent ⇒ legacy default
+
+        # Volume overload's beamwidth matches the explicit sweep-level kwarg.
+        acc_v = GridAccumulator(spec, p); grid_sweep!(acc_v, vol_bw, 1, p)
+        acc_s = GridAccumulator(spec, p)
+        grid_sweep!(acc_s, sweep, p; ref_latitude = Float64(v.latitude),
+            ref_longitude = Float64(v.longitude), ref_altitude = Float64(v.altitude),
+            beam_width = 2.0)
+        @test acc_v.weighted_sum == acc_s.weighted_sum
+        @test acc_v.coverage == acc_s.coverage
+    end
+
     @testset "merge_accumulators! :nearest picks higher weight per cell" begin
         spec = _spec(:volume_3d)
         fields = ["RHOHV"]

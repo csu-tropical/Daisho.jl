@@ -400,10 +400,17 @@ end
 # beam-pattern × range interpolation weight. A return of `total_weight ≤ 0`
 # (including the `|sine_h| ≥ 1` non-physical case) signals the gate does not
 # contribute and should be skipped.
+#
+# `beam_coef` sets the angular beam-pattern width: `angle_weight =
+# exp(-angle_diff · beam_coef)`, half-power at `ln2/beam_coef`. The default
+# `79.43` is a 1° half-power beamwidth (half-power at 0.5°); the traversal scales
+# it to the radar's actual beamwidth via `79.43 / beam_width_deg`
+# (see [`_beam_coef`](@ref)), so a 2° beam gets ≈39.7 — twice the angular reach.
 @inline function _gate_grid_geometry(grid_z::Float64, yx_point,
                                      radar_zyx, beams, g_flat::Int,
                                      horizontal_roi::Float64, vertical_roi::Float64,
-                                     power_threshold::Float64)
+                                     power_threshold::Float64,
+                                     beam_coef::Float64 = 79.43)
     # Refraction-corrected height angle.
     dz = grid_z - radar_zyx[g_flat][1]
     r  = beams[g_flat, 3]
@@ -419,7 +426,7 @@ end
 
     angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
                                   [gridpt_az, gridpt_el])
-    angle_weight = exp(-angle_diff * 79.43)
+    angle_weight = exp(-angle_diff * beam_coef)
     angle_weight < power_threshold && (angle_weight = 0.0)
 
     gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
@@ -430,6 +437,22 @@ end
     total_weight = range_weight * angle_weight
     return (gridpt_az, gridpt_el, total_weight)
 end
+
+# Reference angular coefficient for a 1° half-power beamwidth: exp(-angle·79.43)
+# = 0.5 at angle ≈ 0.5° (so the full half-power beamwidth is 1°).
+const BEAM_COEF_1DEG = 79.43
+
+"""
+    _beam_coef(beam_width_deg) -> Float64
+
+Angular beam-pattern coefficient for a radar of half-power beamwidth
+`beam_width_deg`, for `exp(-angle_diff · coef)`. The half-power angle scales
+linearly with beamwidth, so the coefficient scales inversely with it: the 1°
+default gives `79.43`, a 2° beam gives ≈39.7 (twice the angular reach). A
+non-positive beamwidth falls back to the 1° default.
+"""
+_beam_coef(beam_width_deg::Real) =
+    beam_width_deg > 0 ? BEAM_COEF_1DEG / Float64(beam_width_deg) : BEAM_COEF_1DEG
 
 # ── grid_sweep! dispatcher ───────────────────────────────────────────────────
 
@@ -450,6 +473,10 @@ lat/lon/alt; for mobile radars supply the first ray's georeference (or any
 representative position). Per-ray georeference, when present on the
 `SweepGroup`, takes precedence.
 
+`beam_width` is the radar half-power beamwidth (degrees) used for the angular
+gate weighting; the Volume overload reads it from `radar_parameters.beam_width_h`.
+Defaults to `1.0` (the legacy hard-coded beam) when unknown.
+
 A `SweepProvenance` entry is appended to `accum.sweeps`.
 """
 function grid_sweep!(accum::FieldAccumulator, sweep::SweepGroup,
@@ -460,10 +487,12 @@ function grid_sweep!(accum::FieldAccumulator, sweep::SweepGroup,
                      source_file::AbstractString = "",
                      heading::Real = -9999.0,
                      instrument_name::AbstractString = "",
-                     scan_name::AbstractString = "")
+                     scan_name::AbstractString = "",
+                     beam_width::Real = 1.0)
     shape = _acc_grid_spec(accum).shape
     if shape === :volume_3d || shape === :latlon_3d
-        _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude,
+                                 ref_altitude; beam_width = beam_width)
     elseif shape === :rhi_2d
         _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
     elseif shape === :ppi_2d
@@ -497,7 +526,9 @@ end
 
 Volume convenience overload. Resolves the per-sweep reference position from
 the sweep's georeference when present (mobile), else from the volume's
-stationary `latitude`/`longitude`/`altitude`.
+stationary `latitude`/`longitude`/`altitude`. The angular gate weighting uses
+the radar's half-power beamwidth from `volume.radar_parameters.beam_width_h`
+(falling back to the 1° legacy default when absent).
 """
 function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
                      p::DaishoParameters; heading::Real = -9999.0,
@@ -512,6 +543,7 @@ function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
         ref_lon = volume.longitude
         ref_alt = volume.altitude
     end
+    bw = _volume_beam_width(volume)
     return grid_sweep!(accum, sweep, p;
         ref_latitude = Float64(ref_lat),
         ref_longitude = Float64(ref_lon),
@@ -519,7 +551,19 @@ function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
         source_file = source_file,
         heading = heading,
         instrument_name = volume.instrument_name,
-        scan_name = volume.scan_name)
+        scan_name = volume.scan_name,
+        beam_width = bw)
+end
+
+# Horizontal half-power beamwidth (degrees) for the angular gate weighting,
+# taken from the volume's radar_parameters when present and positive, else the
+# 1° legacy default.
+function _volume_beam_width(volume::Volume)
+    rp = volume.radar_parameters
+    if rp !== nothing && rp.beam_width_h !== nothing && rp.beam_width_h > 0
+        return Float64(rp.beam_width_h)
+    end
+    return 1.0
 end
 
 # ── 3D volume / latlon worker ────────────────────────────────────────────────
@@ -664,9 +708,10 @@ _geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
 function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                           p::DaishoParameters,
                           ref_latitude::Float64, ref_longitude::Float64,
-                          ref_altitude::Float64)
+                          ref_altitude::Float64; beam_width::Real = 1.0)
     g  = _acc_grid_spec(acc)
     gd = p.gridding
+    beam_coef = _beam_coef(beam_width)
     keys = SweepKeys(
         field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)"),
         field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)"))
@@ -748,7 +793,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                 end
                 triggered || continue
                 az, el, w = _gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
-                    g_flat, horizontal_roi, vertical_roi, power_threshold)
+                    g_flat, horizontal_roi, vertical_roi, power_threshold, beam_coef)
                 w > 0.0 || continue
                 push!(contribs, GateContribution(g_flat, ray, gate, az, el, w,
                     beams[g_flat, 4]))
