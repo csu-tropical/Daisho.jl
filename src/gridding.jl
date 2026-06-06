@@ -2517,3 +2517,80 @@ function grid_radar_column(volume::Volume, output_file::AbstractString,
         fill_value=p.io.fill_value, undetect=p.io.undetect)
     return accum
 end
+
+# ── Unified single-pass product writer ───────────────────────────────────────
+
+# Write the finalized scalar grid of a `ScalarGridAccumulator` to a CF-1.12 3D
+# NetCDF (the `write_gridded_radar_volume` layout), creating the file. Shared by
+# both `write_grid_products` methods: the wind method then appends its wind
+# variables onto the same file. Stage-1 supports the 3D shapes only.
+function _write_scalar_grid_file(file::AbstractString, scalar::ScalarGridAccumulator,
+                                 p::DaishoParameters, index_time::DateTime,
+                                 start_time::DateTime, stop_time::DateTime)
+    g = scalar.grid_spec
+    if g.shape === :volume_3d
+        gridpoints = _gridpoints_volume_array(g)
+    elseif g.shape === :latlon_3d
+        gridpoints = _gridpoints_latlon_array(g)
+    else
+        throw(ArgumentError("write_grid_products: the unified writer supports " *
+            ":volume_3d and :latlon_3d only, got $(g.shape). Use " *
+            "finalize_accumulator_file for the 2D/1D shapes."))
+    end
+    radar_grid  = finalize_grid(scalar)
+    latlon_grid = _compute_latlon_grid(g)
+    moment_dict = Dict{String,Int}(name => i for (i, name) in enumerate(scalar.fields))
+    write_gridded_radar_volume(file, index_time, start_time, stop_time,
+        gridpoints, radar_grid, latlon_grid, moment_dict,
+        g.reference_latitude, g.reference_longitude, -9999.0, p.grid.metadata;
+        fill_value = scalar.fill_value, undetect = scalar.undetect)
+    return file
+end
+
+"""
+    write_grid_products(file, acc::FieldAccumulator, p::DaishoParameters;
+                        index_time, start_time=index_time, stop_time=index_time,
+                        frame=CartesianFrame()) -> file
+
+Write the gridded products of `acc` to **one** CF-1.12 NetCDF file, dispatched on
+the accumulator type. The shared coordinates (`X`/`Y`/`Z`/`time`, projected and
+geographic), the Transverse Mercator `grid_mapping`, and per-point
+latitude/longitude are written once.
+
+- A [`ScalarGridAccumulator`](@ref) writes every configured field
+  ([`finalize_grid`](@ref)).
+- A [`WindGridAccumulator`](@ref) writes the embedded scalar fields **and** the
+  dual-Doppler product ([`finalize_wind`](@ref)): the two frame components, their
+  `*STD` uncertainties, plus `DET`, `NGATES`, `QFLAG`. For the stage-1
+  `CartesianFrame` these are `U, V, USTD, VSTD, DET, NGATES, QFLAG`. No wind
+  variables are present when the accumulator is scalar.
+
+Stage-1 supports the 3D shapes (`:volume_3d`, `:latlon_3d`); a pre-existing file
+is deleted first. `frame` selects the wind output frame (ignored for scalar).
+"""
+function write_grid_products(file::AbstractString, acc::ScalarGridAccumulator,
+                             p::DaishoParameters; index_time::DateTime,
+                             start_time::DateTime = index_time,
+                             stop_time::DateTime = index_time,
+                             frame::SynthesisFrame = CartesianFrame())
+    _write_scalar_grid_file(file, acc, p, index_time, start_time, stop_time)
+    return file
+end
+
+function write_grid_products(file::AbstractString, acc::WindGridAccumulator,
+                             p::DaishoParameters; index_time::DateTime,
+                             start_time::DateTime = index_time,
+                             stop_time::DateTime = index_time,
+                             frame::SynthesisFrame = CartesianFrame())
+    # Scalar fields + shared coordinates first (creates the file)…
+    _write_scalar_grid_file(file, acc.scalar, p, index_time, start_time, stop_time)
+    # …then append the wind product onto the same grid (reusing the coords).
+    out = finalize_wind(acc, p; frame = frame)
+    ds = NCDataset(file, "a")
+    try
+        _write_wind_data_vars!(ds, out)
+    finally
+        close(ds)
+    end
+    return file
+end

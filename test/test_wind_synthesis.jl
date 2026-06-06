@@ -791,4 +791,90 @@ end
         end
     end
 
+    @testset "write_grid_products: wind accumulator → scalar + wind in one file" begin
+        p = _p_synth(var = 1.0, ms = [5.0, 5.0])
+        volA, volB = make_synthetic_dual_doppler(u = 8.0, v = -3.0)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = 16.0, reference_longitude = -24.0,
+            x_axis = [-2000.0, 0.0, 2000.0], y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        acc = build_accumulator(spec, p)          # velocity-tagged ⇒ WindGridAccumulator
+        @test acc isa WindGridAccumulator
+        for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, p); end
+        out = finalize_wind(acc, p)
+
+        nx, ny, nz = length(spec.x_axis), length(spec.y_axis), length(spec.z_axis)
+        file = tempname() * ".nc"
+        try
+            write_grid_products(file, acc, p; index_time = DateTime(2024, 1, 1, 0, 0, 0))
+            ds = NCDataset(file, "r")
+            try
+                @test ds.dim["X"] == nx && ds.dim["Y"] == ny && ds.dim["Z"] == nz
+                # Shared coords + wind vars + every configured scalar field.
+                for vn in ("U", "V", "USTD", "VSTD", "DET", "NGATES", "QFLAG",
+                           "X", "Y", "Z", "time", "latitude", "longitude", "grid_mapping")
+                    @test haskey(ds, vn)
+                end
+                for f in acc.scalar.fields
+                    @test haskey(ds, f)
+                    @test size(ds[f]) == (nx, ny, nz, 1)
+                end
+                @test size(ds["U"]) == (nx, ny, nz, 1)
+                @test ds["U"].attrib["standard_name"] == "eastward_wind"
+                @test ds["V"].attrib["standard_name"] == "northward_wind"
+                @test ds["QFLAG"].attrib["flag_masks"] == Int8[1, 2, 4, 8]
+                @test ds["grid_mapping"].attrib["grid_mapping_name"] == "transverse_mercator"
+                # Round-trip a recovered wind value at a solved cell.
+                solved = nothing
+                for ci in CartesianIndices(out.quality_flag)
+                    if out.quality_flag[ci] == Int8(0); solved = ci; break; end
+                end
+                @test solved !== nothing
+                if solved !== nothing
+                    k, j, i = solved.I
+                    @test Float32(out.comp1[k, j, i]) ≈ ds["U"][i, j, k, 1] atol = 1e-4
+                    @test Float32(out.comp2[k, j, i]) ≈ ds["V"][i, j, k, 1] atol = 1e-4
+                end
+            finally
+                close(ds)
+            end
+        finally
+            isfile(file) && rm(file)
+        end
+    end
+
+    @testset "write_grid_products: scalar accumulator has no wind variables" begin
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0),
+            z_axis = [0.0, 60.0, 120.0])
+        acc = ScalarGridAccumulator(spec, p)
+        for s in eachindex(v.sweeps); grid_sweep!(acc, v, s, p); end
+
+        nx, ny, nz = length(spec.x_axis), length(spec.y_axis), length(spec.z_axis)
+        file = tempname() * ".nc"
+        try
+            write_grid_products(file, acc, p; index_time = v.time_coverage_start)
+            ds = NCDataset(file, "r")
+            try
+                for f in acc.fields
+                    @test haskey(ds, f)
+                end
+                # No wind product written for a scalar accumulator.
+                for vn in ("U", "V", "USTD", "VSTD", "DET", "NGATES", "QFLAG")
+                    @test !haskey(ds, vn)
+                end
+                @test haskey(ds, "grid_mapping") && haskey(ds, "latitude")
+            finally
+                close(ds)
+            end
+        finally
+            isfile(file) && rm(file)
+        end
+    end
+
 end

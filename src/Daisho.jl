@@ -59,6 +59,6 @@ export WindGridAccumulator, wind_accumulator_dims, SynthesisOutput
 export SynthesisFrame, CartesianFrame, component_names, rotation_at
 export finalize_wind, build_accumulator
 export save_wind_accumulator, load_wind_accumulator, merge_wind_accumulators!
-export write_wind_synthesis
+export write_wind_synthesis, write_grid_products
 
 end # module Daisho
