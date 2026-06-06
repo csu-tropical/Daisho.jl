@@ -205,10 +205,15 @@ function accumulate_cell!(acc::WindGridAccumulator, cell::CartesianCell,
     k, j, i = cell.k, cell.j, cell.i
     N = acc.n_unknowns
     velkey = acc.velocity_field
+    # The 2-unknown solve drops w·sin(el); cap the line-of-sight elevation so
+    # steep beams (airborne) don't contaminate the horizontal wind. Gates above
+    # the cap still grid scalars (above), just not the wind normal system.
+    max_el = deg2rad(p.synthesis.max_elevation)
     gcoef = Vector{Float64}(undef, N)
     for c in contribs
         # Wind vertical filter (matches the pre-unification wind worker).
         abs(c.beam_z - cell.grid_z) > cell.eff_v_roi && continue
+        abs(c.el) > max_el && continue
         vr = _gate_value(sweep, velkey, c.ray, c.gate)
         ismissing(vr) && continue
         w = c.w
@@ -553,12 +558,22 @@ the stage-1 `CartesianFrame` these are `U, V, USTD, VSTD, DET, NGATES, QFLAG`
 (with CF `standard_name` `eastward_wind`/`northward_wind`); a polar/plane frame
 later emits its own names (e.g. `VT, VR`) through the same adapter. CF global
 attributes come from `[grid.metadata]`. Any pre-existing file is deleted first.
+
+`mask_quality` (default `true`) writes the **QC'd product**: the wind components
+and their σ are blanked to `fill_value` wherever `quality_flag != 0` (σ above
+threshold, singular, or no data), so the file carries only points that passed the
+σ thresholds. `DET`/`NGATES`/`QFLAG` are always written unmasked as diagnostics,
+and the [`SynthesisOutput`](@ref) / accumulator are untouched (the full
+non-destructive field remains available for stage 2). Pass `mask_quality=false`
+to write every solvable point.
 """
 function write_wind_synthesis(file::AbstractString, out::SynthesisOutput,
                               p::DaishoParameters;
                               index_time::DateTime,
                               start_time::DateTime = index_time,
-                              stop_time::DateTime = index_time)
+                              stop_time::DateTime = index_time,
+                              mask_quality::Bool = true)
+    out = mask_quality ? _quality_masked(out) : out
     g = out.grid_spec
     (g.shape === :volume_3d || g.shape === :latlon_3d) || throw(ArgumentError(
         "write_wind_synthesis: stage-1 output supports :volume_3d and " *
@@ -617,6 +632,27 @@ function write_wind_synthesis(file::AbstractString, out::SynthesisOutput,
         close(ds)
     end
     return file
+end
+
+# Return a copy of `out` with the wind components and their σ blanked to
+# `fill_value` wherever `quality_flag != 0` (σ above threshold / singular / no
+# data) — the QC'd product. `det`/`n_gates`/`quality_flag` pass through unchanged
+# (diagnostics), and the input `out` is not mutated, so the full non-destructive
+# field stays available for stage 2.
+function _quality_masked(out::SynthesisOutput)
+    fv = out.fill_value
+    c1 = copy(out.comp1);  c2 = copy(out.comp2)
+    s1 = copy(out.sigma1); s2 = copy(out.sigma2)
+    @inbounds for idx in eachindex(out.quality_flag)
+        if out.quality_flag[idx] != Int8(0)
+            c1[idx] = fv; c2[idx] = fv; s1[idx] = fv; s2[idx] = fv
+        end
+    end
+    return SynthesisOutput(
+        grid_spec = out.grid_spec, component_names = out.component_names,
+        comp1 = c1, comp2 = c2, sigma1 = s1, sigma2 = s2,
+        det = out.det, n_gates = out.n_gates, quality_flag = out.quality_flag,
+        fill_value = out.fill_value, undetect = out.undetect)
 end
 
 # Define the wind component / uncertainty / diagnostic variables (the two

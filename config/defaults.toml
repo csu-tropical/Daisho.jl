@@ -94,6 +94,11 @@ velocity_variance = 1.0   # assumed σ_vr² (m/s)²; 1.0 → normalized (CEDRIC 
 # future plane/polar frames these bind to in-plane/cross-plane or tangential/radial.
 max_sigma_1       = 2.0   # max normalized σ on output component 1 (U for CartesianFrame)
 max_sigma_2       = 2.0   # max normalized σ on output component 2 (V for CartesianFrame)
+# Max line-of-sight elevation (deg) a gate may have to enter the 2-unknown (u,v)
+# solve; the dropped w·sin(el) term contaminates steep beams (airborne tail
+# radars reach ±70°). Above this, gates still grid scalars but not the wind.
+# Optional; defaults to 45.0.
+max_elevation     = 45.0
 
 [grid.cartesian]
 xmin  = -125000.0

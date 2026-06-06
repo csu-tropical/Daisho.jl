@@ -371,10 +371,17 @@ always written; the quality flag records which σ threshold(s) failed.
   `max_sigma_1` / `max_sigma_2`); for future plane/polar frames they bind to
   in-plane/cross-plane or tangential/radial. Storing a vector means adding a
   named frame needs no schema change.
+- `max_elevation::Float64`: maximum line-of-sight elevation (degrees) a gate may
+  have to enter the **2-unknown** `(u, v)` normal system. The dual-Doppler
+  approximation drops the vertical term `w·sin(el)`, so steep beams (airborne
+  tail radars reach ±70°) contaminate the horizontal solve; gates above this
+  angle still grid every scalar field but are excluded from the wind solve.
+  Optional (TOML key `max_elevation`); defaults to `45.0`.
 """
 Base.@kwdef struct SynthesisParameters
     velocity_variance::Float64 = 1.0
     max_sigma::Vector{Float64} = [2.0, 2.0]
+    max_elevation::Float64     = 45.0
 end
 
 """
@@ -679,18 +686,22 @@ end
 # (more legible than a TOML array) but are stored as the `max_sigma` vector.
 # Strict: unknown or missing keys raise, matching the rest of the loader.
 function _synthesis_from_dict(d::AbstractDict)
-    allowed = ("velocity_variance", "max_sigma_1", "max_sigma_2")
+    required = ("velocity_variance", "max_sigma_1", "max_sigma_2")
+    optional = ("max_elevation",)
+    allowed = (required..., optional...)
     unknown = setdiff(Set(Symbol.(keys(d))), Set(Symbol.(allowed)))
     isempty(unknown) || throw(ArgumentError(
         "Unknown key(s) $(_fmt_keys(unknown)) in section `[synthesis]`. " *
         "Allowed keys: $(join(allowed, ", "))"))
-    missing_keys = setdiff(Set(Symbol.(allowed)), Set(Symbol.(keys(d))))
+    missing_keys = setdiff(Set(Symbol.(required)), Set(Symbol.(keys(d))))
     isempty(missing_keys) || throw(ArgumentError(
         "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
         "`[synthesis]`. Run `print_config(\"template.toml\")` for a complete template."))
     return SynthesisParameters(
         velocity_variance = Float64(d["velocity_variance"]),
         max_sigma = [Float64(d["max_sigma_1"]), Float64(d["max_sigma_2"])],
+        max_elevation = haskey(d, "max_elevation") ? Float64(d["max_elevation"]) :
+                        SynthesisParameters().max_elevation,
     )
 end
 

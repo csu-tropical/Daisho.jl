@@ -2567,12 +2567,17 @@ latitude/longitude are written once.
 
 Stage-1 supports the 3D shapes (`:volume_3d`, `:latlon_3d`); a pre-existing file
 is deleted first. `frame` selects the wind output frame (ignored for scalar).
+`mask_quality` (default `true`) writes the QC'd wind product — components and σ
+blanked where `quality_flag != 0`, keeping only points that passed the σ
+thresholds (the accumulator retains the full non-destructive field for stage 2);
+`DET`/`NGATES`/`QFLAG` stay unmasked. It has no effect on a scalar accumulator.
 """
 function write_grid_products(file::AbstractString, acc::ScalarGridAccumulator,
                              p::DaishoParameters; index_time::DateTime,
                              start_time::DateTime = index_time,
                              stop_time::DateTime = index_time,
-                             frame::SynthesisFrame = CartesianFrame())
+                             frame::SynthesisFrame = CartesianFrame(),
+                             mask_quality::Bool = true)
     _write_scalar_grid_file(file, acc, p, index_time, start_time, stop_time)
     return file
 end
@@ -2581,11 +2586,15 @@ function write_grid_products(file::AbstractString, acc::WindGridAccumulator,
                              p::DaishoParameters; index_time::DateTime,
                              start_time::DateTime = index_time,
                              stop_time::DateTime = index_time,
-                             frame::SynthesisFrame = CartesianFrame())
+                             frame::SynthesisFrame = CartesianFrame(),
+                             mask_quality::Bool = true)
     # Scalar fields + shared coordinates first (creates the file)…
     _write_scalar_grid_file(file, acc.scalar, p, index_time, start_time, stop_time)
-    # …then append the wind product onto the same grid (reusing the coords).
+    # …then append the wind product onto the same grid (reusing the coords). With
+    # mask_quality, only σ-passing points are written; the accumulator keeps the
+    # full non-destructive field for stage 2.
     out = finalize_wind(acc, p; frame = frame)
+    mask_quality && (out = _quality_masked(out))
     ds = NCDataset(file, "a")
     try
         _write_wind_data_vars!(ds, out)

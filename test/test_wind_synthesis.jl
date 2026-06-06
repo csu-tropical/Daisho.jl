@@ -58,6 +58,7 @@ function _ref_grid_sweep_wind_3d!(AtWA, AtWb, M2, weight_total, gate_count,
                 az, el, w = Daisho._gate_grid_geometry(grid_z, yx_point, radar_zyx, beams, g_flat,
                     horizontal_roi, vertical_roi, power_threshold)
                 w > 0.0 || continue
+                abs(el) > deg2rad(p.synthesis.max_elevation) && continue
                 Daisho._wind_coeffs!(gcoef, az, el, N)
                 for a in 1:N, b in a:N
                     pk = Daisho._packed_index(a,b,N); gg = gcoef[a]*gcoef[b]
@@ -175,6 +176,7 @@ end
         @test :synthesis in p.provided
         @test p.synthesis.velocity_variance == 1.0
         @test p.synthesis.max_sigma == [2.0, 2.0]
+        @test p.synthesis.max_elevation == 45.0
 
         # Omitted → defaults, not in provided.
         mktemp() do path, io
@@ -185,10 +187,11 @@ end
             p2 = DaishoParameters(path)
             @test p2.synthesis.velocity_variance == SynthesisParameters().velocity_variance
             @test p2.synthesis.max_sigma == SynthesisParameters().max_sigma
+            @test p2.synthesis.max_elevation == SynthesisParameters().max_elevation
             @test !(:synthesis in p2.provided)
         end
 
-        # Custom values round-trip.
+        # Custom values round-trip; max_elevation is optional (defaults when absent).
         mktemp() do path, io
             close(io)
             base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
@@ -198,6 +201,16 @@ end
             p3 = DaishoParameters(path)
             @test p3.synthesis.velocity_variance == 4.0
             @test p3.synthesis.max_sigma == [1.5, 3.0]
+            @test p3.synthesis.max_elevation == 45.0   # absent ⇒ default
+        end
+
+        # Explicit max_elevation round-trips.
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["synthesis"]["max_elevation"] = 30.0
+            open(path, "w") do f; TOML.print(f, base); end
+            @test DaishoParameters(path).synthesis.max_elevation == 30.0
         end
 
         # Unknown key in [synthesis] is rejected.
@@ -459,6 +472,46 @@ end
         @test !(acc2 isa WindGridAccumulator)
     end
 
+    @testset "max_elevation gates steep beams out of the wind solve only" begin
+        p0 = DaishoParameters()
+        mkp(maxel) = Daisho.DaishoParameters(p0.moments, p0.qc, p0.gridding, p0.grid,
+            p0.io, SynthesisParameters(velocity_variance = 1.0, max_sigma = [1e9, 1e9],
+                                       max_elevation = maxel), p0.provided)
+
+        # Wind-gate count: the multi-elevation crossing radars give a spread of
+        # line-of-sight elevations, so a lower cap admits strictly fewer gates.
+        volA, volB = make_synthetic_dual_doppler(u = 8.0, v = -3.0)
+        wspec = GridSpec(shape = :volume_3d,
+            reference_latitude = 16.0, reference_longitude = -24.0,
+            x_axis = [-2000.0, 0.0, 2000.0], y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        wgates(maxel) = begin
+            acc = WindGridAccumulator(wspec, mkp(maxel))
+            for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, mkp(maxel)); end
+            for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, mkp(maxel)); end
+            sum(acc.gate_count)
+        end
+        n90, n2, n0 = wgates(90.0), wgates(2.0), wgates(0.0)
+        @test n90 > 0          # baseline: gates contribute to the wind solve
+        @test n0 == 0          # cap 0 excludes every gate from the wind
+        @test n2 < n90         # an intermediate cap removes the steeper gates
+        @test n0 <= n2 <= n90
+
+        # Scalar grids (populated DBZ/SQI volume) are untouched by the wind cap.
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        sspec = _near_radar_spec(v)
+        sc(maxel) = begin
+            acc = WindGridAccumulator(sspec, mkp(maxel))
+            for s in eachindex(v.sweeps); grid_sweep!(acc, v, s, mkp(maxel)); end
+            acc
+        end
+        a90, a0 = sc(90.0), sc(0.0)
+        @test a90.scalar.coverage     == a0.scalar.coverage
+        @test a90.scalar.weighted_sum == a0.scalar.weighted_sum
+        @test any(a90.scalar.coverage .== Int8(2))            # non-vacuous scalar grid
+        @test sum(a0.gate_count) == 0 && sum(a90.gate_count) > 0   # wind still gated
+    end
+
     # ── Phase 3: solve, sandwich error, frame rotation, masking ─────────────
 
     # A (1,1,1)-grid accumulator with one cell set directly, to test the solve
@@ -477,10 +530,11 @@ end
         return acc
     end
 
-    function _p_synth(; var = 1.0, ms = [2.0, 2.0])
+    function _p_synth(; var = 1.0, ms = [2.0, 2.0], maxel = 45.0)
         p0 = DaishoParameters()
         return Daisho.DaishoParameters(p0.moments, p0.qc, p0.gridding, p0.grid,
-            p0.io, SynthesisParameters(velocity_variance = var, max_sigma = ms),
+            p0.io, SynthesisParameters(velocity_variance = var, max_sigma = ms,
+                                       max_elevation = maxel),
             p0.provided)
     end
 
@@ -842,6 +896,54 @@ end
         finally
             isfile(file) && rm(file)
         end
+    end
+
+    @testset "write_grid_products masks σ-flagged winds (mask_quality)" begin
+        # Tight σ thresholds so some solvable cells are flagged (QFLAG != 0).
+        p = _p_synth(var = 1.0, ms = [0.5, 0.5])
+        volA, volB = make_synthetic_dual_doppler(u = 8.0, v = -3.0)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = 16.0, reference_longitude = -24.0,
+            x_axis = [-2000.0, 0.0, 2000.0], y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        acc = WindGridAccumulator(spec, p)
+        for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, p); end
+        out = finalize_wind(acc, p)
+        nflagged = count(!=(Int8(0)), out.quality_flag)
+        nsolvable = count(ci -> out.comp1[ci] != out.fill_value, CartesianIndices(out.comp1))
+        @test nflagged > 0 && nsolvable > 0   # there is something to mask
+
+        fmask = tempname() * ".nc"; ffull = tempname() * ".nc"
+        try
+            write_grid_products(fmask, acc, p; index_time = DateTime(2024,1,1))           # mask_quality=true (default)
+            write_grid_products(ffull, acc, p; index_time = DateTime(2024,1,1),
+                                mask_quality = false)
+            dm = NCDataset(fmask, "r"); dfll = NCDataset(ffull, "r")
+            try
+                # NCDatasets maps _FillValue → missing on read.
+                Um = dm["U"][:,:,:,1]; Uf = dfll["U"][:,:,:,1]
+                qf = dm["QFLAG"][:,:,:,1]
+                # Masked file: U is fill (missing) exactly where QFLAG != 0.
+                for ci in CartesianIndices(qf)
+                    qf[ci] != Int8(0) && @test ismissing(Um[ci])
+                end
+                # The full (unmasked) file keeps finite winds at some flagged cells.
+                flagged_finite_full = count(ci -> qf[ci] != Int8(0) &&
+                    !ismissing(Uf[ci]), CartesianIndices(qf))
+                @test flagged_finite_full > 0
+                # Masked strictly removes those.
+                @test count(!ismissing, Um) < count(!ismissing, Uf)
+                # QFLAG itself is identical (diagnostics unmasked).
+                @test dm["QFLAG"][:,:,:,1] == dfll["QFLAG"][:,:,:,1]
+            finally
+                close(dm); close(dfll)
+            end
+        finally
+            isfile(fmask) && rm(fmask); isfile(ffull) && rm(ffull)
+        end
+        # The accumulator / SynthesisOutput are untouched by writing.
+        @test count(ci -> out.comp1[ci] != out.fill_value, CartesianIndices(out.comp1)) == nsolvable
     end
 
     @testset "write_grid_products: scalar accumulator has no wind variables" begin
