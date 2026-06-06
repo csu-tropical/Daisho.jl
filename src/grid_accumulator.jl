@@ -57,7 +57,22 @@ Base.@kwdef struct SweepProvenance
 end
 
 """
-    GridAccumulator
+    ProductAccumulator
+
+Abstract supertype for the streamed gridding accumulators that share the
+single-pass 3D traversal ([`_grid_sweep_products_3d!`](@ref)). A concrete
+accumulator provides `accumulate_cell!`, `contributing_fields`, and an
+`_acc_grid_spec` accessor; the traversal computes the per-gate geometry once
+and dispatches the per-cell accumulation on the concrete type.
+
+Concrete subtypes: [`ScalarGridAccumulator`](@ref) (all scalar fields) and
+[`WindGridAccumulator`](@ref) (embeds a scalar accumulator plus the
+dual-Doppler normal system).
+"""
+abstract type ProductAccumulator end
+
+"""
+    ScalarGridAccumulator
 
 Pre-normalized weighted sums on a chosen grid. Each `grid_sweep!` call adds one
 sweep's contribution. `finalize_grid` divides by weights, converts linear→dBZ
@@ -65,8 +80,10 @@ where appropriate, and applies the **undetect** / **true missing** sentinels.
 
 Layout: `weighted_sum[field_idx, axis_dims…]`. The trailing axis dims depend
 on `grid_spec.shape`.
+
+`GridAccumulator` is a deprecation alias kept for downstream compatibility.
 """
-Base.@kwdef struct GridAccumulator
+Base.@kwdef struct ScalarGridAccumulator <: ProductAccumulator
     grid_spec::GridSpec
     fields::Vector{String}
     grid_type::Dict{String,Symbol}
@@ -79,6 +96,10 @@ Base.@kwdef struct GridAccumulator
     fill_value::Float64 = -32768.0   # CF _FillValue  — true missing
     undetect::Float64   =  -9999.0   # ODIM _Undetect — undetect (clear air)
 end
+
+# Deprecation alias — a true type alias, so dispatch and `isa` work for both
+# names while downstream code (e.g. Sparrow.jl) migrates.
+const GridAccumulator = ScalarGridAccumulator
 
 # ── Array shape helpers ──────────────────────────────────────────────────────
 
@@ -110,7 +131,7 @@ end
 # ── Constructors ─────────────────────────────────────────────────────────────
 
 """
-    GridAccumulator(grid_spec, fields, grid_type; field_folds)
+    ScalarGridAccumulator(grid_spec, fields, grid_type; field_folds)
 
 Allocate an empty accumulator on the given grid for an explicit list of fields.
 `field_folds` defaults to all-false; supply `true` per-field for radial
@@ -119,20 +140,20 @@ combine them across distinct sweeps. `fill_value` / `undetect` are the
 true-missing / undetect output sentinels (defaults match the `[io]` defaults);
 `finalize_grid` emits exactly these.
 """
-function GridAccumulator(grid_spec::GridSpec,
+function ScalarGridAccumulator(grid_spec::GridSpec,
                           fields::Vector{String},
                           grid_type::Dict{String,Symbol};
                           field_folds::Vector{Bool} = fill(false, length(fields)),
                           fill_value::Float64 = -32768.0,
                           undetect::Float64 = -9999.0)
     length(field_folds) == length(fields) ||
-        throw(ArgumentError("GridAccumulator: field_folds must have one entry per field"))
+        throw(ArgumentError("ScalarGridAccumulator: field_folds must have one entry per field"))
     for f in fields
         haskey(grid_type, f) ||
-            throw(ArgumentError("GridAccumulator: grid_type missing entry for $f"))
+            throw(ArgumentError("ScalarGridAccumulator: grid_type missing entry for $f"))
     end
     dims = accumulator_dims(grid_spec, length(fields))
-    return GridAccumulator(
+    return ScalarGridAccumulator(
         grid_spec       = grid_spec,
         fields          = copy(fields),
         grid_type       = copy(grid_type),
@@ -148,7 +169,7 @@ function GridAccumulator(grid_spec::GridSpec,
 end
 
 """
-    GridAccumulator(grid_spec, p::DaishoParameters)
+    ScalarGridAccumulator(grid_spec, p::DaishoParameters)
 
 Allocate an accumulator from a `DaishoParameters`. Column order is the field
 names sorted by name (order-independent of the source TOML, matching
@@ -158,9 +179,9 @@ map agree); interpolation is derived from each field's tags via
 with the explicit constructor when gridding a field-folds quantity (e.g.
 `VEL`).
 """
-function GridAccumulator(grid_spec::GridSpec, p::DaishoParameters)
+function ScalarGridAccumulator(grid_spec::GridSpec, p::DaishoParameters)
     ordered = _ordered_fields(p)
-    return GridAccumulator(grid_spec,
+    return ScalarGridAccumulator(grid_spec,
         [fs.name for fs in ordered],
         Dict{String,Symbol}(fs.name => interp_of(fs) for fs in ordered);
         fill_value = p.io.fill_value, undetect = p.io.undetect)
@@ -441,7 +462,7 @@ function grid_sweep!(accum::GridAccumulator, sweep::SweepGroup,
                      scan_name::AbstractString = "")
     shape = accum.grid_spec.shape
     if shape === :volume_3d || shape === :latlon_3d
-        _grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
     elseif shape === :rhi_2d
         _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
     elseif shape === :ppi_2d
@@ -534,14 +555,82 @@ function _materialize_gridpoints_3d(g::GridSpec, projection, grid_origin)
     return gridpoints
 end
 
-function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
+# ── Unified single-pass product accumulator interface ────────────────────────
+#
+# The shared 3D traversal (`_grid_sweep_products_3d!`) computes the per-gate
+# geometry+weight **once** per cell and hands it to `accumulate_cell!`, which is
+# dispatched on the concrete accumulator type. This lets the scalar grid and the
+# dual-Doppler wind solve be driven by one geometry pass instead of two.
+
+# Resolved per-sweep role fields (define_scanned / define_detection), looked up
+# once per sweep rather than once per cell.
+struct SweepKeys
+    missing_key::String   # :define_scanned — presence proves the gate was scanned
+    valid_key::String     # :define_detection — presence proves a detectable echo
+end
+
+# Per-gate precomputed contribution: the geometry+weight at one grid cell. The
+# geometry is field-independent, so a single `GateContribution` serves every
+# consumer (scalar accumulation and the wind normal system). `beam_z` is the
+# gate's beam height, carried so a consumer can re-apply a vertical-range filter
+# without recomputing geometry. All fields are isbits ⇒ no per-cell heap churn.
+struct GateContribution
+    g_flat::Int
+    ray::Int
+    gate::Int
+    az::Float64
+    el::Float64
+    w::Float64
+    beam_z::Float64
+end
+
+# Opaque-ish Cartesian cell handle passed to `accumulate_cell!`. `(k, j, i)`
+# index the trailing accumulator dims; `grid_z`/`eff_v_roi` carry the scalars a
+# consumer needs for vertical filtering. A future Springsteel node provider would
+# supply its own cell handle (linear node index) with its own `accumulate_cell!`.
+struct CartesianCell
+    k::Int
+    j::Int
+    i::Int
+    grid_z::Float64
+    eff_v_roi::Float64
+    n_gates::Int
+end
+
+# ── ProductAccumulator interface (ScalarGridAccumulator) ─────────────────────
+
+"""
+    contributing_fields(acc) -> Vector{String}
+
+The scalar fields whose gate values the accumulator consumes. Drives nothing in
+the traversal directly (geometry is field-independent) but documents which
+fields a consumer reads; a `WindGridAccumulator` exposes its embedded scalar's
+fields.
+"""
+contributing_fields(acc::ScalarGridAccumulator) = acc.fields
+
+# GridSpec accessor — type-generic so the traversal/writer work for both the
+# scalar and (embedding) wind accumulators.
+_acc_grid_spec(acc::ScalarGridAccumulator) = acc.grid_spec
+
+# Fields whose presence at a gate triggers a geometry computation (and thus a
+# `GateContribution` slot). Returning exactly the scalar `valid_key` reproduces
+# the legacy worker, which computed geometry only for define_detection gates —
+# no perf regression. (Wind adds its velocity field; see the WindGridAccumulator
+# method.)
+_geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
+    (keys.valid_key,)
+
+function _grid_sweep_products_3d!(acc::ProductAccumulator, sweep::SweepGroup,
                           p::DaishoParameters,
                           ref_latitude::Float64, ref_longitude::Float64,
                           ref_altitude::Float64)
-    g  = accum.grid_spec
+    g  = _acc_grid_spec(acc)
     gd = p.gridding
-    missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
-    valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
+    keys = SweepKeys(
+        field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)"),
+        field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)"))
+    triggers = _geometry_trigger_fields(acc, keys)
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -550,7 +639,6 @@ function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
     balltree = _sweep_balltree_yx(radar_zyx, beams)
     gridpoints = _materialize_gridpoints_3d(g, TM, grid_origin)
 
-    n_fields = length(accum.fields)
     nx = length(g.x_axis)
     ny = length(g.y_axis)
     nz = length(g.z_axis)
@@ -592,70 +680,108 @@ function _grid_sweep_3d!(accum::GridAccumulator, sweep::SweepGroup,
         gates = inrange(balltree, yx_point, eff_h_roi)
         isempty(gates) && continue
 
+        # Per-column scratch reused across z (each thread owns distinct columns).
+        scanned_gates = Int[]               # vertically-filtered, for coverage=1
+        contribs = GateContribution[]       # geometry computed once per gate
+
         for k_z in 1:nz
             grid_z = gridpoints[k_z, j_y, i_x, 1]
+            empty!(scanned_gates)
+            empty!(contribs)
 
-            # "Any in-range gate has non-missing missing_key value" → coverage 1.
-            any_scanned = false
             for g_flat in gates
-                # Vertical-range filter: only consider gates near this z.
-                if abs(beams[g_flat, 4] - grid_z) > eff_v_roi
-                    continue
+                # Vertically-filtered set drives the scalar "any scanned gate"
+                # coverage presence check (no geometry needed).
+                if abs(beams[g_flat, 4] - grid_z) <= eff_v_roi
+                    push!(scanned_gates, g_flat)
                 end
-                ray = _ray_of(g_flat, n_gates_s)
+                ray  = _ray_of(g_flat, n_gates_s)
                 gate = _gate_in_ray(g_flat, n_gates_s)
-                if !ismissing(_gate_value(sweep, missing_key, ray, gate))
-                    any_scanned = true
-                    break
-                end
-            end
-            if any_scanned
-                @inbounds for m in 1:n_fields
-                    if accum.coverage[m, k_z, j_y, i_x] == Int8(0)
-                        accum.coverage[m, k_z, j_y, i_x] = Int8(1)
+                # Compute geometry only for gates a consumer needs (legacy parity:
+                # scalar ⇒ define_detection-present gates).
+                triggered = false
+                for tf in triggers
+                    if !ismissing(_gate_value(sweep, tf, ray, gate))
+                        triggered = true
+                        break
                     end
+                end
+                triggered || continue
+                az, el, w = _gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
+                    g_flat, horizontal_roi, vertical_roi, power_threshold)
+                w > 0.0 || continue
+                push!(contribs, GateContribution(g_flat, ray, gate, az, el, w,
+                    beams[g_flat, 4]))
+            end
+
+            cell = CartesianCell(k_z, j_y, i_x, grid_z, eff_v_roi, n_gates_s)
+            accumulate_cell!(acc, cell, sweep, scanned_gates, contribs, keys, p)
+        end
+    end
+    return acc
+end
+
+"""
+    accumulate_cell!(acc::ScalarGridAccumulator, cell, sweep, scanned_gates,
+                     contribs, keys, p) -> acc
+
+Per-cell scalar accumulation, lifted from the legacy `_grid_sweep_3d!` body.
+`scanned_gates` are the vertically-filtered in-range gates (the coverage=1
+presence set); `contribs` carry the precomputed geometry+weight for the
+define_detection-present gates. Coverage semantics are preserved exactly:
+coverage=1 where any scanned gate is `define_scanned`-present, coverage=2 where a
+`define_detection` gate with positive weight accumulates a field.
+"""
+function accumulate_cell!(acc::ScalarGridAccumulator, cell::CartesianCell,
+                          sweep::SweepGroup, scanned_gates::Vector{Int},
+                          contribs::Vector{GateContribution}, keys::SweepKeys,
+                          p::DaishoParameters)
+    k, j, i = cell.k, cell.j, cell.i
+    n_fields = length(acc.fields)
+
+    # coverage=1: any in-range (vertically-filtered) gate that was scanned.
+    any_scanned = false
+    for g_flat in scanned_gates
+        ray  = _ray_of(g_flat, cell.n_gates)
+        gate = _gate_in_ray(g_flat, cell.n_gates)
+        if !ismissing(_gate_value(sweep, keys.missing_key, ray, gate))
+            any_scanned = true
+            break
+        end
+    end
+    any_scanned || return acc
+    @inbounds for m in 1:n_fields
+        if acc.coverage[m, k, j, i] == Int8(0)
+            acc.coverage[m, k, j, i] = Int8(1)
+        end
+    end
+
+    # coverage=2: per-field weighted accumulation at define_detection gates.
+    for c in contribs
+        ismissing(_gate_value(sweep, keys.valid_key, c.ray, c.gate)) && continue
+        total_weight = c.w
+        @inbounds for m in 1:n_fields
+            fname = acc.fields[m]
+            v = _gate_value(sweep, fname, c.ray, c.gate)
+            ismissing(v) && continue
+            mode = acc.grid_type[fname]
+            acc.coverage[m, k, j, i] = Int8(2)
+            if mode === :linear
+                linear_z = 10.0 ^ (v / 10.0)
+                acc.weighted_sum[m, k, j, i] += total_weight * linear_z
+                acc.weight_total[m, k, j, i] += total_weight
+            elseif mode === :nearest
+                if total_weight > acc.weight_total[m, k, j, i]
+                    acc.weighted_sum[m, k, j, i] = v
+                    acc.weight_total[m, k, j, i] = total_weight
                 end
             else
-                continue
-            end
-
-            # Per-gate contribution. We iterate gates filtered by valid_key.
-            for g_flat in gates
-                ray = _ray_of(g_flat, n_gates_s)
-                gate_in = _gate_in_ray(g_flat, n_gates_s)
-                vk = _gate_value(sweep, valid_key, ray, gate_in)
-                ismissing(vk) && continue
-
-                _, _, total_weight = _gate_grid_geometry(grid_z, yx_point,
-                    radar_zyx, beams, g_flat,
-                    horizontal_roi, vertical_roi, power_threshold)
-                total_weight > 0.0 || continue
-
-                # Accumulate per-field.
-                @inbounds for m in 1:n_fields
-                    fname = accum.fields[m]
-                    v = _gate_value(sweep, fname, ray, gate_in)
-                    ismissing(v) && continue
-                    mode = accum.grid_type[fname]
-                    accum.coverage[m, k_z, j_y, i_x] = Int8(2)
-                    if mode === :linear
-                        linear_z = 10.0 ^ (v / 10.0)
-                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * linear_z
-                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
-                    elseif mode === :nearest
-                        if total_weight > accum.weight_total[m, k_z, j_y, i_x]
-                            accum.weighted_sum[m, k_z, j_y, i_x] = v
-                            accum.weight_total[m, k_z, j_y, i_x] = total_weight
-                        end
-                    else
-                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * v
-                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
-                    end
-                end
+                acc.weighted_sum[m, k, j, i] += total_weight * v
+                acc.weight_total[m, k, j, i] += total_weight
             end
         end
     end
-    return accum
+    return acc
 end
 
 # ── RHI worker (2D, range × z) ───────────────────────────────────────────────

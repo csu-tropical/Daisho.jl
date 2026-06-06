@@ -1,3 +1,103 @@
+# Reference copy of the pre-unification `_grid_sweep_3d!` per-sweep worker. Held
+# here (as test_wind_synthesis.jl does for its kernels) so the unified
+# `_grid_sweep_products_3d!` can be asserted byte-identical on a fixture.
+function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    g  = accum.grid_spec
+    gd = p.gridding
+    missing_key = Daisho.field_with_tag(p, :define_scanned)
+    valid_key   = Daisho.field_with_tag(p, :define_detection)
+
+    TM = Daisho.CoordRefSystems.shift(
+        Daisho.TransverseMercator{1.0, g.reference_latitude, Daisho.WGS84Latest},
+        lonₒ = g.reference_longitude)
+    grid_origin, radar_zyx, beams, n_gates_s, _ =
+        Daisho._sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = Daisho._sweep_balltree_yx(radar_zyx, beams)
+    gridpoints = Daisho._materialize_gridpoints_3d(g, TM, grid_origin)
+
+    n_fields = length(accum.fields)
+    nx = length(g.x_axis); ny = length(g.y_axis); nz = length(g.z_axis)
+
+    horizontal_roi = if g.shape === :latlon_3d
+        latrad = g.reference_latitude * pi / 180.0
+        fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
+        fac_lon = 111.41513 * cos(latrad)
+        deg_km = sqrt(fac_lat^2 + fac_lon^2)
+        degincr = ny >= 2 ? (g.lat_axis[2] - g.lat_axis[1]) :
+                  (nx >= 2 ? (g.lon_axis[2] - g.lon_axis[1]) : 0.01)
+        deg_km * 1000.0 * degincr * 0.75
+    else
+        xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
+        xincr * 0.75
+    end
+    zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
+    vertical_roi = zincr * 0.75
+    beam_inflation  = gd.beam_inflation
+    power_threshold = gd.power_threshold
+
+    for ii in CartesianIndices((ny, nx))
+        j_y, i_x = ii.I
+        yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
+        eff_h_roi = horizontal_roi; eff_v_roi = vertical_roi
+        if beam_inflation > 0.0
+            origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
+            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
+            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
+        end
+        gates = Daisho.inrange(balltree, yx_point, eff_h_roi)
+        isempty(gates) && continue
+        for k_z in 1:nz
+            grid_z = gridpoints[k_z, j_y, i_x, 1]
+            any_scanned = false
+            for g_flat in gates
+                abs(beams[g_flat, 4] - grid_z) > eff_v_roi && continue
+                ray = Daisho._ray_of(g_flat, n_gates_s)
+                gate = Daisho._gate_in_ray(g_flat, n_gates_s)
+                if !ismissing(Daisho._gate_value(sweep, missing_key, ray, gate))
+                    any_scanned = true; break
+                end
+            end
+            if any_scanned
+                for m in 1:n_fields
+                    accum.coverage[m, k_z, j_y, i_x] == Int8(0) &&
+                        (accum.coverage[m, k_z, j_y, i_x] = Int8(1))
+                end
+            else
+                continue
+            end
+            for g_flat in gates
+                ray = Daisho._ray_of(g_flat, n_gates_s)
+                gate_in = Daisho._gate_in_ray(g_flat, n_gates_s)
+                ismissing(Daisho._gate_value(sweep, valid_key, ray, gate_in)) && continue
+                _, _, total_weight = Daisho._gate_grid_geometry(grid_z, yx_point,
+                    radar_zyx, beams, g_flat, horizontal_roi, vertical_roi, power_threshold)
+                total_weight > 0.0 || continue
+                for m in 1:n_fields
+                    fname = accum.fields[m]
+                    v = Daisho._gate_value(sweep, fname, ray, gate_in)
+                    ismissing(v) && continue
+                    mode = accum.grid_type[fname]
+                    accum.coverage[m, k_z, j_y, i_x] = Int8(2)
+                    if mode === :linear
+                        linear_z = 10.0 ^ (v / 10.0)
+                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * linear_z
+                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
+                    elseif mode === :nearest
+                        if total_weight > accum.weight_total[m, k_z, j_y, i_x]
+                            accum.weighted_sum[m, k_z, j_y, i_x] = v
+                            accum.weight_total[m, k_z, j_y, i_x] = total_weight
+                        end
+                    else
+                        accum.weighted_sum[m, k_z, j_y, i_x] += total_weight * v
+                        accum.weight_total[m, k_z, j_y, i_x] += total_weight
+                    end
+                end
+            end
+        end
+    end
+    return accum
+end
+
 @testset "GridAccumulator" begin
     # Reusable mini grid_spec factory.
     function _spec(shape::Symbol; n_x=4, n_y=3, n_z=2)
@@ -390,6 +490,59 @@
         # non-missing SQI). The legacy worker would have set it to 0 for cells
         # whose vertically-nearest gate had missing SQI.
         @test any(acc.coverage .== Int8(1)) || any(acc.coverage .== Int8(2))
+    end
+
+    @testset "ScalarGridAccumulator rename + GridAccumulator alias" begin
+        @test GridAccumulator === Daisho.ScalarGridAccumulator
+        @test ScalarGridAccumulator <: Daisho.ProductAccumulator
+        spec = _spec(:volume_3d)
+        acc = ScalarGridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted))
+        @test acc isa GridAccumulator
+        @test acc isa Daisho.ProductAccumulator
+        # The alias keyword constructor still resolves to the same type.
+        @test GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted)) isa
+              ScalarGridAccumulator
+    end
+
+    @testset "unified traversal matches legacy 3D worker exactly" begin
+        # The unified `_grid_sweep_products_3d!` must reproduce the pre-refactor
+        # `_grid_sweep_3d!` (held as `_ref_grid_sweep_3d!`) byte-for-byte.
+        p = DaishoParameters()
+        # synthetic_volume gates sit at low altitude (~7–55 m, ranges 400–1500 m),
+        # so the grid must hug the radar near the surface to capture them.
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        for shape in (:volume_3d, :latlon_3d)
+            gs = if shape === :volume_3d
+                GridSpec(shape = :volume_3d,
+                    reference_latitude = v.latitude, reference_longitude = v.longitude,
+                    x_axis = collect(Float64, -1200.0:300.0:1200.0),
+                    y_axis = collect(Float64, -1200.0:300.0:1200.0),
+                    z_axis = [0.0, 60.0, 120.0])
+            else
+                GridSpec(shape = :latlon_3d,
+                    reference_latitude = v.latitude, reference_longitude = v.longitude,
+                    x_axis = collect(Float64, 1:9), y_axis = collect(Float64, 1:9),
+                    z_axis = [0.0, 60.0, 120.0],
+                    lat_axis = collect(Float64, v.latitude .+ (-0.008:0.002:0.008)),
+                    lon_axis = collect(Float64, v.longitude .+ (-0.008:0.002:0.008)))
+            end
+
+            acc_new = GridAccumulator(gs, p)
+            for s in eachindex(v.sweeps); grid_sweep!(acc_new, v, s, p); end
+
+            acc_ref = GridAccumulator(gs, p)
+            for s in eachindex(v.sweeps)
+                sweep = v.sweeps[s]
+                _ref_grid_sweep_3d!(acc_ref, sweep, p,
+                    Float64(v.latitude), Float64(v.longitude), Float64(v.altitude))
+            end
+
+            @test acc_new.weighted_sum == acc_ref.weighted_sum
+            @test acc_new.weight_total == acc_ref.weight_total
+            @test acc_new.coverage     == acc_ref.coverage
+            # Non-vacuous: the fixture actually fills cells.
+            @test any(acc_new.coverage .== Int8(2))
+        end
     end
 
     @testset "merge_accumulators! :nearest picks higher weight per cell" begin

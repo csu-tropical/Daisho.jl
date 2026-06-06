@@ -49,7 +49,7 @@ export as_legacy_radar, as_volume
 export threshold_qc!
 
 # Grid accumulator (multi-sweep / multi-file gridding workflow)
-export GridSpec, SweepProvenance, GridAccumulator
+export GridSpec, SweepProvenance, ScalarGridAccumulator, GridAccumulator
 export save_accumulator, load_accumulator, merge_accumulators!
 export grid_sweep!, finalize_grid, build_grid_spec
 export grid_sweep_to_file, finalize_accumulator_file, combine_accumulator_files
