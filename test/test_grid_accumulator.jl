@@ -494,11 +494,11 @@ end
 
     @testset "ScalarGridAccumulator rename + GridAccumulator alias" begin
         @test GridAccumulator === Daisho.ScalarGridAccumulator
-        @test ScalarGridAccumulator <: Daisho.ProductAccumulator
+        @test ScalarGridAccumulator <: Daisho.FieldAccumulator
         spec = _spec(:volume_3d)
         acc = ScalarGridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted))
         @test acc isa GridAccumulator
-        @test acc isa Daisho.ProductAccumulator
+        @test acc isa Daisho.FieldAccumulator
         # The alias keyword constructor still resolves to the same type.
         @test GridAccumulator(spec, ["DBZ"], Dict("DBZ" => :weighted)) isa
               ScalarGridAccumulator

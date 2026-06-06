@@ -52,7 +52,10 @@ supplied to [`finalize_wind`](@ref), so one accumulator can be finalized in
 several frames without re-gridding).
 
 # Fields
-- `grid_spec::GridSpec`: grid geometry (stage 1: `:volume_3d` / `:latlon_3d`).
+- `scalar::ScalarGridAccumulator`: the embedded scalar grid for **all** configured
+  fields (velocity included). "Wind" *is* "scalar grid + wind solve," produced in
+  one geometry pass — the `grid_spec` and `sweeps` live here (single source of
+  truth) and are reached via `acc.scalar.grid_spec` / `acc.scalar.sweeps`.
 - `velocity_field::String`: the `:velocity`-tagged field projected per gate.
 - `n_unknowns::Int`: `2` for stage 1 (`u, v`); `3` reserved (`u, v, w`, deferred).
 - `AtWA::Array{Float64}`: `(n_packed, trailing…)` packed `Σ w·ggᵀ`.
@@ -62,8 +65,8 @@ several frames without re-gridding).
 - `gate_count::Array{Int32}`: `(trailing…)` contributing-gate count — diagnostic
   only (**not** a QC threshold; used for the intrinsic "did any data land here"
   check and as an informational output field). No radar identity is tracked.
-- `sweeps::Vector{SweepProvenance}`, `schema_version::Int`,
-  `fill_value`/`undetect`: as in [`GridAccumulator`](@ref).
+- `schema_version::Int`, `fill_value`/`undetect`: as in
+  [`ScalarGridAccumulator`](@ref).
 
 The trailing dims come from [`wind_accumulator_dims`](@ref) (stage 1: `(nz, ny,
 nx)`). **This struct is the stage-2 handoff artifact:** its
@@ -71,8 +74,8 @@ nx)`). **This struct is the stage-2 handoff artifact:** its
 needs to recover masked baseline points. [`finalize_wind`](@ref) produces the
 single-stage *product*; the accumulator is the richer *input* for stage 2.
 """
-Base.@kwdef struct WindGridAccumulator
-    grid_spec::GridSpec
+Base.@kwdef struct WindGridAccumulator <: FieldAccumulator
+    scalar::ScalarGridAccumulator
     velocity_field::String
     n_unknowns::Int
     AtWA::Array{Float64}
@@ -80,7 +83,6 @@ Base.@kwdef struct WindGridAccumulator
     M2::Array{Float64}
     weight_total::Array{Float64}
     gate_count::Array{Int32}
-    sweeps::Vector{SweepProvenance}
     schema_version::Int
     fill_value::Float64 = -32768.0
     undetect::Float64   =  -9999.0
@@ -105,32 +107,47 @@ end
 
 """
     WindGridAccumulator(grid_spec, velocity_field; n_unknowns=2,
-                        fill_value=-32768.0, undetect=-9999.0)
+                        fill_value=-32768.0, undetect=-9999.0, scalar=nothing)
 
 Allocate an empty wind accumulator on `grid_spec` for the named velocity field.
 `n_unknowns` is `2` (stage 1) or `3` (reserved; storage is allocated but
 [`finalize_wind`](@ref) does not yet solve it). `fill_value`/`undetect` are the
 true-missing / no-coverage output sentinels.
+
+`scalar` is the embedded [`ScalarGridAccumulator`](@ref). When omitted, a minimal
+one gridding only `velocity_field` is allocated (sufficient for the wind solve);
+the [`DaishoParameters`](@ref) constructor supplies a full-field scalar instead.
 """
 function WindGridAccumulator(grid_spec::GridSpec, velocity_field::AbstractString;
                              n_unknowns::Int = 2,
                              fill_value::Float64 = -32768.0,
-                             undetect::Float64 = -9999.0)
+                             undetect::Float64 = -9999.0,
+                             scalar::Union{Nothing,ScalarGridAccumulator} = nothing)
     (n_unknowns == 2 || n_unknowns == 3) || throw(ArgumentError(
         "WindGridAccumulator: n_unknowns must be 2 (stage 1) or 3 (reserved), " *
         "got $n_unknowns"))
     trailing = wind_accumulator_dims(grid_spec)
     np = _n_packed(n_unknowns)
+    velname = String(velocity_field)
+    sc = if scalar === nothing
+        ScalarGridAccumulator(grid_spec, [velname],
+            Dict{String,Symbol}(velname => :weighted);
+            fill_value = fill_value, undetect = undetect)
+    else
+        _grid_spec_equal(scalar.grid_spec, grid_spec) || throw(ArgumentError(
+            "WindGridAccumulator: embedded scalar grid_spec disagrees with the " *
+            "wind grid_spec"))
+        scalar
+    end
     return WindGridAccumulator(
-        grid_spec      = grid_spec,
-        velocity_field = String(velocity_field),
+        scalar         = sc,
+        velocity_field = velname,
         n_unknowns     = n_unknowns,
         AtWA           = zeros(Float64, np, trailing...),
         AtWb           = zeros(Float64, n_unknowns, trailing...),
         M2             = zeros(Float64, np, trailing...),
         weight_total   = zeros(Float64, trailing...),
         gate_count     = zeros(Int32, trailing...),
-        sweeps         = SweepProvenance[],
         schema_version = WIND_ACCUMULATOR_SCHEMA_VERSION,
         fill_value     = fill_value,
         undetect       = undetect,
@@ -140,15 +157,91 @@ end
 """
     WindGridAccumulator(grid_spec, p::DaishoParameters; n_unknowns=2)
 
-Allocate a wind accumulator from a `DaishoParameters`. The velocity field is the
-one carrying the `:velocity` tag (via [`field_with_tag`](@ref)); the sentinels
-come from `[io]`.
+Allocate a wind accumulator from a `DaishoParameters`. The embedded scalar grids
+**all** configured fields (via `ScalarGridAccumulator(grid_spec, p)`); the
+velocity field is the one carrying the `:velocity` tag (via
+[`field_with_tag`](@ref)); the sentinels come from `[io]`.
 """
 function WindGridAccumulator(grid_spec::GridSpec, p::DaishoParameters;
                              n_unknowns::Int = 2)
     vel = field_with_tag(p, :velocity; for_op="wind synthesis (WindGridAccumulator)")
+    sc = ScalarGridAccumulator(grid_spec, p)
     return WindGridAccumulator(grid_spec, vel; n_unknowns = n_unknowns,
-        fill_value = p.io.fill_value, undetect = p.io.undetect)
+        fill_value = p.io.fill_value, undetect = p.io.undetect, scalar = sc)
+end
+
+# ── FieldAccumulator interface (WindGridAccumulator) ───────────────────────
+
+# grid_spec / provenance live on the embedded scalar (single source of truth).
+_acc_grid_spec(acc::WindGridAccumulator) = acc.scalar.grid_spec
+_acc_sweeps(acc::WindGridAccumulator)    = acc.scalar.sweeps
+contributing_fields(acc::WindGridAccumulator) = acc.scalar.fields
+
+# Geometry is needed for the gates the embedded scalar wants (define_detection)
+# AND for velocity-present gates the wind solve consumes — their union, computed
+# once. (Velocity is usually also a scalar field, but the explicit set keeps the
+# wind path correct even when define_detection and velocity differ.)
+_geometry_trigger_fields(acc::WindGridAccumulator, keys::SweepKeys) =
+    (keys.valid_key, acc.velocity_field)
+
+"""
+    accumulate_cell!(acc::WindGridAccumulator, cell, sweep, scanned_gates,
+                     contribs, keys, p) -> acc
+
+Per-cell accumulation for the combined product. First grids the embedded scalar
+fields (sharing the one geometry pass); then applies the dual-Doppler rank-1
+updates `AtWA += w·ggᵀ`, `AtWb += w·v_r·g`, `M2 += w²·ggᵀ` for every contributing
+gate whose velocity is present and which passes the vertical-range filter. The
+wind solve is **independent** of the scalar coverage gating — a gate's own
+velocity validity is what admits it.
+"""
+function accumulate_cell!(acc::WindGridAccumulator, cell::CartesianCell,
+                          sweep::SweepGroup, scanned_gates::Vector{Int},
+                          contribs::Vector{GateContribution}, keys::SweepKeys,
+                          p::DaishoParameters)
+    # Scalar grids share the same geometry pass (velocity included as a field).
+    accumulate_cell!(acc.scalar, cell, sweep, scanned_gates, contribs, keys, p)
+
+    k, j, i = cell.k, cell.j, cell.i
+    N = acc.n_unknowns
+    velkey = acc.velocity_field
+    gcoef = Vector{Float64}(undef, N)
+    for c in contribs
+        # Wind vertical filter (matches the pre-unification wind worker).
+        abs(c.beam_z - cell.grid_z) > cell.eff_v_roi && continue
+        vr = _gate_value(sweep, velkey, c.ray, c.gate)
+        ismissing(vr) && continue
+        w = c.w
+        _wind_coeffs!(gcoef, c.az, c.el, N)
+        @inbounds begin
+            for a in 1:N, b in a:N
+                pk = _packed_index(a, b, N)
+                gg = gcoef[a] * gcoef[b]
+                acc.AtWA[pk, k, j, i] += w * gg
+                acc.M2[pk,  k, j, i] += w * w * gg
+            end
+            for a in 1:N
+                acc.AtWb[a, k, j, i] += w * vr * gcoef[a]
+            end
+            acc.weight_total[k, j, i] += w
+            acc.gate_count[k, j, i]   += Int32(1)
+        end
+    end
+    return acc
+end
+
+"""
+    build_accumulator(grid_spec, p::DaishoParameters) -> FieldAccumulator
+
+Select the product mode from the config: a [`WindGridAccumulator`](@ref) when any
+`[fields]` entry carries the `velocity` tag (the dual-Doppler product also grids
+all scalar fields), else a [`ScalarGridAccumulator`](@ref). The driver is then
+mode-agnostic: `acc = build_accumulator(grid_spec, p); grid_sweep!(acc, vol, s, p)`.
+"""
+function build_accumulator(grid_spec::GridSpec, p::DaishoParameters)
+    has_velocity = any(fs -> :velocity in fs.tags, p.moments.fields)
+    return has_velocity ? WindGridAccumulator(grid_spec, p) :
+                          ScalarGridAccumulator(grid_spec, p)
 end
 
 # ── Output frame ─────────────────────────────────────────────────────────────
@@ -244,180 +337,6 @@ const QFLAG_NODATA   = Int8(0x08)
     return g
 end
 
-"""
-    grid_sweep_wind!(acc::WindGridAccumulator, sweep::SweepGroup, p; ref_latitude,
-                     ref_longitude, ref_altitude, source_file="",
-                     instrument_name="", scan_name="") -> acc
-
-Add one sweep's dual-Doppler contribution to `acc`. For every gate whose
-`:velocity` value is present and whose interpolation weight is positive, the
-effective line-of-sight angles `(az, el)` (from the shared
-`_gate_grid_geometry` kernel) form the Cartesian coefficient vector
-`g = [sin az·cos el, cos az·cos el]`, and the gate applies the rank-1 updates
-
-    AtWA += w·ggᵀ,   AtWb += w·v_r·g,   M2 += w²·ggᵀ
-
-to the per-gridpoint normal system, plus `weight_total += w` and
-`gate_count += 1`. There is **no `radar_index`** — nothing about the synthesis
-depends on which radar a gate came from. A gate's own velocity validity gates
-its participation, independent of the `:define_detection`/`:define_scanned`
-roles; the `field_folds` merge-guard does not apply (velocity is projected,
-never scalar-averaged).
-
-A [`SweepProvenance`](@ref) entry is appended to `acc.sweeps`.
-"""
-function grid_sweep_wind!(acc::WindGridAccumulator, sweep::SweepGroup,
-                          p::DaishoParameters;
-                          ref_latitude::Float64,
-                          ref_longitude::Float64,
-                          ref_altitude::Float64,
-                          source_file::AbstractString = "",
-                          instrument_name::AbstractString = "",
-                          scan_name::AbstractString = "")
-    shape = acc.grid_spec.shape
-    (shape === :volume_3d || shape === :latlon_3d) || throw(ArgumentError(
-        "grid_sweep_wind!: stage-1 wind synthesis supports :volume_3d and " *
-        ":latlon_3d only, got $shape"))
-    _grid_sweep_wind_3d!(acc, sweep, p, ref_latitude, ref_longitude, ref_altitude)
-    push!(acc.sweeps, SweepProvenance(
-        instrument_name = String(instrument_name),
-        scan_name = String(scan_name),
-        sweep_number = sweep.sweep_number,
-        sweep_mode = sweep.sweep_mode,
-        fixed_angle = sweep.fixed_angle,
-        time_start = isempty(sweep.time) ? nothing : sweep.time[1],
-        time_end   = isempty(sweep.time) ? nothing : sweep.time[end],
-        source_file = String(source_file),
-        ref_latitude = ref_latitude,
-        ref_longitude = ref_longitude,
-        ref_altitude = ref_altitude,
-    ))
-    return acc
-end
-
-"""
-    grid_sweep_wind!(acc, volume::Volume, sweep_index::Int, p; source_file="") -> acc
-
-Volume convenience overload. Resolves the per-sweep reference position from the
-sweep's georeference when present (mobile), else from the volume's stationary
-`latitude`/`longitude`/`altitude`. Mirrors [`grid_sweep!`](@ref) but takes no
-`heading`/`radar_index`.
-"""
-function grid_sweep_wind!(acc::WindGridAccumulator, volume::Volume,
-                          sweep_index::Int, p::DaishoParameters;
-                          source_file::AbstractString = "")
-    sweep = volume.sweeps[sweep_index]
-    if sweep.georeference !== nothing && !isempty(sweep.georeference.latitude)
-        ref_lat = sweep.georeference.latitude[1]
-        ref_lon = sweep.georeference.longitude[1]
-        ref_alt = sweep.georeference.altitude[1]
-    else
-        ref_lat = volume.latitude
-        ref_lon = volume.longitude
-        ref_alt = volume.altitude
-    end
-    return grid_sweep_wind!(acc, sweep, p;
-        ref_latitude = Float64(ref_lat),
-        ref_longitude = Float64(ref_lon),
-        ref_altitude = Float64(ref_alt),
-        source_file = source_file,
-        instrument_name = volume.instrument_name,
-        scan_name = volume.scan_name)
-end
-
-# 3D worker. Mirrors `_grid_sweep_3d!`'s geometry setup and ROI derivation, but
-# projects the velocity into the per-gridpoint Cartesian normal system instead
-# of accumulating scalar weighted sums.
-function _grid_sweep_wind_3d!(acc::WindGridAccumulator, sweep::SweepGroup,
-                              p::DaishoParameters,
-                              ref_latitude::Float64, ref_longitude::Float64,
-                              ref_altitude::Float64)
-    g  = acc.grid_spec
-    gd = p.gridding
-    velkey = acc.velocity_field
-    N = acc.n_unknowns
-
-    TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
-                                lonₒ = g.reference_longitude)
-    grid_origin, radar_zyx, beams, n_gates_s, _ =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = _sweep_balltree_yx(radar_zyx, beams)
-    gridpoints = _materialize_gridpoints_3d(g, TM, grid_origin)
-
-    nx = length(g.x_axis)
-    ny = length(g.y_axis)
-    nz = length(g.z_axis)
-
-    # ROI mirrors `_grid_sweep_3d!`.
-    horizontal_roi = if g.shape === :latlon_3d
-        latrad = g.reference_latitude * pi / 180.0
-        fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
-        fac_lon = 111.41513 * cos(latrad)
-        deg_km = sqrt(fac_lat^2 + fac_lon^2)
-        degincr = ny >= 2 ? (g.lat_axis[2] - g.lat_axis[1]) :
-                  (nx >= 2 ? (g.lon_axis[2] - g.lon_axis[1]) : 0.01)
-        deg_km * 1000.0 * degincr * 0.75
-    else
-        xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
-        xincr * 0.75
-    end
-    zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
-    vertical_roi = zincr * 0.75
-
-    beam_inflation  = gd.beam_inflation
-    power_threshold = gd.power_threshold
-
-    Threads.@threads for ii in CartesianIndices((ny, nx))
-        j_y, i_x = ii.I
-        yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
-
-        eff_h_roi = horizontal_roi
-        eff_v_roi = vertical_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
-            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_roi)
-        isempty(gates) && continue
-
-        gcoef = Vector{Float64}(undef, N)   # per-column scratch for `g`
-        for k_z in 1:nz
-            grid_z = gridpoints[k_z, j_y, i_x, 1]
-            for g_flat in gates
-                # Vertical-range filter: only consider gates near this z.
-                abs(beams[g_flat, 4] - grid_z) > eff_v_roi && continue
-
-                ray  = _ray_of(g_flat, n_gates_s)
-                gate = _gate_in_ray(g_flat, n_gates_s)
-                vr = _gate_value(sweep, velkey, ray, gate)
-                ismissing(vr) && continue
-
-                gridpt_az, gridpt_el, w = _gate_grid_geometry(grid_z, yx_point,
-                    radar_zyx, beams, g_flat,
-                    horizontal_roi, vertical_roi, power_threshold)
-                w > 0.0 || continue
-
-                _wind_coeffs!(gcoef, gridpt_az, gridpt_el, N)
-                @inbounds begin
-                    for a in 1:N, b in a:N
-                        pk = _packed_index(a, b, N)
-                        gg = gcoef[a] * gcoef[b]
-                        acc.AtWA[pk, k_z, j_y, i_x] += w * gg
-                        acc.M2[pk,  k_z, j_y, i_x] += w * w * gg
-                    end
-                    for a in 1:N
-                        acc.AtWb[a, k_z, j_y, i_x] += w * vr * gcoef[a]
-                    end
-                    acc.weight_total[k_z, j_y, i_x] += w
-                    acc.gate_count[k_z, j_y, i_x]   += Int32(1)
-                end
-            end
-        end
-    end
-    return acc
-end
-
 # ── Finalize: solve, sandwich error, frame rotation, non-destructive QC ───────
 
 """
@@ -449,7 +368,7 @@ function finalize_wind(acc::WindGridAccumulator, p::DaishoParameters;
     acc.n_unknowns == 2 || throw(ArgumentError(
         "finalize_wind: stage-1 solve supports n_unknowns=2 only; got " *
         "$(acc.n_unknowns) (the 3-unknown path is scaffolded but not shipped)."))
-    g = acc.grid_spec
+    g = acc.scalar.grid_spec
     σ2 = p.synthesis.velocity_variance
     length(p.synthesis.max_sigma) >= 2 || throw(ArgumentError(
         "finalize_wind: [synthesis] max_sigma needs ≥2 components for the " *
@@ -568,15 +487,15 @@ end
 
 Combine `src` into `dst` in place. Because the accumulation is **linear** —
 every plane is a simple sum of per-gate rank-1 updates — the merge is an
-elementwise add of `AtWA`/`AtWb`/`M2`/`weight_total`/`gate_count` and a concat
-of `sweeps`. This is what makes the streaming model valid across files and
-radars: gridding sweeps A and B into one accumulator equals gridding them
-separately and merging. Strict compatibility is required (identical `grid_spec`,
-`velocity_field`, `n_unknowns`, and `[io]` sentinels); no silent coercion.
+elementwise add of `AtWA`/`AtWb`/`M2`/`weight_total`/`gate_count`. The embedded
+scalar grids (and the `sweeps` provenance they carry) are merged via
+[`merge_accumulators!`](@ref). This is what makes the streaming model valid
+across files and radars: gridding sweeps A and B into one accumulator equals
+gridding them separately and merging. Strict compatibility is required (identical
+`velocity_field`, `n_unknowns`, `[io]` sentinels, and — enforced by the scalar
+merge — `grid_spec`/`fields`/`grid_type`); no silent coercion.
 """
 function merge_wind_accumulators!(dst::WindGridAccumulator, src::WindGridAccumulator)
-    _grid_spec_equal(dst.grid_spec, src.grid_spec) ||
-        throw(ArgumentError("merge_wind_accumulators!: grid_spec mismatch"))
     dst.velocity_field == src.velocity_field ||
         throw(ArgumentError("merge_wind_accumulators!: velocity_field mismatch " *
             "($(dst.velocity_field) vs $(src.velocity_field))"))
@@ -592,12 +511,15 @@ function merge_wind_accumulators!(dst::WindGridAccumulator, src::WindGridAccumul
             "($(dst.undetect) vs $(src.undetect)) — accumulators built under " *
             "different [io] sentinel conventions cannot be merged"))
 
+    # Merges scalar planes + sweeps provenance, and validates grid_spec / fields /
+    # grid_type / sentinels (raising before any wind plane is touched).
+    merge_accumulators!(dst.scalar, src.scalar)
+
     dst.AtWA         .+= src.AtWA
     dst.AtWb         .+= src.AtWb
     dst.M2           .+= src.M2
     dst.weight_total .+= src.weight_total
     dst.gate_count   .+= src.gate_count
-    append!(dst.sweeps, src.sweeps)
     return dst
 end
 

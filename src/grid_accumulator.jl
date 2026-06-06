@@ -57,7 +57,7 @@ Base.@kwdef struct SweepProvenance
 end
 
 """
-    ProductAccumulator
+    FieldAccumulator
 
 Abstract supertype for the streamed gridding accumulators that share the
 single-pass 3D traversal ([`_grid_sweep_products_3d!`](@ref)). A concrete
@@ -69,7 +69,7 @@ Concrete subtypes: [`ScalarGridAccumulator`](@ref) (all scalar fields) and
 [`WindGridAccumulator`](@ref) (embeds a scalar accumulator plus the
 dual-Doppler normal system).
 """
-abstract type ProductAccumulator end
+abstract type FieldAccumulator end
 
 """
     ScalarGridAccumulator
@@ -83,7 +83,7 @@ on `grid_spec.shape`.
 
 `GridAccumulator` is a deprecation alias kept for downstream compatibility.
 """
-Base.@kwdef struct ScalarGridAccumulator <: ProductAccumulator
+Base.@kwdef struct ScalarGridAccumulator <: FieldAccumulator
     grid_spec::GridSpec
     fields::Vector{String}
     grid_type::Dict{String,Symbol}
@@ -388,9 +388,10 @@ end
 @inline _ray_of(flat::Int, n_gates::Int)        = ((flat - 1) ÷ n_gates) + 1
 @inline _gate_in_ray(flat::Int, n_gates::Int)   = ((flat - 1) % n_gates) + 1
 
-# Per-gate geometry + interpolation weight at one grid point. Shared by the
-# scalar accumulator (`_grid_sweep_3d!`) and the wind-synthesis accumulator
-# (`grid_sweep_wind!`) so both compute identical effective angles and weights.
+# Per-gate geometry + interpolation weight at one grid point. Computed once per
+# contributing gate in the shared traversal (`_grid_sweep_products_3d!`) and
+# reused by every consumer (scalar accumulation and the wind normal system) so
+# all products see identical effective angles and weights.
 #
 # `gridpt_az` is the effective azimuth (clockwise from +y / true north) and
 # `gridpt_el` the refraction-corrected elevation from the gate's radar origin to
@@ -451,7 +452,7 @@ representative position). Per-ray georeference, when present on the
 
 A `SweepProvenance` entry is appended to `accum.sweeps`.
 """
-function grid_sweep!(accum::GridAccumulator, sweep::SweepGroup,
+function grid_sweep!(accum::FieldAccumulator, sweep::SweepGroup,
                      p::DaishoParameters;
                      ref_latitude::Float64,
                      ref_longitude::Float64,
@@ -460,7 +461,7 @@ function grid_sweep!(accum::GridAccumulator, sweep::SweepGroup,
                      heading::Real = -9999.0,
                      instrument_name::AbstractString = "",
                      scan_name::AbstractString = "")
-    shape = accum.grid_spec.shape
+    shape = _acc_grid_spec(accum).shape
     if shape === :volume_3d || shape === :latlon_3d
         _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
     elseif shape === :rhi_2d
@@ -474,7 +475,7 @@ function grid_sweep!(accum::GridAccumulator, sweep::SweepGroup,
     else
         throw(ArgumentError("grid_sweep!: unsupported shape $shape"))
     end
-    push!(accum.sweeps, SweepProvenance(
+    push!(_acc_sweeps(accum), SweepProvenance(
         instrument_name = String(instrument_name),
         scan_name = String(scan_name),
         sweep_number = sweep.sweep_number,
@@ -498,7 +499,7 @@ Volume convenience overload. Resolves the per-sweep reference position from
 the sweep's georeference when present (mobile), else from the volume's
 stationary `latitude`/`longitude`/`altitude`.
 """
-function grid_sweep!(accum::GridAccumulator, volume::Volume, sweep_index::Int,
+function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
                      p::DaishoParameters; heading::Real = -9999.0,
                      source_file::AbstractString = "")
     sweep = volume.sweeps[sweep_index]
@@ -597,7 +598,7 @@ struct CartesianCell
     n_gates::Int
 end
 
-# ── ProductAccumulator interface (ScalarGridAccumulator) ─────────────────────
+# ── FieldAccumulator interface (ScalarGridAccumulator) ─────────────────────
 
 """
     contributing_fields(acc) -> Vector{String}
@@ -609,9 +610,11 @@ fields.
 """
 contributing_fields(acc::ScalarGridAccumulator) = acc.fields
 
-# GridSpec accessor — type-generic so the traversal/writer work for both the
-# scalar and (embedding) wind accumulators.
+# GridSpec / provenance accessors — type-generic so the traversal/writer work for
+# both the scalar and (embedding) wind accumulators. A `WindGridAccumulator`
+# forwards both to its embedded scalar (its single source of truth).
 _acc_grid_spec(acc::ScalarGridAccumulator) = acc.grid_spec
+_acc_sweeps(acc::ScalarGridAccumulator)    = acc.sweeps
 
 # Fields whose presence at a gate triggers a geometry computation (and thus a
 # `GateContribution` slot). Returning exactly the scalar `valid_key` reproduces
@@ -621,7 +624,7 @@ _acc_grid_spec(acc::ScalarGridAccumulator) = acc.grid_spec
 _geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
     (keys.valid_key,)
 
-function _grid_sweep_products_3d!(acc::ProductAccumulator, sweep::SweepGroup,
+function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                           p::DaishoParameters,
                           ref_latitude::Float64, ref_longitude::Float64,
                           ref_altitude::Float64)

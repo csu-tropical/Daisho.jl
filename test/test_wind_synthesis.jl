@@ -9,6 +9,68 @@ Daisho.component_names(::_RotatedFrame) = ("C1", "C2")
 Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
     [cos(f.θ) -sin(f.θ); sin(f.θ) cos(f.θ)]
 
+# Reference copy of the pre-unification `_grid_sweep_wind_3d!` worker, writing
+# into caller-supplied planes. Held here so the unified traversal's wind output
+# can be asserted byte-identical to the standalone wind worker it replaced.
+function _ref_grid_sweep_wind_3d!(AtWA, AtWb, M2, weight_total, gate_count,
+        grid_spec, velkey, N, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+    g = grid_spec; gd = p.gridding
+    TM = Daisho.CoordRefSystems.shift(
+        Daisho.TransverseMercator{1.0, g.reference_latitude, Daisho.WGS84Latest},
+        lonₒ = g.reference_longitude)
+    grid_origin, radar_zyx, beams, n_gates_s, _ =
+        Daisho._sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+    balltree = Daisho._sweep_balltree_yx(radar_zyx, beams)
+    gridpoints = Daisho._materialize_gridpoints_3d(g, TM, grid_origin)
+    nx = length(g.x_axis); ny = length(g.y_axis); nz = length(g.z_axis)
+    horizontal_roi = if g.shape === :latlon_3d
+        latrad = g.reference_latitude * pi / 180.0
+        fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
+        fac_lon = 111.41513 * cos(latrad)
+        deg_km = sqrt(fac_lat^2 + fac_lon^2)
+        degincr = ny >= 2 ? (g.lat_axis[2]-g.lat_axis[1]) : (nx>=2 ? (g.lon_axis[2]-g.lon_axis[1]) : 0.01)
+        deg_km * 1000.0 * degincr * 0.75
+    else
+        xincr = nx >= 2 ? (g.x_axis[2]-g.x_axis[1]) : 0.0; xincr * 0.75
+    end
+    zincr = nz >= 2 ? (g.z_axis[2]-g.z_axis[1]) : 0.0
+    vertical_roi = zincr * 0.75
+    beam_inflation = gd.beam_inflation; power_threshold = gd.power_threshold
+    for ii in CartesianIndices((ny, nx))
+        j_y, i_x = ii.I
+        yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
+        eff_h_roi = horizontal_roi; eff_v_roi = vertical_roi
+        if beam_inflation > 0.0
+            origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
+            eff_h_roi = max(beam_inflation*origin_dist, horizontal_roi)
+            eff_v_roi = max(beam_inflation*origin_dist, vertical_roi)
+        end
+        gates = Daisho.inrange(balltree, yx_point, eff_h_roi)
+        isempty(gates) && continue
+        gcoef = Vector{Float64}(undef, N)
+        for k_z in 1:nz
+            grid_z = gridpoints[k_z, j_y, i_x, 1]
+            for g_flat in gates
+                abs(beams[g_flat,4]-grid_z) > eff_v_roi && continue
+                ray = Daisho._ray_of(g_flat,n_gates_s); gate = Daisho._gate_in_ray(g_flat,n_gates_s)
+                vr = Daisho._gate_value(sweep, velkey, ray, gate)
+                ismissing(vr) && continue
+                az, el, w = Daisho._gate_grid_geometry(grid_z, yx_point, radar_zyx, beams, g_flat,
+                    horizontal_roi, vertical_roi, power_threshold)
+                w > 0.0 || continue
+                Daisho._wind_coeffs!(gcoef, az, el, N)
+                for a in 1:N, b in a:N
+                    pk = Daisho._packed_index(a,b,N); gg = gcoef[a]*gcoef[b]
+                    AtWA[pk,k_z,j_y,i_x] += w*gg; M2[pk,k_z,j_y,i_x] += w*w*gg
+                end
+                for a in 1:N; AtWb[a,k_z,j_y,i_x] += w*vr*gcoef[a]; end
+                weight_total[k_z,j_y,i_x] += w; gate_count[k_z,j_y,i_x] += Int32(1)
+            end
+        end
+    end
+    return nothing
+end
+
 @testset "Wind Synthesis" begin
 
     # Reusable mini grid_spec factory (3D shapes only for wind synthesis).
@@ -45,7 +107,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             @test all(acc.M2 .== 0.0)
             @test all(acc.weight_total .== 0.0)
             @test all(acc.gate_count .== Int32(0))
-            @test isempty(acc.sweeps)
+            @test isempty(acc.scalar.sweeps)
             @test acc.schema_version == Daisho.WIND_ACCUMULATOR_SCHEMA_VERSION
             @test eltype(acc.gate_count) == Int32
         end
@@ -187,7 +249,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             z_axis = [0.0, 47.2])
         acc = WindGridAccumulator(spec, "VEL")
         sweep = _one_gate_sweep(az = 90.0, el = 0.0, r = 20000.0, vr = vr)
-        grid_sweep_wind!(acc, sweep, p;
+        grid_sweep!(acc, sweep, p;
             ref_latitude = lat0, ref_longitude = lon0, ref_altitude = 0.0)
 
         # Exactly the (j=2, i=2) column receives the gate (both z levels).
@@ -196,7 +258,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             expected = (j == 2 && i == 2) ? Int32(1) : Int32(0)
             @test acc.gate_count[k, j, i] == expected
         end
-        @test length(acc.sweeps) == 1
+        @test length(acc.scalar.sweeps) == 1
 
         for k in 1:2
             w = acc.weight_total[k, 2, 2]
@@ -231,7 +293,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             z_axis = [0.0, 47.2])
         acc = WindGridAccumulator(spec, "VEL")
         sweep = _one_gate_sweep(az = 0.0, el = 0.0, r = 20000.0, vr = vr)
-        grid_sweep_wind!(acc, sweep, p;
+        grid_sweep!(acc, sweep, p;
             ref_latitude = lat0, ref_longitude = lon0, ref_altitude = 0.0)
         # The gate lands on the (y≈20 km, x=0) column: (j=2, i=2).
         @test acc.gate_count[1, 2, 2] == Int32(1)
@@ -258,18 +320,18 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         spec = _near_radar_spec(v)
 
         comb = WindGridAccumulator(spec, "VEL")
-        grid_sweep_wind!(comb, v, 1, p)
-        grid_sweep_wind!(comb, v, 2, p)
+        grid_sweep!(comb, v, 1, p)
+        grid_sweep!(comb, v, 2, p)
 
-        a = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(a, v, 1, p)
-        b = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(b, v, 2, p)
+        a = WindGridAccumulator(spec, "VEL"); grid_sweep!(a, v, 1, p)
+        b = WindGridAccumulator(spec, "VEL"); grid_sweep!(b, v, 2, p)
 
         @test comb.AtWA == a.AtWA .+ b.AtWA
         @test comb.AtWb == a.AtWb .+ b.AtWb
         @test comb.M2 == a.M2 .+ b.M2
         @test comb.weight_total == a.weight_total .+ b.weight_total
         @test comb.gate_count == a.gate_count .+ b.gate_count
-        @test length(comb.sweeps) == 2
+        @test length(comb.scalar.sweeps) == 2
         # Something actually landed (guards against an all-zero vacuous pass).
         @test sum(comb.gate_count) > 0
     end
@@ -279,13 +341,13 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         v = synthetic_volume(n_sweeps = 1, n_rays = 72, n_gates = 12)
         spec = _near_radar_spec(v)
 
-        full = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(full, v, 1, p)
+        full = WindGridAccumulator(spec, "VEL"); grid_sweep!(full, v, 1, p)
         @test sum(full.gate_count) > 0   # baseline has coverage
 
         # All-missing velocity ⇒ nothing accumulates.
         vnan = deepcopy(v)
         fill!(vnan.sweeps[1].fields["VEL"].data, NaN32)
-        none = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(none, vnan, 1, p)
+        none = WindGridAccumulator(spec, "VEL"); grid_sweep!(none, vnan, 1, p)
         @test all(none.AtWA .== 0.0)
         @test all(none.AtWb .== 0.0)
         @test all(none.M2 .== 0.0)
@@ -296,7 +358,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         vhalf = deepcopy(v)
         d = vhalf.sweeps[1].fields["VEL"].data
         d[1:2:end, :] .= NaN32
-        half = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(half, vhalf, 1, p)
+        half = WindGridAccumulator(spec, "VEL"); grid_sweep!(half, vhalf, 1, p)
         @test sum(half.gate_count) < sum(full.gate_count)
         @test sum(half.gate_count) > 0
     end
@@ -341,6 +403,60 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
                 end
             end
         end
+    end
+
+    @testset "wind folds into the shared traversal (scalar + wind from one pass)" begin
+        # A WindGridAccumulator run must (a) produce scalar grids byte-identical
+        # to a standalone ScalarGridAccumulator run, and (b) produce wind planes
+        # byte-identical to the pre-unification standalone wind worker. Together
+        # these prove the single geometry pass correctly drives both products.
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = _near_radar_spec(v)
+
+        wind_acc = WindGridAccumulator(spec, p)
+        for s in eachindex(v.sweeps); grid_sweep!(wind_acc, v, s, p); end
+
+        # (a) embedded scalar grids == standalone scalar grids.
+        scalar_acc = ScalarGridAccumulator(spec, p)
+        for s in eachindex(v.sweeps); grid_sweep!(scalar_acc, v, s, p); end
+        @test wind_acc.scalar.fields == scalar_acc.fields
+        @test wind_acc.scalar.weighted_sum == scalar_acc.weighted_sum
+        @test wind_acc.scalar.weight_total == scalar_acc.weight_total
+        @test wind_acc.scalar.coverage     == scalar_acc.coverage
+        @test any(scalar_acc.coverage .== Int8(2))   # non-vacuous
+
+        # (b) wind planes == reference standalone wind worker.
+        nz, ny, nx = Daisho.wind_accumulator_dims(spec)
+        rAtWA = zeros(Float64, 3, nz, ny, nx); rAtWb = zeros(Float64, 2, nz, ny, nx)
+        rM2 = zeros(Float64, 3, nz, ny, nx); rwt = zeros(Float64, nz, ny, nx)
+        rgc = zeros(Int32, nz, ny, nx)
+        for s in eachindex(v.sweeps)
+            _ref_grid_sweep_wind_3d!(rAtWA, rAtWb, rM2, rwt, rgc, spec, "VEL", 2,
+                v.sweeps[s], p, Float64(v.latitude), Float64(v.longitude), Float64(v.altitude))
+        end
+        @test wind_acc.AtWA == rAtWA
+        @test wind_acc.AtWb == rAtWb
+        @test wind_acc.M2 == rM2
+        @test wind_acc.weight_total == rwt
+        @test wind_acc.gate_count == rgc
+        @test sum(wind_acc.gate_count) > 0           # non-vacuous
+    end
+
+    @testset "build_accumulator selects mode from config" begin
+        p = DaishoParameters()   # bundled template has a :velocity-tagged field
+        spec = _wind_spec(:volume_3d)
+        acc = build_accumulator(spec, p)
+        @test acc isa WindGridAccumulator
+        @test acc.velocity_field == "VEL"
+
+        # Drop the velocity tag ⇒ scalar accumulator.
+        novel = filter(fs -> !(:velocity in fs.tags), p.moments.fields)
+        p2 = Daisho.DaishoParameters(Daisho.MomentParameters(novel),
+            p.qc, p.gridding, p.grid, p.io, p.synthesis, p.provided)
+        acc2 = build_accumulator(spec, p2)
+        @test acc2 isa ScalarGridAccumulator
+        @test !(acc2 isa WindGridAccumulator)
     end
 
     # ── Phase 3: solve, sandwich error, frame rotation, masking ─────────────
@@ -522,8 +638,8 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             y_axis = [-2000.0, 0.0, 2000.0],
             z_axis = collect(Float64, 200.0:200.0:1600.0))
         acc = WindGridAccumulator(spec, "VEL")
-        for s in eachindex(volA.sweeps); grid_sweep_wind!(acc, volA, s, p); end
-        for s in eachindex(volB.sweeps); grid_sweep_wind!(acc, volB, s, p); end
+        for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, p); end
         out = finalize_wind(acc, p)
 
         nz, ny, nx = size(out.comp1)
@@ -536,7 +652,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             end
         end
         @test nsolved > 0          # genuinely recovered some well-conditioned points
-        @test length(acc.sweeps) == length(volA.sweeps) + length(volB.sweeps)
+        @test length(acc.scalar.sweeps) == length(volA.sweeps) + length(volB.sweeps)
     end
 
     # ── Phase 4: persistence + multi-file merge ─────────────────────────────
@@ -549,7 +665,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         acc.M2[:, 2, 3, 4]   .= [0.5, 0.1, 0.9]
         acc.weight_total[1, 1, 1] = 3.0
         acc.gate_count[1, 1, 1]   = Int32(5)
-        push!(acc.sweeps, SweepProvenance(instrument_name = "RADARA",
+        push!(acc.scalar.sweeps, SweepProvenance(instrument_name = "RADARA",
             sweep_number = 0, fixed_angle = 0.5,
             time_start = DateTime(2024, 1, 1, 0, 0, 0)))
 
@@ -567,9 +683,9 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             @test rt.fill_value == -777.0
             @test rt.undetect == -8888.0
             @test rt.schema_version == Daisho.WIND_ACCUMULATOR_SCHEMA_VERSION
-            @test rt.grid_spec.x_axis == acc.grid_spec.x_axis
-            @test length(rt.sweeps) == 1
-            @test rt.sweeps[1].instrument_name == "RADARA"
+            @test rt.scalar.grid_spec.x_axis == acc.scalar.grid_spec.x_axis
+            @test length(rt.scalar.sweeps) == 1
+            @test rt.scalar.sweeps[1].instrument_name == "RADARA"
         finally
             isfile(path) && rm(path)
         end
@@ -581,11 +697,11 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         spec = _near_radar_spec(v)
 
         together = WindGridAccumulator(spec, "VEL")
-        grid_sweep_wind!(together, v, 1, p)
-        grid_sweep_wind!(together, v, 2, p)
+        grid_sweep!(together, v, 1, p)
+        grid_sweep!(together, v, 2, p)
 
-        a = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(a, v, 1, p)
-        b = WindGridAccumulator(spec, "VEL"); grid_sweep_wind!(b, v, 2, p)
+        a = WindGridAccumulator(spec, "VEL"); grid_sweep!(a, v, 1, p)
+        b = WindGridAccumulator(spec, "VEL"); grid_sweep!(b, v, 2, p)
         merge_wind_accumulators!(a, b)
 
         @test a.AtWA == together.AtWA
@@ -593,7 +709,7 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
         @test a.M2 == together.M2
         @test a.weight_total == together.weight_total
         @test a.gate_count == together.gate_count
-        @test length(a.sweeps) == 2
+        @test length(a.scalar.sweeps) == 2
         @test sum(together.gate_count) > 0   # non-vacuous
 
         # The merged single-stage products agree too.
@@ -631,8 +747,8 @@ Daisho.rotation_at(f::_RotatedFrame, x::Real, y::Real, z::Real) =
             y_axis = [-2000.0, 0.0, 2000.0],
             z_axis = collect(Float64, 200.0:200.0:1600.0))
         acc = WindGridAccumulator(spec, "VEL")
-        for s in eachindex(volA.sweeps); grid_sweep_wind!(acc, volA, s, p); end
-        for s in eachindex(volB.sweeps); grid_sweep_wind!(acc, volB, s, p); end
+        for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, p); end
         out = finalize_wind(acc, p)
 
         nx, ny, nz = length(spec.x_axis), length(spec.y_axis), length(spec.z_axis)
