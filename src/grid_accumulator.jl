@@ -343,8 +343,10 @@ function _sweep_zyx_and_beams(sweep::SweepGroup,
     return grid_origin, radar_zyx, beams, n_gates_s, n_rays_s
 end
 
-# Horizontal-plane BallTree on (y, x) surface positions of every gate.
-function _sweep_balltree_yx(radar_zyx::AbstractArray, beams::AbstractArray)
+# (y, x) surface positions of every gate, flat-indexed like `beams`. Shared by
+# the BallTree builder and the edge-referenced inclusion check (which needs each
+# gate's surface position to measure the horizontal gate→gridpoint distance d_h).
+function _sweep_gate_yx(radar_zyx::AbstractArray, beams::AbstractArray)
     n = size(beams, 1)
     gate_yx = zeros(Float64, 2, n)
     for i in 1:n
@@ -352,8 +354,12 @@ function _sweep_balltree_yx(radar_zyx::AbstractArray, beams::AbstractArray)
         gate_yx[1, i] = radar_zyx[i][2] + surface_range * cos(beams[i, 1])
         gate_yx[2, i] = radar_zyx[i][3] + surface_range * sin(beams[i, 1])
     end
-    return BallTree(gate_yx)
+    return gate_yx
 end
+
+# Horizontal-plane BallTree on (y, x) surface positions of every gate.
+_sweep_balltree_yx(radar_zyx::AbstractArray, beams::AbstractArray) =
+    BallTree(_sweep_gate_yx(radar_zyx, beams))
 
 # 1D radial BallTree on surface distance from the reference origin.
 function _sweep_balltree_r(radar_zyx::AbstractArray, beams::AbstractArray)
@@ -396,20 +402,36 @@ end
 # `gridpt_az` is the effective azimuth (clockwise from +y / true north) and
 # `gridpt_el` the refraction-corrected elevation from the gate's radar origin to
 # the grid point — the line-of-sight direction where the wind is estimated.
-# `total_weight = range_weight · angle_weight` is the existing Gaussian
-# beam-pattern × range interpolation weight. A return of `total_weight ≤ 0`
-# (including the `|sine_h| ≥ 1` non-physical case) signals the gate does not
-# contribute and should be skipped.
+# `total_weight = range_weight · angle_weight` is the Gaussian beam-pattern ×
+# range interpolation weight. A return of `total_weight ≤ 0` (including the
+# `|sine_h| ≥ 1` non-physical case and the edge-referenced exclusion below)
+# signals the gate does not contribute and should be skipped.
+#
+# Inclusion is **edge-referenced**: a gate contributes iff its beam *footprint*
+# reaches the grid cell, checked separately in the horizontal and vertical
+# directions —
+#     d_h ≤ horizontal_roi + footprint(r)   AND   d_v ≤ vertical_roi + footprint(r)
+# where `footprint(r) = r·sin(beam_cutoff)` is the beam's half-power-level radius
+# at this range, `d_h` the horizontal gate-surface→gridpoint distance (via
+# `gate_yx`), and `d_v = |beam_height − grid_z|`. Adding the box half-width/height
+# references the cut to the cell EDGE, not its center, so a beam slicing the edge
+# of a cell still counts. This is written in distance (no division by `r`), so it
+# cannot blow up near the radar. There is no per-gate `angle_weight < threshold`
+# cut — the edge-referenced ROI *is* the gate filter, and the output
+# normalization Σw·v/Σw lets even one off-axis gate fill an otherwise-empty cell
+# while overlapping center-aligned gates still dominate the average.
 #
 # `beam_coef` sets the angular beam-pattern width: `angle_weight =
 # exp(-angle_diff · beam_coef)`, half-power at `ln2/beam_coef`. The default
 # `79.43` is a 1° half-power beamwidth (half-power at 0.5°); the traversal scales
 # it to the radar's actual beamwidth via `79.43 / beam_width_deg`
 # (see [`_beam_coef`](@ref)), so a 2° beam gets ≈39.7 — twice the angular reach.
+# `beam_cutoff` is the matching half-angle at the power level `power_threshold`
+# (see [`_beam_cutoff`](@ref)).
 @inline function _gate_grid_geometry(grid_z::Float64, yx_point,
-                                     radar_zyx, beams, g_flat::Int,
+                                     radar_zyx, beams, gate_yx, g_flat::Int,
                                      horizontal_roi::Float64, vertical_roi::Float64,
-                                     power_threshold::Float64,
+                                     beam_cutoff::Float64,
                                      beam_coef::Float64 = 79.43)
     # Refraction-corrected height angle.
     dz = grid_z - radar_zyx[g_flat][1]
@@ -424,10 +446,20 @@ end
     gridpt_az = (pi / 2.0) - atan(dy, dx)
     gridpt_az < 0 && (gridpt_az += 2 * pi)
 
+    # Edge-referenced inclusion (distance form, no /r): the beam footprint must
+    # reach the grid cell in BOTH the horizontal and vertical directions.
+    footprint = r * sin(beam_cutoff)
+    dh_y = gate_yx[1, g_flat] - yx_point[1]
+    dh_x = gate_yx[2, g_flat] - yx_point[2]
+    d_h = sqrt(dh_y^2 + dh_x^2)
+    d_v = abs(beams[g_flat, 4] - grid_z)
+    (d_h <= horizontal_roi + footprint && d_v <= vertical_roi + footprint) ||
+        return (gridpt_az, gridpt_el, 0.0)
+
+    # Beam-pattern weight to the grid point (no per-gate power cut).
     angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
                                   [gridpt_az, gridpt_el])
     angle_weight = exp(-angle_diff * beam_coef)
-    angle_weight < power_threshold && (angle_weight = 0.0)
 
     gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
     range_weight = gridpt_r / r
@@ -453,6 +485,21 @@ non-positive beamwidth falls back to the 1° default.
 """
 _beam_coef(beam_width_deg::Real) =
     beam_width_deg > 0 ? BEAM_COEF_1DEG / Float64(beam_width_deg) : BEAM_COEF_1DEG
+
+"""
+    _beam_cutoff(power_threshold, beam_coef) -> Float64
+
+Beam half-angle (radians) at which the Gaussian beam power falls to
+`power_threshold`, for a beam of coefficient `beam_coef` (so
+`exp(-beam_cutoff · beam_coef) = power_threshold`, i.e.
+`beam_cutoff = ln(1/power_threshold) / beam_coef`). This is the *logarithmic*
+relation — the power level at the beam edge — so a **lower** `power_threshold`
+gives a **larger** `beam_cutoff` (a wider beam, counting more of the exponential
+tail). At `power_threshold = 0.5` it is the half-power half-beamwidth (`ln2 /
+beam_coef`, ≈0.5° for the 1° default).
+"""
+_beam_cutoff(power_threshold::Real, beam_coef::Real) =
+    log(1.0 / power_threshold) / beam_coef
 
 # ── grid_sweep! dispatcher ───────────────────────────────────────────────────
 
@@ -630,15 +677,16 @@ struct GateContribution
 end
 
 # Opaque-ish Cartesian cell handle passed to `accumulate_cell!`. `(k, j, i)`
-# index the trailing accumulator dims; `grid_z`/`eff_v_roi` carry the scalars a
-# consumer needs for vertical filtering. A future Springsteel node provider would
-# supply its own cell handle (linear node index) with its own `accumulate_cell!`.
+# index the trailing accumulator dims; `grid_z` carries the cell altitude a
+# consumer may need. Vertical inclusion is now handled per-gate (edge-referenced)
+# in `_gate_grid_geometry`, so the cell no longer carries a vertical-ROI scalar.
+# A future Springsteel node provider would supply its own cell handle (linear
+# node index) with its own `accumulate_cell!`.
 struct CartesianCell
     k::Int
     j::Int
     i::Int
     grid_z::Float64
-    eff_v_roi::Float64
     n_gates::Int
 end
 
@@ -677,7 +725,7 @@ _geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
 #   1. `GridSpec.shape` selects the provider. `grid_sweep!` dispatches on it;
 #      `:volume_3d`/`:latlon_3d` route to the Cartesian provider+traversal below.
 #   2. A per-cell handle (`CartesianCell` here) carries the opaque cell index plus
-#      whatever scalars a consumer needs (here `grid_z`/`eff_v_roi`). It is passed
+#      whatever scalars a consumer needs (here `grid_z`). It is passed
 #      to `accumulate_cell!` and is the *only* place the grid topology appears.
 #   3. `accumulate_cell!(acc, cell, sweep, scanned_gates, contribs, keys, p)` is
 #      dispatched on both the accumulator type *and* the cell-handle type, so a
@@ -721,7 +769,8 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                                 lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, n_rays_s =
         _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = _sweep_balltree_yx(radar_zyx, beams)
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)   # surface (y,x), reused for d_h
+    balltree = BallTree(gate_yx)
     gridpoints = _materialize_gridpoints_3d(g, TM, grid_origin)
 
     nx = length(g.x_axis)
@@ -751,21 +800,25 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
     vertical_roi = zincr * v_roi_factor
 
-    beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
+    # Beam half-angle at the `power_threshold` power level; `s = sin(beam_cutoff)`
+    # is the per-range footprint slope used in both the inclusion check and the
+    # conservative BallTree query radius.
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
         yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
 
-        eff_h_roi = horizontal_roi
-        eff_v_roi = vertical_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
-            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_roi)
+        # Conservative query radius (§ edge-referenced ROI): a contributing gate
+        # has surface distance d_h ≤ horizontal_roi + r·s, and a contributor can
+        # sit beyond the gridpoint (worst case r = origin_dist + d_h), giving
+        # R_q = (horizontal_roi + origin_dist·s)/(1 − s). The exact per-gate d_h
+        # check in `_gate_grid_geometry` trims the surplus.
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
         isempty(gates) && continue
 
         # Per-column scratch reused across z (each thread owns distinct columns).
@@ -779,8 +832,10 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
 
             for g_flat in gates
                 # Vertically-filtered set drives the scalar "any scanned gate"
-                # coverage presence check (no geometry needed).
-                if abs(beams[g_flat, 4] - grid_z) <= eff_v_roi
+                # coverage presence check (no geometry needed). Edge-referenced:
+                # the beam footprint must reach the cell vertically, matching the
+                # contribution inclusion in `_gate_grid_geometry`.
+                if abs(beams[g_flat, 4] - grid_z) <= vertical_roi + beams[g_flat, 3] * s
                     push!(scanned_gates, g_flat)
                 end
                 ray  = _ray_of(g_flat, n_gates_s)
@@ -796,13 +851,14 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                 end
                 triggered || continue
                 az, el, w = _gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
-                    g_flat, horizontal_roi, vertical_roi, power_threshold, beam_coef)
+                    gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff,
+                    beam_coef)
                 w > 0.0 || continue
                 push!(contribs, GateContribution(g_flat, ray, gate, az, el, w,
                     beams[g_flat, 4]))
             end
 
-            cell = CartesianCell(k_z, j_y, i_x, grid_z, eff_v_roi, n_gates_s)
+            cell = CartesianCell(k_z, j_y, i_x, grid_z, n_gates_s)
             accumulate_cell!(acc, cell, sweep, scanned_gates, contribs, keys, p)
         end
     end

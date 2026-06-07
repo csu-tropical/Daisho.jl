@@ -1,18 +1,23 @@
-# Reference copy of the pre-unification `_grid_sweep_3d!` per-sweep worker. Held
-# here (as test_wind_synthesis.jl does for its kernels) so the unified
-# `_grid_sweep_products_3d!` can be asserted byte-identical on a fixture.
+# Independent re-implementation of the unified `_grid_sweep_products_3d!`
+# per-sweep traversal, mirroring the edge-referenced inclusion math (§3 of the
+# Edge-Referenced ROI plan): conservative BallTree query radius `R_q`, per-gate
+# edge-referenced vertical filter for the scanned set, and the beam-footprint
+# inclusion inside `_gate_grid_geometry`. Held here so production can be asserted
+# byte-identical on a fixture. `beam_width = 1.0` ⇒ `beam_coef = 79.43`.
 function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = Daisho.field_with_tag(p, :define_scanned)
     valid_key   = Daisho.field_with_tag(p, :define_detection)
+    beam_coef   = Daisho.BEAM_COEF_1DEG
 
     TM = Daisho.CoordRefSystems.shift(
         Daisho.TransverseMercator{1.0, g.reference_latitude, Daisho.WGS84Latest},
         lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, _ =
         Daisho._sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = Daisho._sweep_balltree_yx(radar_zyx, beams)
+    gate_yx  = Daisho._sweep_gate_yx(radar_zyx, beams)
+    balltree = Daisho.BallTree(gate_yx)
     gridpoints = Daisho._materialize_gridpoints_3d(g, TM, grid_origin)
 
     n_fields = length(accum.fields)
@@ -25,32 +30,29 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
         deg_km = sqrt(fac_lat^2 + fac_lon^2)
         degincr = ny >= 2 ? (g.lat_axis[2] - g.lat_axis[1]) :
                   (nx >= 2 ? (g.lon_axis[2] - g.lon_axis[1]) : 0.01)
-        deg_km * 1000.0 * degincr * 0.75
+        deg_km * 1000.0 * degincr * gd.horizontal_roi_factor
     else
         xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
-        xincr * 0.75
+        xincr * gd.horizontal_roi_factor
     end
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
-    vertical_roi = zincr * 0.75
-    beam_inflation  = gd.beam_inflation
+    vertical_roi = zincr * gd.vertical_roi_factor
     power_threshold = gd.power_threshold
+    beam_cutoff = Daisho._beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
         yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
-        eff_h_roi = horizontal_roi; eff_v_roi = vertical_roi
-        if beam_inflation > 0.0
-            origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
-            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
-        end
-        gates = Daisho.inrange(balltree, yx_point, eff_h_roi)
+        origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = Daisho.inrange(balltree, yx_point, R_q)
         isempty(gates) && continue
         for k_z in 1:nz
             grid_z = gridpoints[k_z, j_y, i_x, 1]
             any_scanned = false
             for g_flat in gates
-                abs(beams[g_flat, 4] - grid_z) > eff_v_roi && continue
+                abs(beams[g_flat, 4] - grid_z) > vertical_roi + beams[g_flat, 3] * s && continue
                 ray = Daisho._ray_of(g_flat, n_gates_s)
                 gate = Daisho._gate_in_ray(g_flat, n_gates_s)
                 if !ismissing(Daisho._gate_value(sweep, missing_key, ray, gate))
@@ -70,7 +72,8 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
                 gate_in = Daisho._gate_in_ray(g_flat, n_gates_s)
                 ismissing(Daisho._gate_value(sweep, valid_key, ray, gate_in)) && continue
                 _, _, total_weight = Daisho._gate_grid_geometry(grid_z, yx_point,
-                    radar_zyx, beams, g_flat, horizontal_roi, vertical_roi, power_threshold)
+                    radar_zyx, beams, gate_yx, g_flat, horizontal_roi, vertical_roi,
+                    beam_cutoff, beam_coef)
                 total_weight > 0.0 || continue
                 for m in 1:n_fields
                     fname = accum.fields[m]
@@ -582,6 +585,106 @@ end
         @test sum(acc_bw2.weight_total) > sum(acc_def.weight_total)
         @test count(>(Int8(0)), acc_bw2.coverage) >= count(>(Int8(0)), acc_def.coverage)
         @test acc_bw2.weighted_sum != acc_def.weighted_sum
+    end
+
+    @testset "beam_cutoff: power level defines the beam edge" begin
+        bc = Daisho._beam_coef(1.0)                       # 79.43, 1° beam
+        beam_cutoff = Daisho._beam_cutoff(0.5, bc)
+        # power_threshold = 0.5 ⇒ half-power half-beamwidth (≈0.5° for a 1° beam).
+        @test beam_cutoff ≈ log(2) / bc
+        @test rad2deg(beam_cutoff) ≈ 0.5 atol = 1e-3   # 79.43 is a rounded coef
+        # Lower power_threshold ⇒ larger beam_cutoff (wider beam, more of the
+        # exponential tail) — the logarithmic direction Michael tunes by.
+        @test Daisho._beam_cutoff(0.3, bc) > beam_cutoff
+        @test Daisho._beam_cutoff(0.1, bc) > Daisho._beam_cutoff(0.3, bc)
+        # A 2° beam (smaller coef) has a proportionally larger cutoff.
+        @test Daisho._beam_cutoff(0.5, Daisho._beam_coef(2.0)) ≈ 2 * beam_cutoff
+    end
+
+    @testset "edge-referenced inclusion (kernel)" begin
+        bc = Daisho._beam_coef(1.0)
+        beam_cutoff = Daisho._beam_cutoff(0.5, bc)
+        # One east-pointing (az 90°) gate at 10 km, 0.5° elevation.
+        radar_zyx = [[0.0, 0.0, 0.0]]
+        r = 10_000.0; el_deg = 0.5
+        bh = Daisho.beam_height(r, el_deg, 0.0)
+        beams = reshape([deg2rad(90.0), deg2rad(el_deg), r, bh], 1, 4)
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+        gate_y, gate_x = gate_yx[1, 1], gate_yx[2, 1]
+        footprint = r * sin(beam_cutoff)
+        h_roi = v_roi = 200.0
+
+        # Beyond the box half-width but within box + beam footprint ⇒ INCLUDED
+        # (edge-referenced: a beam slicing the cell edge still counts).
+        _, _, w_edge = Daisho._gate_grid_geometry(bh,
+            [gate_y + h_roi + 0.5 * footprint, gate_x],
+            radar_zyx, beams, gate_yx, 1, h_roi, v_roi, beam_cutoff, bc)
+        @test w_edge > 0.0
+        # Beyond box + footprint ⇒ excluded.
+        _, _, w_far = Daisho._gate_grid_geometry(bh,
+            [gate_y + h_roi + 2.0 * footprint, gate_x],
+            radar_zyx, beams, gate_yx, 1, h_roi, v_roi, beam_cutoff, bc)
+        @test w_far == 0.0
+
+        # az and el are handled separately: a purely vertical offset within the
+        # vertical reach is included, beyond it is excluded — independent of the
+        # (satisfied) horizontal condition.
+        _, _, w_vin = Daisho._gate_grid_geometry(bh + v_roi + 0.5 * footprint,
+            [gate_y, gate_x], radar_zyx, beams, gate_yx, 1, h_roi, v_roi,
+            beam_cutoff, bc)
+        @test w_vin > 0.0
+        _, _, w_vout = Daisho._gate_grid_geometry(bh + v_roi + 2.0 * footprint,
+            [gate_y, gate_x], radar_zyx, beams, gate_yx, 1, h_roi, v_roi,
+            beam_cutoff, bc)
+        @test w_vout == 0.0
+    end
+
+    @testset "weight stays center-weighted (monotone in angular offset)" begin
+        bc = Daisho._beam_coef(1.0)
+        beam_cutoff = Daisho._beam_cutoff(0.1, bc)   # wide ⇒ both gates included
+        r = 10_000.0
+        bh = Daisho.beam_height(r, 0.5, 0.0)
+        radar_zyx = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]
+        # Two gates bracketing a cell: A's axis points at the gridpoint, B's is
+        # offset 0.6° away.
+        beams = [deg2rad(90.0) deg2rad(0.5) r bh;
+                 deg2rad(90.6) deg2rad(0.5) r bh]
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+        yx = [gate_yx[1, 1], gate_yx[2, 1]]          # on gate A's footprint center
+        h_roi = v_roi = 1000.0
+        _, _, wA = Daisho._gate_grid_geometry(bh, yx, radar_zyx, beams, gate_yx, 1,
+            h_roi, v_roi, beam_cutoff, bc)
+        _, _, wB = Daisho._gate_grid_geometry(bh, yx, radar_zyx, beams, gate_yx, 2,
+            h_roi, v_roi, beam_cutoff, bc)
+        @test wA > wB > 0.0   # closer-to-center gate dominates the average
+    end
+
+    @testset "ROI factors / power_threshold widen coverage (worker)" begin
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0),
+            z_axis = [0.0, 60.0, 120.0])
+        base = DaishoParameters()
+        _with_gridding(gp) = Daisho.DaishoParameters(base.moments, base.qc, gp,
+            base.grid, base.io, base.synthesis, base.provided)
+
+        cover(p) = begin
+            acc = ScalarGridAccumulator(spec, p)
+            for s in eachindex(v.sweeps); grid_sweep!(acc, v, s, p); end
+            count(>(Int8(0)), acc.coverage)
+        end
+
+        n_base = cover(base)
+        @test n_base > 0
+        # Lower power_threshold ⇒ wider beam ⇒ ≥ coverage.
+        @test cover(_with_gridding(GriddingParameters(power_threshold = 0.1))) >= n_base
+        # Larger horizontal ROI factor ⇒ ≥ coverage.
+        @test cover(_with_gridding(GriddingParameters(horizontal_roi_factor = 1.5))) >= n_base
+        # The two ROI factors act independently (az vs el): bumping only the
+        # vertical factor changes coverage without touching the horizontal reach.
+        @test cover(_with_gridding(GriddingParameters(vertical_roi_factor = 3.0))) >= n_base
     end
 
     @testset "Volume overload reads beamwidth from radar_parameters" begin

@@ -191,9 +191,10 @@ _geometry_trigger_fields(acc::WindGridAccumulator, keys::SweepKeys) =
 Per-cell accumulation for the combined product. First grids the embedded scalar
 fields (sharing the one geometry pass); then applies the dual-Doppler rank-1
 updates `AtWA += w·ggᵀ`, `AtWb += w·v_r·g`, `M2 += w²·ggᵀ` for every contributing
-gate whose velocity is present and which passes the vertical-range filter. The
-wind solve is **independent** of the scalar coverage gating — a gate's own
-velocity validity is what admits it.
+gate whose velocity is present and whose line-of-sight elevation is within
+`max_elevation` (vertical inclusion is already applied per-gate, edge-referenced,
+in `_gate_grid_geometry`). The wind solve is **independent** of the scalar
+coverage gating — a gate's own velocity validity is what admits it.
 """
 function accumulate_cell!(acc::WindGridAccumulator, cell::CartesianCell,
                           sweep::SweepGroup, scanned_gates::Vector{Int},
@@ -211,8 +212,8 @@ function accumulate_cell!(acc::WindGridAccumulator, cell::CartesianCell,
     max_el = deg2rad(p.synthesis.max_elevation)
     gcoef = Vector{Float64}(undef, N)
     for c in contribs
-        # Wind vertical filter (matches the pre-unification wind worker).
-        abs(c.beam_z - cell.grid_z) > cell.eff_v_roi && continue
+        # Vertical inclusion is already applied per-gate (edge-referenced) in
+        # `_gate_grid_geometry`, so every contrib here is within vertical reach.
         abs(c.el) > max_el && continue
         vr = _gate_value(sweep, velkey, c.ray, c.gate)
         ismissing(vr) && continue

@@ -20,43 +20,42 @@ function _ref_grid_sweep_wind_3d!(AtWA, AtWb, M2, weight_total, gate_count,
         lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, _ =
         Daisho._sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = Daisho._sweep_balltree_yx(radar_zyx, beams)
+    gate_yx  = Daisho._sweep_gate_yx(radar_zyx, beams)
+    balltree = Daisho.BallTree(gate_yx)
     gridpoints = Daisho._materialize_gridpoints_3d(g, TM, grid_origin)
     nx = length(g.x_axis); ny = length(g.y_axis); nz = length(g.z_axis)
+    beam_coef = Daisho.BEAM_COEF_1DEG
     horizontal_roi = if g.shape === :latlon_3d
         latrad = g.reference_latitude * pi / 180.0
         fac_lat = 111.13209 - 0.56605 * cos(2.0 * latrad)
         fac_lon = 111.41513 * cos(latrad)
         deg_km = sqrt(fac_lat^2 + fac_lon^2)
         degincr = ny >= 2 ? (g.lat_axis[2]-g.lat_axis[1]) : (nx>=2 ? (g.lon_axis[2]-g.lon_axis[1]) : 0.01)
-        deg_km * 1000.0 * degincr * 0.75
+        deg_km * 1000.0 * degincr * gd.horizontal_roi_factor
     else
-        xincr = nx >= 2 ? (g.x_axis[2]-g.x_axis[1]) : 0.0; xincr * 0.75
+        xincr = nx >= 2 ? (g.x_axis[2]-g.x_axis[1]) : 0.0; xincr * gd.horizontal_roi_factor
     end
     zincr = nz >= 2 ? (g.z_axis[2]-g.z_axis[1]) : 0.0
-    vertical_roi = zincr * 0.75
-    beam_inflation = gd.beam_inflation; power_threshold = gd.power_threshold
+    vertical_roi = zincr * gd.vertical_roi_factor
+    power_threshold = gd.power_threshold
+    beam_cutoff = Daisho._beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
     for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
         yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
-        eff_h_roi = horizontal_roi; eff_v_roi = vertical_roi
-        if beam_inflation > 0.0
-            origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation*origin_dist, horizontal_roi)
-            eff_v_roi = max(beam_inflation*origin_dist, vertical_roi)
-        end
-        gates = Daisho.inrange(balltree, yx_point, eff_h_roi)
+        origin_dist = Daisho.euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = Daisho.inrange(balltree, yx_point, R_q)
         isempty(gates) && continue
         gcoef = Vector{Float64}(undef, N)
         for k_z in 1:nz
             grid_z = gridpoints[k_z, j_y, i_x, 1]
             for g_flat in gates
-                abs(beams[g_flat,4]-grid_z) > eff_v_roi && continue
                 ray = Daisho._ray_of(g_flat,n_gates_s); gate = Daisho._gate_in_ray(g_flat,n_gates_s)
                 vr = Daisho._gate_value(sweep, velkey, ray, gate)
                 ismissing(vr) && continue
-                az, el, w = Daisho._gate_grid_geometry(grid_z, yx_point, radar_zyx, beams, g_flat,
-                    horizontal_roi, vertical_roi, power_threshold)
+                az, el, w = Daisho._gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
+                    gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff, beam_coef)
                 w > 0.0 || continue
                 abs(el) > deg2rad(p.synthesis.max_elevation) && continue
                 Daisho._wind_coeffs!(gcoef, az, el, N)
@@ -339,10 +338,14 @@ end
         a = WindGridAccumulator(spec, "VEL"); grid_sweep!(a, v, 1, p)
         b = WindGridAccumulator(spec, "VEL"); grid_sweep!(b, v, 2, p)
 
-        @test comb.AtWA == a.AtWA .+ b.AtWA
-        @test comb.AtWb == a.AtWb .+ b.AtWb
-        @test comb.M2 == a.M2 .+ b.M2
-        @test comb.weight_total == a.weight_total .+ b.weight_total
+        # Edge-referenced inclusion lets a cell receive gates from BOTH sweeps,
+        # so combine-then-sum and sum-then-combine differ only by floating-point
+        # association (~1e-16); the additive property holds to float precision.
+        # The integer gate_count is exactly additive.
+        @test comb.AtWA ≈ a.AtWA .+ b.AtWA
+        @test comb.AtWb ≈ a.AtWb .+ b.AtWb
+        @test comb.M2 ≈ a.M2 .+ b.M2
+        @test comb.weight_total ≈ a.weight_total .+ b.weight_total
         @test comb.gate_count == a.gate_count .+ b.gate_count
         @test length(comb.scalar.sweeps) == 2
         # Something actually landed (guards against an all-zero vacuous pass).
@@ -377,10 +380,12 @@ end
     end
 
     @testset "shared gate-geometry kernel parity" begin
-        # The kernel must reproduce the exact inline formula the scalar gridding
-        # path used before extraction. Hold a reference copy here and compare.
-        function _ref_geometry(grid_z, yx_point, radar_zyx, beams, g,
-                               h_roi, v_roi, pthr)
+        # The kernel must reproduce the edge-referenced inclusion + weight math
+        # (§3 of the Edge-Referenced ROI plan). Hold an independent reference copy
+        # here and compare: footprint-based d_h/d_v inclusion, no per-gate power
+        # cut, range_weight with the radial tolerance.
+        function _ref_geometry(grid_z, yx_point, radar_zyx, beams, gate_yx, g,
+                               h_roi, v_roi, beam_cutoff, beam_coef)
             dz = grid_z - radar_zyx[g][1]
             r  = beams[g, 3]
             sine_h = ((dz + Daisho.Reff)^2 - r^2 - Daisho.Reff^2) / (2 * r * Daisho.Reff)
@@ -390,9 +395,13 @@ end
             dy = yx_point[1] - radar_zyx[g][2]
             az = (pi / 2.0) - atan(dy, dx)
             az < 0 && (az += 2 * pi)
+            footprint = r * sin(beam_cutoff)
+            d_h = sqrt((gate_yx[1, g] - yx_point[1])^2 + (gate_yx[2, g] - yx_point[2])^2)
+            d_v = abs(beams[g, 4] - grid_z)
+            (d_h <= h_roi + footprint && d_v <= v_roi + footprint) ||
+                return (az, el, 0.0)
             ad = Daisho.spherical_angle([beams[g, 1], beams[g, 2]], [az, el])
-            aw = exp(-ad * 79.43)
-            aw < pthr && (aw = 0.0)
+            aw = exp(-ad * beam_coef)
             gr = sin(sqrt(dx^2 + dy^2) / Daisho.Reff) * (Daisho.Reff + dz) / cos(el)
             rw = gr / r
             (abs(gr - r) > h_roi || abs(gr - r) > v_roi) && (rw = 0.0)
@@ -402,12 +411,18 @@ end
         radar_zyx = [[0.0, 0.0, 0.0], [0.0, 5000.0, -3000.0]]
         beams = [deg2rad(30.0) deg2rad(0.5) 12000.0 200.0;
                  deg2rad(280.0) deg2rad(1.5) 9000.0 250.0]
-        h_roi, v_roi, pthr = 1500.0, 1500.0, 0.5
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+        beam_coef = Daisho.BEAM_COEF_1DEG
+        # A wide ROI so some (but not all) of the synthetic gates pass inclusion,
+        # exercising both branches of the edge-referenced cut.
+        h_roi, v_roi = 6000.0, 6000.0
+        beam_cutoff = Daisho._beam_cutoff(0.5, beam_coef)
         for g in 1:2, gz in (100.0, 400.0, 1200.0),
                 yx in ([6000.0, 4000.0], [-1000.0, 8000.0], [200.0, 200.0])
-            got = Daisho._gate_grid_geometry(gz, yx, radar_zyx, beams, g,
-                                             h_roi, v_roi, pthr)
-            ref = _ref_geometry(gz, yx, radar_zyx, beams, g, h_roi, v_roi, pthr)
+            got = Daisho._gate_grid_geometry(gz, yx, radar_zyx, beams, gate_yx, g,
+                                             h_roi, v_roi, beam_cutoff, beam_coef)
+            ref = _ref_geometry(gz, yx, radar_zyx, beams, gate_yx, g,
+                                h_roi, v_roi, beam_cutoff, beam_coef)
             for k in 1:3
                 if isnan(ref[k])
                     @test isnan(got[k])
@@ -758,10 +773,12 @@ end
         b = WindGridAccumulator(spec, "VEL"); grid_sweep!(b, v, 2, p)
         merge_wind_accumulators!(a, b)
 
-        @test a.AtWA == together.AtWA
-        @test a.AtWb == together.AtWb
-        @test a.M2 == together.M2
-        @test a.weight_total == together.weight_total
+        # Float arrays agree to floating-point association (cells now overlap
+        # both sweeps under edge-referenced inclusion); gate_count is exact.
+        @test a.AtWA ≈ together.AtWA
+        @test a.AtWb ≈ together.AtWb
+        @test a.M2 ≈ together.M2
+        @test a.weight_total ≈ together.weight_total
         @test a.gate_count == together.gate_count
         @test length(a.scalar.sweeps) == 2
         @test sum(together.gate_count) > 0   # non-vacuous
