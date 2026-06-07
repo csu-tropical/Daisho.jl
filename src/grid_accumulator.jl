@@ -428,11 +428,20 @@ end
 # (see [`_beam_coef`](@ref)), so a 2° beam gets ≈39.7 — twice the angular reach.
 # `beam_cutoff` is the matching half-angle at the power level `power_threshold`
 # (see [`_beam_cutoff`](@ref)).
+#
+# `range_weight = gridpt_r / r` is the one remaining division (the inclusion is
+# distance-form, no /r). It is guarded against the near-radar singularity: the
+# divisor is floored at `range_floor` (`r_eff = max(r, range_floor)`) and the
+# result clamped to `[0, range_weight_max]`. Within the radial tolerance
+# `range_weight ≈ 1`, so the guards only bite for a gate sitting essentially on
+# the radar — where `gridpt_r/r` would otherwise blow up.
 @inline function _gate_grid_geometry(grid_z::Float64, yx_point,
                                      radar_zyx, beams, gate_yx, g_flat::Int,
                                      horizontal_roi::Float64, vertical_roi::Float64,
                                      beam_cutoff::Float64,
-                                     beam_coef::Float64 = 79.43)
+                                     beam_coef::Float64 = 79.43,
+                                     range_floor::Float64 = 1.0,
+                                     range_weight_max::Float64 = 10.0)
     # Refraction-corrected height angle.
     dz = grid_z - radar_zyx[g_flat][1]
     r  = beams[g_flat, 3]
@@ -462,7 +471,8 @@ end
     angle_weight = exp(-angle_diff * beam_coef)
 
     gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
-    range_weight = gridpt_r / r
+    r_eff = max(r, range_floor)
+    range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
     if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
         range_weight = 0.0
     end
@@ -806,6 +816,8 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     # conservative BallTree query radius.
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
+    range_floor      = gd.range_floor
+    range_weight_max = gd.range_weight_max
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -852,7 +864,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                 triggered || continue
                 az, el, w = _gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
                     gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff,
-                    beam_coef)
+                    beam_coef, range_floor, range_weight_max)
                 w > 0.0 || continue
                 push!(contribs, GateContribution(g_flat, ray, gate, az, el, w,
                     beams[g_flat, 4]))

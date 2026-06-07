@@ -40,6 +40,7 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
     power_threshold = gd.power_threshold
     beam_cutoff = Daisho._beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
+    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
 
     for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -73,7 +74,7 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
                 ismissing(Daisho._gate_value(sweep, valid_key, ray, gate_in)) && continue
                 _, _, total_weight = Daisho._gate_grid_geometry(grid_z, yx_point,
                     radar_zyx, beams, gate_yx, g_flat, horizontal_roi, vertical_roi,
-                    beam_cutoff, beam_coef)
+                    beam_cutoff, beam_coef, range_floor, range_weight_max)
                 total_weight > 0.0 || continue
                 for m in 1:n_fields
                     fname = accum.fields[m]
@@ -637,6 +638,42 @@ end
             [gate_y, gate_x], radar_zyx, beams, gate_yx, 1, h_roi, v_roi,
             beam_cutoff, bc)
         @test w_vout == 0.0
+    end
+
+    @testset "near-radar range_weight guard (no Inf/NaN)" begin
+        bc = Daisho._beam_coef(1.0)
+        beam_cutoff = Daisho._beam_cutoff(0.5, bc)
+        radar_zyx = [[0.0, 0.0, 0.0]]
+        # A gate sitting essentially on the radar (r ≈ 0).
+        beams = reshape([0.0, 0.0, 1e-3, 0.0], 1, 4)
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+        h_roi = v_roi = 200.0
+        # Gridpoint ~5 m out: passes the radial tolerance, so an unfloored
+        # range_weight = gridpt_r / r ≈ 5000 would otherwise dominate every cell.
+        yx = [5.0, 0.0]
+
+        # range_floor = 1.0 tames the divisor: range_weight ≈ gridpt_r ≈ 5.
+        _, _, w_floor = Daisho._gate_grid_geometry(0.0, yx, radar_zyx, beams,
+            gate_yx, 1, h_roi, v_roi, beam_cutoff, bc, 1.0, 100.0)
+        # A negligible floor lets the singularity through, but the cap binds.
+        _, _, w_unfloored = Daisho._gate_grid_geometry(0.0, yx, radar_zyx, beams,
+            gate_yx, 1, h_roi, v_roi, beam_cutoff, bc, 1e-12, 100.0)
+        @test isfinite(w_floor) && isfinite(w_unfloored)
+        @test w_floor < w_unfloored               # the floor reduces the blow-up
+        @test w_unfloored <= 100.0                 # and the cap bounds it
+
+        # range_weight_max bounds the weight even with a negligible floor.
+        _, _, w_capped = Daisho._gate_grid_geometry(0.0, yx, radar_zyx, beams,
+            gate_yx, 1, h_roi, v_roi, beam_cutoff, bc, 1e-12, 10.0)
+        @test isfinite(w_capped)
+        @test w_capped <= 10.0
+
+        # A degenerate r = 0 gate contributes nothing (no NaN weight leaks out).
+        beams0 = reshape([0.0, 0.0, 0.0, 0.0], 1, 4)
+        gyx0 = Daisho._sweep_gate_yx(radar_zyx, beams0)
+        _, _, w0 = Daisho._gate_grid_geometry(0.0, [0.0, 0.0], radar_zyx, beams0,
+            gyx0, 1, h_roi, v_roi, beam_cutoff, bc, 1.0, 10.0)
+        @test w0 == 0.0
     end
 
     @testset "weight stays center-weighted (monotone in angular offset)" begin

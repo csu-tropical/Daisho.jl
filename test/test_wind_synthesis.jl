@@ -40,6 +40,7 @@ function _ref_grid_sweep_wind_3d!(AtWA, AtWb, M2, weight_total, gate_count,
     power_threshold = gd.power_threshold
     beam_cutoff = Daisho._beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
+    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
     for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
         yx_point = [gridpoints[1, j_y, i_x, 2], gridpoints[1, j_y, i_x, 3]]
@@ -55,7 +56,8 @@ function _ref_grid_sweep_wind_3d!(AtWA, AtWb, M2, weight_total, gate_count,
                 vr = Daisho._gate_value(sweep, velkey, ray, gate)
                 ismissing(vr) && continue
                 az, el, w = Daisho._gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
-                    gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff, beam_coef)
+                    gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff, beam_coef,
+                    range_floor, range_weight_max)
                 w > 0.0 || continue
                 abs(el) > deg2rad(p.synthesis.max_elevation) && continue
                 Daisho._wind_coeffs!(gcoef, az, el, N)
