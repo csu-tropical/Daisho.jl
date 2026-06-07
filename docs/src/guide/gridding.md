@@ -53,8 +53,10 @@ The algorithm uses a BallTree spatial index for efficient nearest-neighbor queri
 
 ## Key Parameters
 
-- **`beam_inflation`**: Expands the radius of influence proportionally to distance from the radar. Accounts for beam broadening with range. Typical value: 0.01.
-- **`power_threshold`**: Minimum beam pattern weight to include a gate. Gates with weight below this threshold are excluded. Typical value: 0.5.
+- **`beam_inflation`**: Expands the radius of influence proportionally to distance from the radar. Accounts for beam broadening with range. Used by the 2D/legacy drivers; the 3D edge-referenced path derives its per-range reach from the beam footprint instead. Typical value: 0.01.
+- **`power_threshold`**: The beam power level that defines the beam edge. In the 3D edge-referenced path the beam half-angle is `beam_cutoff = ln(1/power_threshold) / beam_coef`, so a **lower** `power_threshold` makes the beam **wider** (more of the exponential tail is counted as the beam). At the default `0.5` this is the half-power half-beamwidth.
+- **`horizontal_roi_factor`** / **`vertical_roi_factor`**: Multipliers on the horizontal/vertical grid increment setting the grid-cell half-width/half-height for gate inclusion. Optional; default `0.75` each.
+- **`range_floor`** / **`range_weight_max`**: Numerical guards on the near-radar `range_weight` singularity — a lower clamp (metres) on the slant-range divisor and an upper clamp on the resulting weight. Optional; defaults `1.0` and `10.0`.
 - **`missing_key`**: The moment used to determine if a gate has valid data (e.g., "SQI").
 - **`valid_key`**: The moment used to check for non-missing data (e.g., "DBZ").
 

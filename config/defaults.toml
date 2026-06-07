@@ -79,7 +79,18 @@ rhohv_threshold      = 0.7
 
 [gridding]
 beam_inflation  = 0.01
+# Beam power level defining the beam edge. The 3D edge-referenced path sets the
+# beam half-angle to beam_cutoff = ln(1/power_threshold)/beam_coef, so LOWER
+# power_threshold ⇒ WIDER beam (more of the exponential tail counts). 0.5 is the
+# half-power half-beamwidth (legacy behaviour).
 power_threshold = 0.5
+# ROI = grid increment × factor; the box half-width/half-height for gate
+# inclusion. Optional (default 0.75 each).
+horizontal_roi_factor = 0.75
+vertical_roi_factor   = 0.75
+# Numerical guards on the near-radar range_weight singularity. Optional.
+range_floor      = 1.0    # metres; lower clamp on the slant-range divisor
+range_weight_max = 10.0   # upper clamp on range_weight
 
 # Stage-1 dual-Doppler retrieval QC. Quality is judged ONLY by the per-component
 # normalized uncertainty (CEDRIC DTEST style), evaluated IN THE OUTPUT FRAME;

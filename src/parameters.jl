@@ -143,8 +143,25 @@ Engine-level gridding knobs shared across all gridding drivers.
 
 # Fields
 - `beam_inflation::Float64`: factor for inflating ROI with distance from radar
-  (0.0 disables).
-- `power_threshold::Float64`: minimum beam power weight for a gate to contribute.
+  (0.0 disables). Used by the 2D/legacy gridding drivers; the 3D product path
+  derives its per-range reach from the beam footprint instead.
+- `power_threshold::Float64`: the beam power level that defines the beam edge. In
+  the 3D edge-referenced path the beam half-angle is
+  `beam_cutoff = ln(1/power_threshold) / beam_coef`, so **lower `power_threshold`
+  ⇒ wider beam** (more of the exponential tail is counted as "the beam"). At the
+  default `0.5` this is the half-power half-beamwidth, reproducing the legacy
+  behaviour.
+- `horizontal_roi_factor::Float64`: multiplier on the horizontal grid increment
+  setting the box half-width for gate inclusion (default `0.75`).
+- `vertical_roi_factor::Float64`: multiplier on the vertical grid increment
+  setting the box half-height for gate inclusion (default `0.75`).
+- `range_floor::Float64`: lower clamp (metres) on the gate slant range used as
+  the `range_weight` divisor, guarding the near-radar singularity (default `1.0`).
+- `range_weight_max::Float64`: upper clamp on `range_weight`, bounding the
+  near-radar singularity (default `10.0`).
+
+The four `*_factor`/`range_*` knobs are **optional** in a config file (they fall
+back to the defaults above when omitted) so existing configs still load.
 
 The two gate-role moments are no longer configured here: the field whose
 presence proves a gate was scanned (formerly `missing_key`) and the field
@@ -153,8 +170,12 @@ declared as the `define_scanned` / `define_detection` tags in `[fields]` and
 resolved via [`field_with_tag`](@ref).
 """
 Base.@kwdef struct GriddingParameters
-    beam_inflation::Float64  = 0.01
-    power_threshold::Float64 = 0.5
+    beam_inflation::Float64        = 0.01
+    power_threshold::Float64       = 0.5
+    horizontal_roi_factor::Float64 = 0.75
+    vertical_roi_factor::Float64   = 0.75
+    range_floor::Float64           = 1.0
+    range_weight_max::Float64      = 10.0
 end
 
 """
@@ -664,7 +685,29 @@ function _gridding_from_dict(d::AbstractDict)
             "(was `valid_key`) in `[fields]`. " *
             "Run `print_config(\"template.toml\")` for the new template."))
     end
-    return _struct_from_dict(GriddingParameters, d; section="gridding")
+    # The ROI factors and numerical guards are optional (default when absent) so
+    # configs predating them still load; `beam_inflation`/`power_threshold` stay
+    # required, matching the rest of the strict loader.
+    required = (:beam_inflation, :power_threshold)
+    optional = (:horizontal_roi_factor, :vertical_roi_factor, :range_floor,
+                :range_weight_max)
+    allowed = (required..., optional...)
+    keysyms = Set(Symbol.(keys(d)))
+    unknown = setdiff(keysyms, Set(allowed))
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[gridding]`. " *
+        "Allowed keys: $(join(allowed, ", "))"))
+    missing_keys = setdiff(Set(required), keysyms)
+    isempty(missing_keys) || throw(ArgumentError(
+        "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
+        "`[gridding]`. Run `print_config(\"template.toml\")` for a complete " *
+        "template."))
+    kw = Dict{Symbol,Any}()
+    for (k, v) in d
+        sym = Symbol(k)
+        kw[sym] = _coerce_field(GriddingParameters, sym, v)
+    end
+    return GriddingParameters(; kw...)
 end
 
 # Build IOParameters (mandatory). Targeted migration diagnostic for the old

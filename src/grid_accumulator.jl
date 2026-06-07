@@ -728,8 +728,11 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     ny = length(g.y_axis)
     nz = length(g.z_axis)
 
-    # ROI mirrors the legacy per-driver derivations (xincr * 0.75 etc.). For
-    # the accumulator path we read these from the grid axes directly.
+    # ROI = grid increment × configurable factor (default 0.75, the legacy
+    # per-driver value). For the accumulator path we read the increments from
+    # the grid axes directly.
+    h_roi_factor = gd.horizontal_roi_factor
+    v_roi_factor = gd.vertical_roi_factor
     horizontal_roi = if g.shape === :latlon_3d
         # Convert degincr → meters using the SAMURAI approximation centered at
         # the reference latitude. Matches the legacy `grid_radar_latlon_volume`
@@ -740,13 +743,13 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
         deg_km = sqrt(fac_lat^2 + fac_lon^2)
         degincr = ny >= 2 ? (g.lat_axis[2] - g.lat_axis[1]) :
                   (nx >= 2 ? (g.lon_axis[2] - g.lon_axis[1]) : 0.01)
-        deg_km * 1000.0 * degincr * 0.75
+        deg_km * 1000.0 * degincr * h_roi_factor
     else
         xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
-        xincr * 0.75
+        xincr * h_roi_factor
     end
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
-    vertical_roi = zincr * 0.75
+    vertical_roi = zincr * v_roi_factor
 
     beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
@@ -892,8 +895,8 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
     rincr = nr >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
-    horizontal_roi = rincr * 0.75
-    vertical_roi   = zincr * 0.75
+    horizontal_roi = rincr * gd.horizontal_roi_factor
+    vertical_roi   = zincr * gd.vertical_roi_factor
 
     beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
@@ -1019,7 +1022,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     n_fields = length(accum.fields)
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
-    horizontal_roi  = xincr * 0.75
+    horizontal_roi  = xincr * gd.horizontal_roi_factor
     beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
 
@@ -1127,7 +1130,7 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
     n_fields = length(accum.fields)
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
-    horizontal_roi  = xincr * 0.75
+    horizontal_roi  = xincr * gd.horizontal_roi_factor
     beam_inflation  = gd.beam_inflation
 
     # Find the valid_key column index for the max selection. If the valid_key
@@ -1235,7 +1238,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     n_gate_total = size(beams, 1)
 
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
-    vertical_roi    = zincr * 0.75
+    vertical_roi    = zincr * gd.vertical_roi_factor
     beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
 

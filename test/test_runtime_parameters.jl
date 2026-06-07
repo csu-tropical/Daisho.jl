@@ -190,6 +190,78 @@ using TOML
         end
     end
 
+    @testset "Gridding ROI factors + guards: defaults" begin
+        p = DaishoParameters()
+        @test p.gridding.horizontal_roi_factor == 0.75
+        @test p.gridding.vertical_roi_factor == 0.75
+        @test p.gridding.range_floor == 1.0
+        @test p.gridding.range_weight_max == 10.0
+    end
+
+    @testset "Gridding ROI factors/guards are optional (absent → defaults)" begin
+        # A config predating these knobs (only beam_inflation/power_threshold)
+        # must still load, with the new fields defaulted.
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["gridding"] = Dict("beam_inflation" => 0.01,
+                                    "power_threshold" => 0.5)
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
+            p = DaishoParameters(path)
+            @test p.gridding.horizontal_roi_factor == 0.75
+            @test p.gridding.vertical_roi_factor == 0.75
+            @test p.gridding.range_floor == 1.0
+            @test p.gridding.range_weight_max == 10.0
+        end
+    end
+
+    @testset "Gridding ROI factors/guards override lands" begin
+        mktemp() do path, io
+            close(io)
+            _write_full_config(path, Dict(
+                "gridding" => Dict("horizontal_roi_factor" => 0.9,
+                                   "vertical_roi_factor" => 0.6,
+                                   "range_floor" => 5.0,
+                                   "range_weight_max" => 3.0)))
+            p = DaishoParameters(path)
+            @test p.gridding.horizontal_roi_factor == 0.9
+            @test p.gridding.vertical_roi_factor == 0.6
+            @test p.gridding.range_floor == 5.0
+            @test p.gridding.range_weight_max == 3.0
+        end
+    end
+
+    @testset "Unknown [gridding] key raises ArgumentError" begin
+        mktemp() do path, io
+            close(io)
+            _write_full_config(path, Dict(
+                "gridding" => Dict("not_a_real_key" => 1.0)))
+            err = try
+                DaishoParameters(path); nothing
+            catch e; e end
+            @test err isa ArgumentError
+            @test occursin("[gridding]", err.msg)
+        end
+    end
+
+    @testset "Missing required [gridding] key raises ArgumentError" begin
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["gridding"] = Dict("beam_inflation" => 0.01)  # no power_threshold
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
+            err = try
+                DaishoParameters(path); nothing
+            catch e; e end
+            @test err isa ArgumentError
+            @test occursin("power_threshold", err.msg)
+        end
+    end
+
     @testset "Missing [grid.latlon] while [grid.cartesian] present → defaulted" begin
         mktemp() do path, io
             close(io)
