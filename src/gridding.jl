@@ -323,7 +323,7 @@ function appx_inverse_projection(reference_latitude::AbstractFloat, reference_lo
 end
 
 """
-    grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
+    grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar volume scan onto a 3D Cartesian grid and write the result to a NetCDF file.
 
@@ -346,7 +346,6 @@ writes the output via `write_gridded_radar_volume`.
 - `zmin`: Minimum z-coordinate of the grid (meters).
 - `zincr`: Grid spacing in z (meters).
 - `zdim`: Number of grid points in z.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar. Set to 0.0 to disable.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key`: Moment name used to determine if a gate has valid signal (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
@@ -380,7 +379,7 @@ function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_fil
 end
 
 """
-    grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
+    grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar volume scan onto a 3D latitude-longitude grid and write the result to a NetCDF file.
 
@@ -402,7 +401,6 @@ grid increment. Horizontal radius of influence is computed from the degree incre
 - `zmin`: Minimum altitude (meters).
 - `zincr`: Vertical grid spacing (meters).
 - `zdim`: Number of vertical grid levels.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
@@ -448,7 +446,7 @@ function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, out
 end
 
 """
-    grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
+    grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
 
 Grid a radar RHI (Range-Height Indicator) scan onto a 2D range-height grid and write to a NetCDF file.
 
@@ -467,7 +465,6 @@ the output via `write_gridded_radar_rhi`.
 - `rhi_zmin`: Minimum altitude (meters).
 - `rhi_zincr`: Vertical grid spacing (meters).
 - `rhi_zdim`: Number of vertical grid points.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key::String`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name used for valid-data gating (default `"DBZ"`).
@@ -500,7 +497,7 @@ function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, 
 end
 
 """
-    grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
+    grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar PPI (Plan Position Indicator) scan onto a 2D Cartesian grid and write to a NetCDF file.
 
@@ -519,7 +516,6 @@ via `write_gridded_radar_ppi`.
 - `ymin`: Minimum y-coordinate of the grid (meters).
 - `yincr`: Grid spacing in y (meters).
 - `ydim`: Number of grid points in y.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
@@ -552,7 +548,7 @@ function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, 
 end
 
 """
-    grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0, metadata=MetadataParameters())
+    grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0, metadata=MetadataParameters())
 
 Grid a radar composite (column-maximum) onto a 2D Cartesian grid and write to a NetCDF file.
 
@@ -571,7 +567,6 @@ at each horizontal grid point across all elevations. The output is written via `
 - `ymin`: Minimum y-coordinate of the grid (meters).
 - `yincr`: Grid spacing in y (meters).
 - `ydim`: Number of grid points in y.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar.
 - `missing_key`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key`: Moment name used for valid-data gating (default `"DBZ"`).
 - `mean_heading`: Mean heading of the platform in degrees (default `-9999.0` for missing).
@@ -603,7 +598,7 @@ function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_
 end
 
 """
-    grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time, column_zmin, column_zincr, column_zdim, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
+    grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time, column_zmin, column_zincr, column_zdim, power_threshold, missing_key="SQI", valid_key="DBZ", metadata=MetadataParameters())
 
 Grid a radar volume into a single vertical column profile and write to a NetCDF file.
 
@@ -620,7 +615,6 @@ profile directly above the radar.
 - `column_zmin`: Minimum altitude of the column (meters).
 - `column_zincr`: Vertical grid spacing (meters).
 - `column_zdim`: Number of vertical grid points.
-- `beam_inflation`: Factor for inflating the radius of influence with distance from the radar.
 - `power_threshold`: Minimum beam power weight below which a gate is excluded.
 - `missing_key::String`: Moment name used for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name used for valid-data gating (default `"DBZ"`).
@@ -652,7 +646,7 @@ function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_fil
 end
 
 """
-    grid_volume(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, vertical_roi, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
+    grid_volume(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, vertical_roi, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
 
 Interpolate radar moment data onto a 3D Cartesian grid using beam-weighted averaging.
 
@@ -671,7 +665,6 @@ schemes as specified by `grid_type_dict`. The function is multithreaded over hor
 - `grid_type_dict::Dict`: Dictionary mapping moment indices to interpolation symbols (`:linear`, `:nearest`, or default).
 - `horizontal_roi::Float64`: Horizontal radius of influence (meters).
 - `vertical_roi::Float64`: Vertical radius of influence (meters).
-- `beam_inflation::Float64`: Factor to inflate the radius of influence with distance from the radar.
 - `power_threshold::Float64`: Minimum beam power weight for a gate to contribute.
 - `missing_key::String`: Moment name for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name for valid-data gating (default `"DBZ"`).
@@ -815,7 +808,7 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
 end
 
 """
-    grid_rhi(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, vertical_roi, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
+    grid_rhi(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, vertical_roi, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
 
 Interpolate radar moment data onto a 2D range-height grid for an RHI scan using beam-weighted averaging.
 
@@ -832,7 +825,6 @@ The function is multithreaded over range grid points.
 - `grid_type_dict::Dict`: Dictionary mapping moment indices to interpolation symbols.
 - `horizontal_roi::Float64`: Range radius of influence (meters).
 - `vertical_roi::Float64`: Vertical radius of influence (meters).
-- `beam_inflation::Float64`: Factor to inflate the vertical radius of influence with distance.
 - `power_threshold::Float64`: Minimum beam power weight for a gate to contribute.
 - `missing_key::String`: Moment name for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name for valid-data gating (default `"DBZ"`).
@@ -1002,7 +994,7 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
 end
 
 """
-    grid_ppi(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
+    grid_ppi(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
 
 Interpolate radar moment data onto a 2D Cartesian grid for a PPI scan using beam-weighted averaging.
 
@@ -1018,7 +1010,6 @@ multithreaded over horizontal grid points.
 - `moment_dict::Dict`: Dictionary mapping moment names to integer indices.
 - `grid_type_dict::Dict`: Dictionary mapping moment indices to interpolation symbols.
 - `horizontal_roi::Float64`: Horizontal radius of influence (meters).
-- `beam_inflation::Float64`: Factor to inflate the radius of influence with distance from the radar.
 - `power_threshold::Float64`: Minimum beam power weight for a gate to contribute.
 - `missing_key::String`: Moment name for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name for valid-data gating (default `"DBZ"`).
@@ -1169,7 +1160,7 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
 end
 
 """
-    grid_composite(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, beam_inflation, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
+    grid_composite(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, horizontal_roi, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
 
 Create a 2D composite (column-maximum) grid from a radar volume.
 
@@ -1186,7 +1177,6 @@ over horizontal grid points.
 - `moment_dict::Dict`: Dictionary mapping moment names to integer indices.
 - `grid_type_dict::Dict`: Dictionary mapping moment indices to interpolation symbols (not used for composite, but kept for interface consistency).
 - `horizontal_roi::Float64`: Horizontal radius of influence (meters).
-- `beam_inflation::Float64`: Factor to inflate the radius of influence with distance from the radar.
 - `missing_key::String`: Moment name for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name used to find the maximum value gate (default `"DBZ"`).
 
@@ -1278,7 +1268,7 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
 end
 
 """
-    grid_column(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, vertical_roi, beam_inflation, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
+    grid_column(reference_latitude, reference_longitude, gridpoints, radar_volume, moment_dict, grid_type_dict, vertical_roi, power_threshold, missing_key="SQI", valid_key="DBZ") -> Tuple{Array{Float64}, Array{Float64}}
 
 Interpolate radar moment data onto a 1D vertical column grid using beam-weighted averaging.
 
@@ -1294,7 +1284,6 @@ directly above the radar. The function is multithreaded over vertical grid level
 - `moment_dict::Dict`: Dictionary mapping moment names to integer indices.
 - `grid_type_dict::Dict`: Dictionary mapping moment indices to interpolation symbols.
 - `vertical_roi::Float64`: Vertical radius of influence (meters).
-- `beam_inflation::Float64`: Factor to inflate the vertical radius of influence with altitude.
 - `power_threshold::Float64`: Minimum beam power weight for a gate to contribute.
 - `missing_key::String`: Moment name for signal quality gating (default `"SQI"`).
 - `valid_key::String`: Moment name for valid-data gating (default `"DBZ"`).

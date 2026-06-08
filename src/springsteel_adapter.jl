@@ -595,7 +595,7 @@ end
 
 """
     grid_radar_volume_spectral(radar_volume, moment_dict, grid_type_dict,
-        output_file, index_time, sgrid, beam_inflation, power_threshold;
+        output_file, index_time, sgrid, power_threshold;
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
         institution="", source="", include_derivatives=false)
 
@@ -617,7 +617,6 @@ This is the high-level spectral gridding workflow:
 - `output_file`: Path to the output NetCDF file.
 - `index_time`: Reference time for the output dataset.
 - `sgrid`: Pre-configured `SpringsteelGrid` (from `create_radar_grid`).
-- `beam_inflation`: Factor for inflating ROI with distance from radar.
 - `power_threshold`: Minimum beam power weight.
 - `missing_key`, `valid_key`: Moment names for QC gating.
 - `heading`: Platform heading in degrees.
@@ -673,7 +672,7 @@ end
 
 """
     grid_radar_ppi_spectral(radar_volume, moment_dict, grid_type_dict,
-        output_file, index_time, sgrid, beam_inflation, power_threshold;
+        output_file, index_time, sgrid, power_threshold;
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
         institution="", source="", include_derivatives=false)
 
@@ -717,7 +716,7 @@ end
 
 """
     grid_radar_column_spectral(radar_volume, moment_dict, grid_type_dict,
-        output_file, index_time, sgrid, beam_inflation, power_threshold;
+        output_file, index_time, sgrid, power_threshold;
         missing_key="SQI", valid_key="DBZ",
         institution="", source="", include_derivatives=false)
 

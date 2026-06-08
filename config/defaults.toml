@@ -78,9 +78,8 @@ spectrum_width_max   = 8.0
 rhohv_threshold      = 0.7
 
 [gridding]
-beam_inflation  = 0.01
-# Beam power level defining the beam edge. The 3D edge-referenced path sets the
-# beam half-angle to beam_cutoff = ln(1/power_threshold)/beam_coef, so LOWER
+# Beam power level defining the beam edge. The edge-referenced gate inclusion sets
+# the beam half-angle to beam_cutoff = ln(1/power_threshold)/beam_coef, so LOWER
 # power_threshold ⇒ WIDER beam (more of the exponential tail counts). 0.5 is the
 # half-power half-beamwidth (legacy behaviour).
 power_threshold = 0.5

@@ -23,7 +23,6 @@ spectrum_width_max   = 8.0
 rhohv_threshold      = 0.7
 
 [gridding]
-beam_inflation  = 0.01
 power_threshold = 0.5
 
 [grid.cartesian]

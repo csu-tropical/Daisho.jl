@@ -41,8 +41,8 @@ using TOML
         @test p.qc.snr_threshold == 6.0
         @test p.qc.spectrum_width_max == 8.0
         @test p.qc.rhohv_threshold == 0.7
-        @test p.gridding.beam_inflation == 0.01
         @test p.gridding.power_threshold == 0.5
+        @test !hasproperty(p.gridding, :beam_inflation)   # deprecated + removed
         @test Daisho.field_with_tag(p, :define_scanned) == "SQI"
         @test Daisho.field_with_tag(p, :define_detection) == "DBZ"
         @test p.io.fill_value == -32768.0
@@ -198,9 +198,10 @@ using TOML
         @test p.gridding.range_weight_max == 10.0
     end
 
-    @testset "Gridding ROI factors/guards are optional (absent → defaults)" begin
-        # A config predating these knobs (only beam_inflation/power_threshold)
-        # must still load, with the new fields defaulted.
+    @testset "Gridding ROI factors/guards optional; beam_inflation ignored" begin
+        # A config predating these knobs (only the deprecated beam_inflation +
+        # power_threshold) must still load: the new fields default and the
+        # deprecated beam_inflation key is accepted and silently ignored.
         mktemp() do path, io
             close(io)
             base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
@@ -210,6 +211,8 @@ using TOML
                 TOML.print(f, base)
             end
             p = DaishoParameters(path)
+            @test p.gridding.power_threshold == 0.5
+            @test !hasproperty(p.gridding, :beam_inflation)   # accepted + ignored
             @test p.gridding.horizontal_roi_factor == 0.75
             @test p.gridding.vertical_roi_factor == 0.75
             @test p.gridding.range_floor == 1.0
