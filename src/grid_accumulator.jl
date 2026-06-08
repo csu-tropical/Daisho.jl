@@ -361,8 +361,10 @@ end
 _sweep_balltree_yx(radar_zyx::AbstractArray, beams::AbstractArray) =
     BallTree(_sweep_gate_yx(radar_zyx, beams))
 
-# 1D radial BallTree on surface distance from the reference origin.
-function _sweep_balltree_r(radar_zyx::AbstractArray, beams::AbstractArray)
+# Surface radial distance (from the reference origin) of every gate, as a 1×n
+# matrix. Shared by the radial BallTree builder and the edge-referenced RHI
+# inclusion check (which needs each gate's radial distance for d_r).
+function _sweep_gate_r(radar_zyx::AbstractArray, beams::AbstractArray)
     n = size(beams, 1)
     gate_r = zeros(Float64, 1, n)
     for i in 1:n
@@ -371,8 +373,12 @@ function _sweep_balltree_r(radar_zyx::AbstractArray, beams::AbstractArray)
         x = radar_zyx[i][3] + surface_range * sin(beams[i, 1])
         gate_r[i] = sqrt(x^2 + y^2)
     end
-    return BallTree(gate_r)
+    return gate_r
 end
+
+# 1D radial BallTree on surface distance from the reference origin.
+_sweep_balltree_r(radar_zyx::AbstractArray, beams::AbstractArray) =
+    BallTree(_sweep_gate_r(radar_zyx, beams))
 
 # Return the gate value at (ray, gate) for a named field, with NaN treated as
 # missing. Returns `missing` if the sweep doesn't carry the field.
@@ -551,13 +557,17 @@ function grid_sweep!(accum::FieldAccumulator, sweep::SweepGroup,
         _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude,
                                  ref_altitude; beam_width = beam_width)
     elseif shape === :rhi_2d
-        _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
+                            beam_width = beam_width)
     elseif shape === :ppi_2d
-        _grid_sweep_ppi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_ppi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
+                            beam_width = beam_width)
     elseif shape === :composite_2d
-        _grid_sweep_composite_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_composite_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
+                                  beam_width = beam_width)
     elseif shape === :column_1d
-        _grid_sweep_column_1d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude)
+        _grid_sweep_column_1d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
+                               beam_width = beam_width)
     else
         throw(ArgumentError("grid_sweep!: unsupported shape $shape"))
     end
@@ -945,17 +955,19 @@ end
 function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               p::DaishoParameters,
                               ref_latitude::Float64, ref_longitude::Float64,
-                              ref_altitude::Float64)
+                              ref_altitude::Float64; beam_width::Real = 1.0)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
     valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
+    beam_coef   = _beam_coef(beam_width)
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, _ =
         _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = _sweep_balltree_r(radar_zyx, beams)
+    gate_r   = _sweep_gate_r(radar_zyx, beams)   # surface radial dist, reused for d_r
+    balltree = BallTree(gate_r)
 
     nz = length(g.z_axis)
     nr = length(g.x_axis)   # range bins stored in x_axis for the RHI shape
@@ -966,8 +978,10 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     horizontal_roi = rincr * gd.horizontal_roi_factor
     vertical_roi   = zincr * gd.vertical_roi_factor
 
-    beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
+    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
 
     # Use rhi_azimuth if explicitly supplied, else fall back to sweep.azimuth[1].
     az_rhi = if g.rhi_azimuth !== nothing
@@ -981,13 +995,11 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
         y_point = r_point * cos(az_rhi)
         x_point = r_point * sin(az_rhi)
 
-        eff_h_roi = horizontal_roi
-        eff_v_roi = vertical_roi
+        # Conservative edge-referenced query radius (radial); per-gate d_r/d_v
+        # checks below trim it (see `_gate_grid_geometry` for the 3D rationale).
         origin_dist = euclidean(r_point, [0.0])
-        if beam_inflation > 0.0
-            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
-        end
-        gates = inrange(balltree, [origin_dist], eff_h_roi)
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, [origin_dist], R_q)
         isempty(gates) && continue
 
         for k_z in 1:nz
@@ -995,7 +1007,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
             any_scanned = false
             for g_flat in gates
-                if abs(beams[g_flat, 4] - grid_z) > eff_v_roi
+                if abs(beams[g_flat, 4] - grid_z) > vertical_roi + beams[g_flat, 3] * s
                     continue
                 end
                 ray  = _ray_of(g_flat, n_gates_s)
@@ -1027,15 +1039,22 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                 abs(sine_h) < 1.0 || continue
                 gridpt_el = asin(sine_h)
 
+                # Edge-referenced inclusion (radial × vertical): the beam
+                # footprint must reach the cell in both directions. No /r.
+                footprint = r * s
+                d_r = abs(gate_r[1, g_flat] - origin_dist)
+                (d_r <= horizontal_roi + footprint &&
+                 abs(beams[g_flat, 4] - grid_z) <= vertical_roi + footprint) || continue
+
                 dx = x_point - radar_zyx[g_flat][3]
                 dy = y_point - radar_zyx[g_flat][2]
                 angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
                                               [beams[g_flat, 1], gridpt_el])
-                angle_weight = exp(-angle_diff * 79.43)
-                angle_weight < power_threshold && (angle_weight = 0.0)
+                angle_weight = exp(-angle_diff * beam_coef)
 
                 gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
-                range_weight = gridpt_r / r
+                r_eff = max(r, range_floor)
+                range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
                 if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
                     range_weight = 0.0
                 end
@@ -1073,17 +1092,19 @@ end
 function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               p::DaishoParameters,
                               ref_latitude::Float64, ref_longitude::Float64,
-                              ref_altitude::Float64)
+                              ref_altitude::Float64; beam_width::Real = 1.0)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
     valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
+    beam_coef   = _beam_coef(beam_width)
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     _, radar_zyx, beams, n_gates_s, _ =
         _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = _sweep_balltree_yx(radar_zyx, beams)
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)
+    balltree = BallTree(gate_yx)
 
     nx = length(g.x_axis)
     ny = length(g.y_axis)
@@ -1091,19 +1112,18 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
-    beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
+    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
         yx_point = [g.y_axis[j_y], g.x_axis[i_x]]
 
-        eff_h_roi = horizontal_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_roi)
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
         isempty(gates) && continue
 
         # Any in-range gate with non-missing missing_key → coverage 1.
@@ -1132,6 +1152,12 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
             vk = _gate_value(sweep, valid_key, ray, gate_in)
             ismissing(vk) && continue
 
+            r = beams[g_flat, 3]
+            # Edge-referenced horizontal inclusion (surface footprint), no /r.
+            dh_y = gate_yx[1, g_flat] - g.y_axis[j_y]
+            dh_x = gate_yx[2, g_flat] - g.x_axis[i_x]
+            sqrt(dh_y^2 + dh_x^2) <= horizontal_roi + r * s || continue
+
             dx = g.x_axis[i_x] - radar_zyx[g_flat][3]
             dy = g.y_axis[j_y] - radar_zyx[g_flat][2]
             gridpt_az = (pi / 2.0) - atan(dy, dx)
@@ -1139,12 +1165,11 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
             angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
                                           [gridpt_az, beams[g_flat, 2]])
-            angle_weight = exp(-angle_diff * 79.43)
-            angle_weight < power_threshold && (angle_weight = 0.0)
+            angle_weight = exp(-angle_diff * beam_coef)
 
-            r = beams[g_flat, 3]
             gridpt_r = sqrt(dx^2 + dy^2)
-            range_weight = gridpt_r / r
+            r_eff = max(r, range_floor)
+            range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
             if abs(gridpt_r - r) > horizontal_roi
                 range_weight = 0.0
             end
@@ -1181,17 +1206,19 @@ end
 function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
                                     p::DaishoParameters,
                                     ref_latitude::Float64, ref_longitude::Float64,
-                                    ref_altitude::Float64)
+                                    ref_altitude::Float64; beam_width::Real = 1.0)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
     valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
+    beam_coef   = _beam_coef(beam_width)
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     _, radar_zyx, beams, n_gates_s, _ =
         _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
-    balltree = _sweep_balltree_yx(radar_zyx, beams)
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)
+    balltree = BallTree(gate_yx)
 
     nx = length(g.x_axis)
     ny = length(g.y_axis)
@@ -1199,7 +1226,10 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
-    beam_inflation  = gd.beam_inflation
+    # Composite has no beam-pattern/range weighting (it picks the column max), but
+    # gate inclusion is still edge-referenced via the beam footprint.
+    beam_cutoff = _beam_cutoff(gd.power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     # Find the valid_key column index for the max selection. If the valid_key
     # field isn't in the accumulator, composite produces no contribution.
@@ -1209,12 +1239,9 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
         j_y, i_x = ii.I
         yx_point = [g.y_axis[j_y], g.x_axis[i_x]]
 
-        eff_h_roi = horizontal_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_roi = max(beam_inflation * origin_dist, horizontal_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_roi)
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
         isempty(gates) && continue
 
         any_scanned = false
@@ -1238,7 +1265,8 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
         valid_idx === nothing && continue
 
-        # Scan in-range gates, pick the one with the largest valid_key value.
+        # Scan in-range gates (edge-referenced footprint), pick the one with the
+        # largest valid_key value.
         best_val = -Inf
         best_flat = 0
         for g_flat in gates
@@ -1246,6 +1274,10 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
             gate_in = _gate_in_ray(g_flat, n_gates_s)
             vk = _gate_value(sweep, valid_key, ray, gate_in)
             ismissing(vk) && continue
+            r = beams[g_flat, 3]
+            dh_y = gate_yx[1, g_flat] - g.y_axis[j_y]
+            dh_x = gate_yx[2, g_flat] - g.x_axis[i_x]
+            sqrt(dh_y^2 + dh_x^2) <= horizontal_roi + r * s || continue
             if vk > best_val
                 best_val = vk
                 best_flat = g_flat
@@ -1290,11 +1322,12 @@ end
 function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
                                  p::DaishoParameters,
                                  ref_latitude::Float64, ref_longitude::Float64,
-                                 ref_altitude::Float64)
+                                 ref_altitude::Float64; beam_width::Real = 1.0)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
     valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
+    beam_coef   = _beam_coef(beam_width)
 
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
@@ -1307,21 +1340,19 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
 
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
     vertical_roi    = zincr * gd.vertical_roi_factor
-    beam_inflation  = gd.beam_inflation
     power_threshold = gd.power_threshold
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
+    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
 
     Threads.@threads for k_z in 1:nz
         grid_z = g.z_axis[k_z]
-        eff_v_roi = vertical_roi
-        origin_dist = euclidean(grid_z, [0.0])
-        if beam_inflation > 0.0
-            eff_v_roi = max(beam_inflation * origin_dist, vertical_roi)
-        end
 
-        # Coverage: any gate in vertical range with non-missing missing_key.
+        # Coverage: any gate within the edge-referenced vertical reach with
+        # non-missing missing_key.
         any_scanned = false
         for g_flat in 1:n_gate_total
-            abs(beams[g_flat, 4] - grid_z) > eff_v_roi && continue
+            abs(beams[g_flat, 4] - grid_z) > vertical_roi + beams[g_flat, 3] * s && continue
             ray  = _ray_of(g_flat, n_gates_s)
             gate = _gate_in_ray(g_flat, n_gates_s)
             if !ismissing(_gate_value(sweep, missing_key, ray, gate))
@@ -1351,13 +1382,16 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
             abs(sine_h) < 1.0 || continue
             gridpt_el = asin(sine_h)
 
+            # Edge-referenced vertical inclusion (beam footprint), no /r.
+            abs(beams[g_flat, 4] - grid_z) <= vertical_roi + r * s || continue
+
             angle_diff = spherical_angle([beams[g_flat, 1], beams[g_flat, 2]],
                                           [beams[g_flat, 1], gridpt_el])
-            angle_weight = exp(-angle_diff * 79.43)
-            angle_weight < power_threshold && (angle_weight = 0.0)
+            angle_weight = exp(-angle_diff * beam_coef)
 
             gridpt_r = grid_z / cos(beams[g_flat, 2])
-            range_weight = gridpt_r / r
+            r_eff = max(r, range_floor)
+            range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
             if abs(gridpt_r - r) > vertical_roi
                 range_weight = 0.0
             end

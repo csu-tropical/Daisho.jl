@@ -724,6 +724,47 @@ end
         @test cover(_with_gridding(GriddingParameters(vertical_roi_factor = 3.0))) >= n_base
     end
 
+    @testset "2D/1D workers: beamwidth widens edge-referenced coverage" begin
+        # A wider beam (2°) admits a superset of gates ⇒ at least as many covered
+        # cells in every 2D/1D shape. This also proves beam_width is plumbed into
+        # the 2D/1D workers (it used to be hard-coded at 79.43 / 1°).
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        rl, ro, ra = Float64(v.latitude), Float64(v.longitude), Float64(v.altitude)
+
+        rng = collect(Float64, 0.0:150.0:1500.0)
+        xy  = collect(Float64, -1500.0:300.0:1500.0)
+        zlo = collect(Float64, 0.0:60.0:120.0)
+        specs = (
+            GridSpec(shape = :ppi_2d, reference_latitude = v.latitude,
+                reference_longitude = v.longitude, x_axis = xy, y_axis = xy,
+                z_axis = [0.0]),
+            GridSpec(shape = :composite_2d, reference_latitude = v.latitude,
+                reference_longitude = v.longitude, x_axis = xy, y_axis = xy,
+                z_axis = [0.0]),
+            GridSpec(shape = :rhi_2d, reference_latitude = v.latitude,
+                reference_longitude = v.longitude, x_axis = rng, y_axis = [0.0],
+                z_axis = zlo, rhi_azimuth = Float64(v.sweeps[1].azimuth[1])),
+            GridSpec(shape = :column_1d, reference_latitude = v.latitude,
+                reference_longitude = v.longitude, x_axis = [0.0], y_axis = [0.0],
+                z_axis = zlo),
+        )
+        for spec in specs
+            cover(bw) = begin
+                acc = ScalarGridAccumulator(spec, p)
+                for s in eachindex(v.sweeps)
+                    grid_sweep!(acc, v.sweeps[s], p; ref_latitude = rl,
+                        ref_longitude = ro, ref_altitude = ra, beam_width = bw)
+                end
+                count(>(Int8(0)), acc.coverage)
+            end
+            c1 = cover(1.0)
+            c2 = cover(2.0)
+            @test c1 > 0                       # non-vacuous for this shape
+            @test c2 >= c1                     # wider beam ⇒ ≥ coverage
+        end
+    end
+
     @testset "Volume overload reads beamwidth from radar_parameters" begin
         p = DaishoParameters()
         v = synthetic_volume(n_sweeps = 1, n_rays = 72, n_gates = 12)
