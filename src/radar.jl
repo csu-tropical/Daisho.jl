@@ -44,6 +44,11 @@ Base.@kwdef struct radar
     swpstart::Array{Union{Missing, Float32}}
     swpend::Array{Union{Missing, Float32}}
     moments::Array{Union{Missing, Float64}}
+    # Half-power beamwidth (degrees) for the angular gate weighting; carried so the
+    # `radar`-typed gridders derive the correct `beam_coef` instead of assuming 1°.
+    # `@kwdef` default keeps existing keyword constructions working; populated by
+    # `as_legacy_radar` from `radar_parameters.beam_width_h`.
+    beam_width::Float64 = 1.0
 end
 
 """
@@ -89,7 +94,7 @@ function split_sweeps(radar_volume)
         m_end = Int(length(radar_volume.range)*(radar_volume.swpend[i] + 1))
         moments = view(radar_volume.moments, m_start:m_end, :)
         sweeps[i] = radar(scan_name, azimuth, elevation, ew_platform, ns_platform, w_platform, nyquist_velocity, range, time,
-            latitude, longitude, altitude, fixed_angles, swpstart, swpend, moments)
+            latitude, longitude, altitude, fixed_angles, swpstart, swpend, moments, radar_volume.beam_width)
     end
 
     return sweeps

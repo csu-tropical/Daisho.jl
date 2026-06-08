@@ -354,7 +354,7 @@ writes the output via `write_gridded_radar_volume`.
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-        xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, beam_inflation, power_threshold,
+        xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, power_threshold,
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
         metadata::MetadataParameters=MetadataParameters())
 
@@ -370,8 +370,8 @@ function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_fil
     v_roi = zincr * 0.75
 
     radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold,
-        missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, power_threshold,
+        missing_key, valid_key; beam_width = radar_volume.beam_width)
 
     write_gridded_radar_volume(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -410,7 +410,7 @@ grid increment. Horizontal radius of influence is computed from the degree incre
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-    lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, beam_inflation, power_threshold,
+    lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, power_threshold,
     missing_key="SQI", valid_key="DBZ", heading=-9999.0,
     metadata::MetadataParameters=MetadataParameters())
 
@@ -438,8 +438,8 @@ function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, out
     v_roi = zincr * 0.75
 
     radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold,
-        missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, power_threshold,
+        missing_key, valid_key; beam_width = radar_volume.beam_width)
 
     write_gridded_radar_volume(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -474,7 +474,7 @@ the output via `write_gridded_radar_rhi`.
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-        rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, beam_inflation, power_threshold,
+        rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, power_threshold,
         missing_key::String="SQI", valid_key::String="DBZ",
         metadata::MetadataParameters=MetadataParameters())
 
@@ -490,7 +490,8 @@ function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, 
     v_roi = rhi_zincr * 0.75
 
     radar_grid, latlon_grid = grid_rhi(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, h_roi, v_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     write_gridded_radar_rhi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -526,7 +527,7 @@ via `write_gridded_radar_ppi`.
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-        xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation, power_threshold,
+        xmin, xincr, xdim, ymin, yincr, ydim, power_threshold,
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
         metadata::MetadataParameters=MetadataParameters())
 
@@ -541,7 +542,8 @@ function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, 
     h_roi = xincr * 0.75
 
     radar_grid, latlon_grid = grid_ppi(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, h_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, h_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -576,7 +578,7 @@ at each horizontal grid point across all elevations. The output is written via `
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-        xmin, xincr, xdim, ymin, yincr, ydim, beam_inflation,
+        xmin, xincr, xdim, ymin, yincr, ydim,
         missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0,
         metadata::MetadataParameters=MetadataParameters())
 
@@ -591,7 +593,8 @@ function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_
     h_roi = xincr * 0.75
 
     radar_grid, latlon_grid = grid_composite(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, h_roi, beam_inflation, missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, h_roi, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -624,7 +627,7 @@ profile directly above the radar.
 - `metadata`: CF-1.12 global attributes forwarded to the writer (default `MetadataParameters()`).
 """
 function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
-    column_zmin, column_zincr, column_zdim, beam_inflation, power_threshold,
+    column_zmin, column_zincr, column_zdim, power_threshold,
     missing_key::String="SQI", valid_key::String="DBZ",
     metadata::MetadataParameters=MetadataParameters())
 
@@ -639,7 +642,8 @@ function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_fil
     v_roi = column_zincr * 0.75
 
     radar_grid, latlon_grid = grid_column(reference_latitude, reference_longitude, gridpoints,
-        radar_volume, moment_dict, grid_type_dict, v_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        radar_volume, moment_dict, grid_type_dict, v_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     write_gridded_radar_column(output_file, index_time, radar_volume.time[1],
         radar_volume.time[end], gridpoints, radar_grid, latlon_grid, moment_dict,
@@ -678,15 +682,20 @@ A tuple `(radar_grid, latlon_grid)` where:
 - `latlon_grid`: A `(ydim, xdim, 2)` array of `[latitude, longitude]` at each horizontal grid point.
 """
 function grid_volume(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, gridpoints::AbstractArray,
-        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, vertical_roi::Float64, beam_inflation::Float64,
-        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ")
+        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, vertical_roi::Float64,
+        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ"; beam_width::Real=1.0)
 
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
 
-    # Create a balltree that has horizontal locations of every gate in Y, X dimension
-    balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
+    # Gate surface positions + horizontal BallTree (shared with the accumulator
+    # path). Edge-referenced beam params for the shared inclusion kernel.
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)
+    balltree = BallTree(gate_yx)
+    beam_coef = _beam_coef(beam_width)
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
     # NOTE: the -32768.0 (true missing) / -9999.0 (undetect) literals here and
@@ -713,113 +722,65 @@ function grid_volume(reference_latitude::AbstractFloat, reference_longitude::Abs
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
 
-        # Find the points within the radius of influence of the horizontal gridpoint
-        eff_h_radius_influence = horizontal_roi
-        eff_v_radius_influence = vertical_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_radius_influence = max(beam_inflation * origin_dist, horizontal_roi)
-            eff_v_radius_influence = max(beam_inflation * origin_dist, vertical_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_radius_influence)
+        # Edge-referenced conservative query radius; the per-gate d_h/d_v checks
+        # inside the shared kernel trim it (see `_gate_grid_geometry`).
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
 
         if !isempty(gates)
 
             # Found some gates that are within range horizontally
             for j in 1:size(gridpoints,1)
 
-                # First check to see whether at least one gate is in range vertically
                 grid_z = gridpoints[j,i,1]
-                min_dist, min_idx = findmin(z -> abs(z - grid_z), beams[gates,4])
-                if min_dist > eff_v_radius_influence
-                    # There is no gate in range of this grid box
-                    continue
-                else
-                    if !ismissing(radar_volume.moments[gates[min_idx], moment_dict[missing_key]])
-                        # There is at least one gate in range so set the flags to -9999
-                        for m in 1:n_moments
-                            radar_grid[m,j,i] = -9999.0
-                        end
+
+                # Coverage: any gate within the edge-referenced vertical reach that
+                # was scanned (missing_key present) ⇒ flag -9999 (in range, scanned).
+                # If none, this grid box is out of range and stays -32768 (missing).
+                any_scanned = false
+                for gate in gates
+                    abs(beams[gate,4] - grid_z) <= vertical_roi + beams[gate,3]*s || continue
+                    if !ismissing(radar_volume.moments[gate, moment_dict[missing_key]])
+                        any_scanned = true
+                        break
                     end
                 end
+                any_scanned || continue
+                for m in 1:n_moments
+                    radar_grid[m,j,i] = -9999.0
+                end
 
-                # Loops through the nearby gates with valid data
-                valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
-                for gate in gates[valid_gates]
+                # Contributions: valid_key gates, weighted via the shared
+                # edge-referenced kernel (identical physics to the 3D accumulator
+                # path; Springsteel's spectral path inherits this through here).
+                for gate in gates
+                    ismissing(radar_volume.moments[gate, moment_dict[valid_key]]) && continue
 
-                    # Calculate the beam intercept to the gridpoint
-                    dz = gridpoints[j,i,1] - radar_zyx[gate][1]
-                    r = beams[gate,3]
+                    _, _, total_weight = _gate_grid_geometry(grid_z, yx_point,
+                        radar_zyx, beams, gate_yx, gate, horizontal_roi,
+                        vertical_roi, beam_cutoff, beam_coef)
+                    total_weight > 0.0 || continue
 
-                    # Calculate the effective elevation of the gridpoint taking into account
-                    # earth curvature and standard refraction
-                    # Sine of the height angle using equation from Doviak and Zrnic (1993)
-                    sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2*r*Reff)
+                    for m in 1:n_moments
+                        if weights[m,j,i] == 0.0
+                            # Initialize the radar grid box with 0 since there is a possibility that the beam hit it
+                            radar_grid[m,j,i] = 0.0
+                        end
 
-                    gridpt_el = missing
-                    if abs(sine_h) < 1.0
-                        gridpt_el = asin(sine_h)
-                    else
-                        # Point is not accessible by the radar?
-                        # I think this is failing because range exceeds height at origin
-                        # A better check is needed, but skip for now
-                        continue
-                    end
-
-                    # Calculate the effective azimuth
-                    dx = yx_point[2] - radar_zyx[gate][3]
-                    dy = yx_point[1] - radar_zyx[gate][2]
-                    gridpt_az = (pi/2.0) - atan(dy, dx)
-                    if gridpt_az < 0
-                        gridpt_az += 2*pi
-                    end
-
-                    # Calculate the spherical angle difference using Haversine formula
-                    angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
-                        [gridpt_az, gridpt_el])
-
-                    # Use the half-power beamwidth to define the beam
-                    # 79.43 = ln(0.5) / (0.5 deg * pi / 180.0)
-                    # Center of beam = 1.0 angle_weight
-                    angle_weight = exp(-angle_diff * 79.43)
-                    if angle_weight < power_threshold
-                        angle_weight = 0
-                    end
-
-                    # Range weighting based on center of gridbox = 1.0 range_weight
-                    gridpt_r = sin(sqrt(dx^2 + dy^2)/Reff) * (Reff + dz) / cos(gridpt_el)
-                    range_weight = gridpt_r / r
-
-		            if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
-                        # If the range is too far away from the grid center, set range_weight to 0
-                        range_weight = 0.0
-                    end
-
-                    # Multiply weights so that center of beam is 1.0
-                    total_weight = range_weight * angle_weight
-
-                    # If there is non-zero weight, add it to the grid box
-                    if total_weight > 0.0
-                        for m in 1:n_moments
-                            if weights[m,j,i] == 0.0
-                                # Initialize the radar grid box with 0 since there is a possibility that the beam hit it
-                                radar_grid[m,j,i] = 0.0
-                            end
-
-                            if !ismissing(radar_volume.moments[gate,m])
-                                if grid_type_dict[m] == :linear
-                                    linear_z = 10.0 ^ (radar_volume.moments[gate,m] / 10.0)
-                                    radar_grid[m,j,i] += total_weight * linear_z
-                                    weights[m,j,i] += total_weight
-                                elseif grid_type_dict[m] == :nearest
-                                    if total_weight > weights[m,j,i]
-                                        radar_grid[m,j,i] = radar_volume.moments[gate,m]
-                                        weights[m,j,i] = total_weight
-                                    end
-                                else
-                                    radar_grid[m,j,i] += total_weight * radar_volume.moments[gate,m]
-                                    weights[m,j,i] += total_weight
+                        if !ismissing(radar_volume.moments[gate,m])
+                            if grid_type_dict[m] == :linear
+                                linear_z = 10.0 ^ (radar_volume.moments[gate,m] / 10.0)
+                                radar_grid[m,j,i] += total_weight * linear_z
+                                weights[m,j,i] += total_weight
+                            elseif grid_type_dict[m] == :nearest
+                                if total_weight > weights[m,j,i]
+                                    radar_grid[m,j,i] = radar_volume.moments[gate,m]
+                                    weights[m,j,i] = total_weight
                                 end
+                            else
+                                radar_grid[m,j,i] += total_weight * radar_volume.moments[gate,m]
+                                weights[m,j,i] += total_weight
                             end
                         end
                     end
@@ -882,15 +843,19 @@ A tuple `(radar_grid, latlon_grid)` where:
 - `latlon_grid`: An `(rdim, 2)` array of `[latitude, longitude]` along the RHI azimuth.
 """
 function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, gridpoints::AbstractArray,
-        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, vertical_roi::Float64, beam_inflation::Float64,
-        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ")
+        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, vertical_roi::Float64,
+        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ"; beam_width::Real=1.0)
 
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
 
-    # Create a balltree that has horizontal locations of every gate in Z, X dimension
-    balltree = radar_balltree_r(radar_volume, radar_zyx, beams)
+    # Surface radial distance + 1D BallTree (shared with the accumulator path).
+    gate_r   = _sweep_gate_r(radar_zyx, beams)
+    balltree = BallTree(gate_r)
+    beam_coef = _beam_coef(beam_width)
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
     n_moments = length(moment_dict)
@@ -917,88 +882,68 @@ function grid_rhi(reference_latitude::AbstractFloat, reference_longitude::Abstra
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
 
-        # Find the points within the radius of influence of the horizontal gridpoint
-        eff_h_radius_influence = horizontal_roi
-        eff_v_radius_influence = vertical_roi
+        # Edge-referenced conservative radial query radius; per-gate d_r/d_v
+        # checks below trim it.
         origin_dist = euclidean(r_point, [0.0])
-        if beam_inflation > 0.0
-            # No beam inflation in horizontal in this case since we are gridding in range
-            eff_v_radius_influence = max(beam_inflation * origin_dist, vertical_roi)
-        end
-
-        gates = inrange(balltree, [ origin_dist ], eff_h_radius_influence)
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, [ origin_dist ], R_q)
         if !isempty(gates)
 
             # Found some gates that are within range horizontally
             for j in 1:size(gridpoints,1)
 
-                # First check to see whether at least one gate is in range vertically
                 grid_z = gridpoints[j,i,1]
-                min_dist, min_idx = findmin(z -> abs(z - grid_z), beams[gates,4])
-                if min_dist > eff_v_radius_influence
-                    # There is no gate in range of this grid box
-                    continue
-                else
-                    if !ismissing(radar_volume.moments[gates[min_idx], moment_dict[missing_key]])
-                        # There is at least one gate in range so set the flags to -9999
-                        for m in 1:n_moments
-                            radar_grid[m,j,i] = -9999.0
-                        end
+
+                # Coverage: any gate within the edge-referenced vertical reach that
+                # was scanned ⇒ flag -9999. If none, stays -32768 (out of range).
+                any_scanned = false
+                for gate in gates
+                    abs(beams[gate,4] - grid_z) <= vertical_roi + beams[gate,3]*s || continue
+                    if !ismissing(radar_volume.moments[gate, moment_dict[missing_key]])
+                        any_scanned = true
+                        break
                     end
+                end
+                any_scanned || continue
+                for m in 1:n_moments
+                    radar_grid[m,j,i] = -9999.0
                 end
 
                 # Loops through the nearby gates with valid data
-                valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
-                for gate in gates[valid_gates]
+                for gate in gates
+                    ismissing(radar_volume.moments[gate, moment_dict[valid_key]]) && continue
 
                     # Calculate the beam intercept to the gridpoint
                     dz = gridpoints[j,i,1] - radar_zyx[gate][1]
                     r = beams[gate,3]
 
-                    # Calculate the effective elevation of the gridpoint taking into account
-                    # earth curvature and standard refraction
-                    # Sine of the height angle using full equation
+                    # Effective elevation (earth curvature + standard refraction)
                     sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2*r*Reff)
+                    abs(sine_h) < 1.0 || continue
+                    gridpt_el = asin(sine_h)
 
-                    # Use approximation from Gao et al. 2006
-                    #sine_h = (z/r) - (r/(2*Reff))
-
-                    gridpt_el = missing
-                    if abs(sine_h) < 1.0
-                        gridpt_el = asin(sine_h)
-                    else
-                        # Point is not accessible by the radar?
-                        # I think this is failing because range exceeds height at origin
-                        # A better check is needed, but skip for now
-                        continue
-                    end
+                    # Edge-referenced inclusion (radial × vertical), no /r.
+                    footprint = r * s
+                    d_r = abs(gate_r[1,gate] - origin_dist)
+                    (d_r <= horizontal_roi + footprint &&
+                     abs(beams[gate,4] - grid_z) <= vertical_roi + footprint) || continue
 
                     # Don't need azimuth, just dx and dy to get the surface range
                     dx = x_point - radar_zyx[gate][3]
                     dy = y_point - radar_zyx[gate][2]
 
-                    # Calculate the spherical angle difference using Haversine formula
+                    # Elevation-only angular weight (RHI is a vertical slice).
                     angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                         [beams[gate,1], gridpt_el])
+                    angle_weight = exp(-angle_diff * beam_coef)
 
-                    # Use the half-power beamwidth to define the beam
-                    # 79.43 = ln(0.5) / (0.5 deg * pi / 180.0)
-                    # Center of beam = 1.0 angle_weight
-                    angle_weight = exp(-angle_diff * 79.43)
-                    if angle_weight < power_threshold
-                        angle_weight = 0
-                    end
-
-                    # Range weighting based on center of gridbox = 1.0 range_weight
+                    # Range weighting (guarded against the near-radar singularity).
                     gridpt_r = sin(sqrt(dx^2 + dy^2)/Reff) * (Reff + dz) / cos(gridpt_el)
-                    range_weight = gridpt_r / r
-
-		            if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
-                        # If the range is too far away from the grid center, set range_weight to 0
+                    r_eff = max(r, 1.0)
+                    range_weight = clamp(gridpt_r / r_eff, 0.0, 10.0)
+                    if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
                         range_weight = 0.0
                     end
-
-                    # Multiply weights so that center of beam is 1.0
                     total_weight = range_weight * angle_weight
 
                     # If there is non-zero weight, add it to the grid box
@@ -1084,15 +1029,19 @@ A tuple `(radar_grid, latlon_grid)` where:
 - `latlon_grid`: A `(ydim, xdim, 2)` array of `[latitude, longitude]` at each grid point.
 """
 function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, gridpoints::AbstractArray,
-        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, beam_inflation::Float64,
-        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ")
+        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64,
+        power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ"; beam_width::Real=1.0)
 
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
 
-    # Create a balltree that has horizontal locations of every gate in Y, X dimension
-    balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
+    # Gate surface positions + horizontal BallTree (shared with the accumulator path).
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)
+    balltree = BallTree(gate_yx)
+    beam_coef = _beam_coef(beam_width)
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
     n_moments = length(moment_dict)
@@ -1114,13 +1063,10 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
 
-        # Find the points within the radius of influence of the horizontal gridpoint
-        eff_h_radius_influence = horizontal_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_radius_influence = max(beam_inflation * origin_dist, horizontal_roi)
-        end
-        gates = inrange(balltree, yx_point, eff_h_radius_influence)
+        # Edge-referenced conservative query radius; per-gate d_h trims it below.
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
 
         if !isempty(gates)
 
@@ -1136,8 +1082,14 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
             end
 
             # Loops through the nearby gates with valid data
-            valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
-            for gate in gates[valid_gates]
+            for gate in gates
+                ismissing(radar_volume.moments[gate, moment_dict[valid_key]]) && continue
+
+                r = beams[gate,3]
+                # Edge-referenced horizontal inclusion (surface footprint), no /r.
+                dh_y = gate_yx[1,gate] - yx_point[1]
+                dh_x = gate_yx[2,gate] - yx_point[2]
+                sqrt(dh_y^2 + dh_x^2) <= horizontal_roi + r * s || continue
 
                 # Calculate the effective azimuth
                 dx = yx_point[2] - radar_zyx[gate][3]
@@ -1147,25 +1099,16 @@ function grid_ppi(reference_latitude::AbstractFloat, reference_longitude::Abstra
                     gridpt_az += 2*pi
                 end
 
-                # Calculate the spherical angle difference using Haversine formula
+                # Azimuthal angular weight (elevation held at the beam's own).
                 angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                     [gridpt_az, beams[gate,2]])
+                angle_weight = exp(-angle_diff * beam_coef)
 
-                # Use the half-power beamwidth to define the beam
-                # 79.43 = ln(0.5) / (0.5 deg * pi / 180.0)
-                # Center of beam = 1.0 angle_weight
-                angle_weight = exp(-angle_diff * 79.43)
-                if angle_weight < power_threshold
-                    angle_weight = 0
-                end
-
-                # Range weighting based on center of gridbox = 1.0 range_weight
-                r = beams[gate,3]
+                # Range weighting (guarded against the near-radar singularity).
                 gridpt_r = sqrt(dx^2 + dy^2)
-                range_weight = gridpt_r / r
-
+                r_eff = max(r, 1.0)
+                range_weight = clamp(gridpt_r / r_eff, 0.0, 10.0)
                 if abs(gridpt_r - r) > horizontal_roi
-                    # If the range is too far away from the grid center, set range_weight to 0
                     range_weight = 0.0
                 end
 
@@ -1253,15 +1196,19 @@ A tuple `(radar_grid, latlon_grid)` where:
 - `latlon_grid`: A `(ydim, xdim, 2)` array of `[latitude, longitude]` at each grid point.
 """
 function grid_composite(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, gridpoints::AbstractArray,
-        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64, beam_inflation::Float64,
-        missing_key::String="SQI", valid_key::String="DBZ")
+        radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, horizontal_roi::Float64,
+        missing_key::String="SQI", valid_key::String="DBZ"; beam_width::Real=1.0, power_threshold::Real=0.5)
 
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
 
-    # Create a balltree that has horizontal locations of every gate in Y, X dimension
-    balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
+    # Gate surface positions + horizontal BallTree (shared with the accumulator path).
+    # Composite has no beam/range weighting, but gate inclusion is edge-referenced.
+    gate_yx  = _sweep_gate_yx(radar_zyx, beams)
+    balltree = BallTree(gate_yx)
+    beam_cutoff = _beam_cutoff(power_threshold, _beam_coef(beam_width))
+    s = sin(beam_cutoff)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
     n_moments = length(moment_dict)
@@ -1283,13 +1230,10 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
         latlon_grid[i,1] = ustrip(latlon.lat)
         latlon_grid[i,2] = ustrip(latlon.lon)
 
-        # Find the points within the radius of influence of the horizontal gridpoint
-        eff_h_radius_influence = horizontal_roi
-        if beam_inflation > 0.0
-            origin_dist = euclidean(yx_point, [0.0, 0.0])
-            eff_h_radius_influence = max(beam_inflation * origin_dist, horizontal_roi) #0.01745 = 1 deg beam
-        end
-        gates = inrange(balltree, yx_point, eff_h_radius_influence)
+        # Edge-referenced conservative query radius; per-gate d_h trims it below.
+        origin_dist = euclidean(yx_point, [0.0, 0.0])
+        R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
+        gates = inrange(balltree, yx_point, R_q)
 
         if !isempty(gates)
 
@@ -1304,15 +1248,25 @@ function grid_composite(reference_latitude::AbstractFloat, reference_longitude::
                 continue
             end
 
-            # Loops through the nearby gates with valid data
-            valid_gates = collect(keys(skipmissing(radar_volume.moments[gates,moment_dict[valid_key]])))
-            if !isempty(valid_gates)
-                dbzmax, max_idx = findmax(gate -> radar_volume.moments[gate,moment_dict[valid_key]], gates[valid_gates])
-
-                # Divide by the total weight for that gridbox
+            # Column maximum over edge-referenced (footprint-included) valid gates.
+            best_val = -Inf
+            best_gate = 0
+            for gate in gates
+                vk = radar_volume.moments[gate, moment_dict[valid_key]]
+                ismissing(vk) && continue
+                r = beams[gate,3]
+                dh_y = gate_yx[1,gate] - yx_point[1]
+                dh_x = gate_yx[2,gate] - yx_point[2]
+                sqrt(dh_y^2 + dh_x^2) <= horizontal_roi + r * s || continue
+                if vk > best_val
+                    best_val = vk
+                    best_gate = gate
+                end
+            end
+            if best_gate != 0
                 for m in 1:n_moments
-                    if !ismissing(radar_volume.moments[gates[valid_gates][max_idx],m])
-                        radar_grid[m,i] = radar_volume.moments[gates[valid_gates][max_idx],m]
+                    if !ismissing(radar_volume.moments[best_gate,m])
+                        radar_grid[m,i] = radar_volume.moments[best_gate,m]
                     end
                 end # End of moment loop
             end # End of valid gates test
@@ -1351,15 +1305,17 @@ A tuple `(radar_grid, latlon_grid)` where:
 - `latlon_grid`: A 2-element array `[latitude, longitude]` of the column location.
 """
 function grid_column(reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, gridpoints::AbstractArray,
-    radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, vertical_roi::Float64, beam_inflation::Float64,
-    power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ")
+    radar_volume::radar, moment_dict::Dict, grid_type_dict::Dict, vertical_roi::Float64,
+    power_threshold::Float64, missing_key::String="SQI", valid_key::String="DBZ"; beam_width::Real=1.0)
 
     # Convert the relevant radar information to arrays
     TM = CoordRefSystems.shift(TransverseMercator{1.0,reference_latitude,WGS84Latest}, lonₒ= reference_longitude)
     grid_origin, radar_zyx, beams = radar_arrays(reference_latitude, reference_longitude, radar_volume, TM)
 
-    # Create a balltree that has horizontal locations of every gate in Y, X dimension
-    balltree = radar_balltree_yx(radar_volume, radar_zyx, beams)
+    # Column gridding matches gates by elevation/height only (no horizontal tree).
+    beam_coef = _beam_coef(beam_width)
+    beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
+    s = sin(beam_cutoff)
 
     # Allocate the grid for the radar moments and the weights for each radar gate
     n_moments = length(moment_dict)
@@ -1374,27 +1330,21 @@ function grid_column(reference_latitude::AbstractFloat, reference_longitude::Abs
     # Loop through the horizontal indices then do each column
     Threads.@threads for i in 1:size(gridpoints)[1]
 
-        # Find the points within the radius of influence of the vertical gridpoint
         grid_z = gridpoints[i]
-        eff_v_radius_influence = vertical_roi
-        origin_dist = euclidean(grid_z, [0.0])
-        if beam_inflation > 0.0
-            # No beam inflation in horizontal in this case since we are gridding in Z
-            eff_v_radius_influence = max(beam_inflation * origin_dist, vertical_roi)
-        end
 
-        # First check to see whether at least one gate is in range vertically
-        min_dist, min_idx = findmin(z -> abs(z - grid_z), beams[:,4])
-        if min_dist > eff_v_radius_influence
-            # There is no gate in range of this grid box
-            continue
-        else
-            if !ismissing(radar_volume.moments[min_idx, moment_dict[missing_key]])
-                # There is at least one gate in range so set the flags to -9999
-                for m in 1:n_moments
-                    radar_grid[m,i] = -9999.0
-                end
+        # Coverage: any gate within the edge-referenced vertical reach that was
+        # scanned ⇒ flag -9999. If none, stays -32768 (out of range).
+        any_scanned = false
+        for gate in 1:size(beams,1)
+            abs(beams[gate,4] - grid_z) <= vertical_roi + beams[gate,3]*s || continue
+            if !ismissing(radar_volume.moments[gate, moment_dict[missing_key]])
+                any_scanned = true
+                break
             end
+        end
+        any_scanned || continue
+        for m in 1:n_moments
+            radar_grid[m,i] = -9999.0
         end
 
         # Loops through the nearby gates with valid data
@@ -1405,46 +1355,24 @@ function grid_column(reference_latitude::AbstractFloat, reference_longitude::Abs
             dz = gridpoints[i] - radar_zyx[gate][1]
             r = beams[gate,3]
 
-            # Calculate the effective elevation of the gridpoint taking into account
-            # earth curvature and standard refraction
-            # Sine of the height angle using full equation
+            # Effective elevation (earth curvature + standard refraction)
             sine_h = ((dz + Reff)^2 - r^2 - Reff^2) / (2*r*Reff)
+            abs(sine_h) < 1.0 || continue
+            gridpt_el = asin(sine_h)
 
-            # Use approximation from Gao et al. 2006
-            #sine_h = (z/r) - (r/(2*Reff))
+            # Edge-referenced vertical inclusion (beam footprint), no /r.
+            abs(beams[gate,4] - grid_z) <= vertical_roi + r * s || continue
 
-            gridpt_el = missing
-            if abs(sine_h) < 1.0
-                gridpt_el = asin(sine_h)
-            else
-                # Point is not accessible by the radar?
-                # I think this is failing because range exceeds height at origin
-                # A better check is needed, but skip for now
-                continue
-            end
-
-            # Calculate the spherical angle difference using Haversine formula
+            # Elevation-only angular weight.
             angle_diff = spherical_angle([beams[gate,1], beams[gate,2]],
                 [beams[gate,1], gridpt_el])
+            angle_weight = exp(-angle_diff * beam_coef)
 
-            # Use the half-power beamwidth to define the beam
-            # 79.43 = ln(0.5) / (0.5 deg * pi / 180.0)
-            # Center of beam = 1.0 angle_weight
-            angle_weight = exp(-angle_diff * 79.43)
-            if angle_weight < power_threshold
-                angle_weight = 0
-            end
-
-            # Range weighting based on center of gridbox = 1.0 range_weight
+            # Range weighting (guarded against the near-radar singularity).
             gridpt_r = grid_z / cos(beams[gate,2])
-            range_weight = gridpt_r / r
-            #range_weight = 1.0 - abs(gridpt_r - r) / 200.0
-            #if range_weight < 0.0
-            #    range_weight = 0.0
-            #end
-
-	    if abs(gridpt_r - r) > vertical_roi
-             	# If the range is too far away from the grid center, set range_weight to 0
+            r_eff = max(r, 1.0)
+            range_weight = clamp(gridpt_r / r_eff, 0.0, 10.0)
+            if abs(gridpt_r - r) > vertical_roi
                 range_weight = 0.0
             end
 
@@ -2300,7 +2228,7 @@ function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
     grid_radar_volume(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
+        gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2320,7 +2248,7 @@ function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractStri
         output_file, index_time,
         g.lonmin, g.londim, g.latmin, g.latdim, g.degincr,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
+        gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2338,7 +2266,7 @@ function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
     grid_radar_rhi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, mk, dk,
+        gd.power_threshold, mk, dk,
         p.grid.metadata)
 end
 
@@ -2358,7 +2286,7 @@ function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
     grid_radar_ppi(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, gd.power_threshold, mk, dk, heading,
+        gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
 end
 
@@ -2378,7 +2306,7 @@ function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
     grid_radar_composite(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
-        gd.beam_inflation, mk, dk, mean_heading,
+        mk, dk, mean_heading,
         p.grid.metadata)
 end
 
@@ -2397,7 +2325,7 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
     grid_radar_column(radar_volume, field_index_dict(p), grid_type_index_dict(p),
         output_file, index_time,
         g.zmin, g.zincr, g.zdim,
-        gd.beam_inflation, gd.power_threshold, mk, dk,
+        gd.power_threshold, mk, dk,
         p.grid.metadata)
 end
 

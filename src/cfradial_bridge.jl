@@ -121,6 +121,7 @@ function as_legacy_radar(volume::Volume;
         swpstart = swpstart,
         swpend = swpend,
         moments = moments,
+        beam_width = _volume_beam_width(volume),
     )
     return legacy, field_list
 end

@@ -631,7 +631,7 @@ See also: [`create_radar_grid`](@ref), [`write_radar_netcdf`](@ref)
 """
 function grid_radar_volume_spectral(radar_volume, moment_dict::Dict, grid_type_dict::Dict,
         output_file::String, index_time, sgrid::SpringsteelGrid,
-        beam_inflation::Float64, power_threshold::Float64;
+        power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ", heading::Real=-9999.0,
         institution::String="", source::String="",
         include_derivatives::Bool=false)
@@ -650,7 +650,8 @@ function grid_radar_volume_spectral(radar_volume, moment_dict::Dict, grid_type_d
     # 3. Grid using existing engine
     radar_grid, latlon_grid = grid_volume(reference_latitude, reference_longitude,
         gridpoints, radar_volume, moment_dict, grid_type_dict,
-        h_roi, v_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        h_roi, v_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     # 4. Populate Springsteel physical array
     populate_physical!(sgrid, radar_grid, moment_dict)
@@ -682,7 +683,7 @@ See [`grid_radar_volume_spectral`](@ref) for the full workflow description.
 """
 function grid_radar_ppi_spectral(radar_volume, moment_dict::Dict, grid_type_dict::Dict,
         output_file::String, index_time, sgrid::SpringsteelGrid,
-        beam_inflation::Float64, power_threshold::Float64;
+        power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ", heading::Real=-9999.0,
         institution::String="", source::String="",
         include_derivatives::Bool=false)
@@ -696,7 +697,8 @@ function grid_radar_ppi_spectral(radar_volume, moment_dict::Dict, grid_type_dict
 
     radar_grid, latlon_grid = grid_ppi(reference_latitude, reference_longitude,
         gridpoints, radar_volume, moment_dict, grid_type_dict,
-        h_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        h_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     populate_physical!(sgrid, radar_grid, moment_dict)
 
@@ -725,7 +727,7 @@ See [`grid_radar_volume_spectral`](@ref) for the full workflow description.
 """
 function grid_radar_column_spectral(radar_volume, moment_dict::Dict, grid_type_dict::Dict,
         output_file::String, index_time, sgrid::SpringsteelGrid,
-        beam_inflation::Float64, power_threshold::Float64;
+        power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ",
         institution::String="", source::String="",
         include_derivatives::Bool=false)
@@ -739,7 +741,8 @@ function grid_radar_column_spectral(radar_volume, moment_dict::Dict, grid_type_d
 
     radar_grid, latlon_grid = grid_column(reference_latitude, reference_longitude,
         gridpoints, radar_volume, moment_dict, grid_type_dict,
-        v_roi, beam_inflation, power_threshold, missing_key, valid_key)
+        v_roi, power_threshold, missing_key, valid_key;
+        beam_width = radar_volume.beam_width)
 
     populate_physical!(sgrid, radar_grid, moment_dict)
 
@@ -795,7 +798,7 @@ function grid_radar_volume_spectral(radar_volume, output_file::AbstractString,
     moment_dict = field_index_dict(p)
     grid_radar_volume_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
-        p.gridding.beam_inflation, p.gridding.power_threshold;
+        p.gridding.power_threshold;
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_volume_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_volume_spectral"),
         heading=heading, institution=institution, source=source,
@@ -815,7 +818,7 @@ function grid_radar_ppi_spectral(radar_volume, output_file::AbstractString,
     moment_dict = field_index_dict(p)
     grid_radar_ppi_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
-        p.gridding.beam_inflation, p.gridding.power_threshold;
+        p.gridding.power_threshold;
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_ppi_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_ppi_spectral"),
         heading=heading, institution=institution, source=source,
@@ -834,7 +837,7 @@ function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
     moment_dict = field_index_dict(p)
     grid_radar_column_spectral(radar_volume, moment_dict, grid_type_index_dict(p),
         output_file, index_time, sgrid,
-        p.gridding.beam_inflation, p.gridding.power_threshold;
+        p.gridding.power_threshold;
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_column_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_column_spectral"),
         institution=institution, source=source,

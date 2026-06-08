@@ -205,6 +205,22 @@
         @test all(legacy_stat.w_platform  .== 0.0f0)
     end
 
+    @testset "beam_width carries onto the legacy radar" begin
+        # The radar-typed gridding path derives beam_coef from radar.beam_width,
+        # so as_legacy_radar must propagate radar_parameters.beam_width_h and
+        # split_sweeps must preserve it.
+        v = synthetic_volume(n_sweeps = 2, n_rays = 8, n_gates = 5)
+        r0, _ = as_legacy_radar(v)
+        @test r0.beam_width == 1.0            # no radar_parameters ⇒ 1° fallback
+
+        flds = Dict(f => getfield(v, f) for f in fieldnames(Volume))
+        flds[:radar_parameters] = Daisho.RadarParameters(beam_width_h = 2.0)
+        v2 = Volume(; flds...)
+        r2, _ = as_legacy_radar(v2)
+        @test r2.beam_width == 2.0            # propagated from beam_width_h
+        @test all(s.beam_width == 2.0 for s in Daisho.split_sweeps(r2))
+    end
+
     @testset "v1 fixture → legacy radar shape" begin
         if !isfile(FIXTURE_V1)
             @info "Skipping bridge fixture round-trip"
