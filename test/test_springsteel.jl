@@ -742,6 +742,53 @@ using Springsteel
         end
     end
 
+    # ── radar_vars + entry-point vars validation ──────────────────────────
+    @testset "radar_vars and grid/fields agreement" begin
+        p = DaishoParameters()
+        @test radar_vars(p) == Daisho.field_index_dict(p)
+
+        v = synthetic_volume(n_sweeps = 1, n_rays = 24, n_gates = 6)
+        # A hand-built grid with the wrong vars map is refused with a clear
+        # error instead of silently scrambling columns.
+        gp_bad = Springsteel.SpringsteelGridParameters(
+            geometry = "R", iMin = 0.0, iMax = 300.0, num_cells = 4,
+            vars = Dict("WRONG" => 1))
+        g_bad = Springsteel.createGrid(gp_bad)
+        err = try
+            Daisho.grid_radar_column_spectral(v, tempname() * ".nc", nothing,
+                                              g_bad, p)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("radar_vars", err.msg)
+    end
+
+    # ── Multi-volume accumulation onto one shared grid ────────────────────
+    @testset "Multi-volume grid_radar_volume_spectral" begin
+        p = DaishoParameters()
+        md = Daisho.field_index_dict(p)
+        v1 = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        v2 = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        sgrid = Daisho.create_radar_grid("RRR", md;
+            xmin=-1500.0, xmax=1500.0, xdim=4,
+            ymin=-1500.0, ymax=1500.0, ydim=4,
+            zmin=0.0, zmax=300.0, zdim=3)
+        outfile = tempname() * ".nc"
+        try
+            ret = Daisho.grid_radar_volume_spectral([v1, v2], outfile, nothing,
+                                                    sgrid, p)
+            @test ret === sgrid
+            @test isfile(outfile)
+            @test any(isfinite, sgrid.physical[:, :, 1])
+        finally
+            rm(outfile; force=true)
+        end
+        @test_throws ArgumentError Daisho.grid_radar_volume_spectral(
+            Volume[], tempname() * ".nc", nothing, sgrid, p)
+    end
+
     # ── Backward compatibility ────────────────────────────────────────────
     @testset "Backward compatibility" begin
         @testset "initialize_regular_grid still works" begin

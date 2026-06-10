@@ -983,12 +983,30 @@ end
 # ── Springsteel → GridSpec builder ───────────────────────────────────────────
 
 """
+    volume_reference_position(volume::Volume) -> (lat, lon)
+
+Reference (latitude, longitude) of a volume: the stationary position, or the
+first sweep's georeference when a mobile platform reports `(0, 0)`.
+"""
+function volume_reference_position(volume::Volume)
+    lat, lon = Float64(volume.latitude), Float64(volume.longitude)
+    if lat == 0.0 && lon == 0.0 && !isempty(volume.sweeps)
+        s = volume.sweeps[1]
+        if s.georeference !== nothing && !isempty(s.georeference.latitude)
+            return (Float64(s.georeference.latitude[1]),
+                    Float64(s.georeference.longitude[1]))
+        end
+    end
+    return (lat, lon)
+end
+
+"""
     build_springsteel_grid_spec(sgrid; reference_latitude, reference_longitude) -> GridSpec
     build_springsteel_grid_spec(sgrid, volume::Volume) -> GridSpec
 
 Build a Daisho [`GridSpec`](@ref) whose per-axis coordinate sets reproduce the
 Springsteel grid's quadrature lattice, centered on the given reference
-position (the `volume` form uses the volume's reference position). The
+position (the `volume` form uses [`volume_reference_position`](@ref)). The
 unified accumulator engine then grids onto exactly the Springsteel node
 layout.
 
@@ -1002,8 +1020,8 @@ function build_springsteel_grid_spec end
 
 build_springsteel_grid_spec(sgrid::SpringsteelGrid, volume::Volume) =
     build_springsteel_grid_spec(sgrid;
-        reference_latitude  = Float64(volume.latitude),
-        reference_longitude = Float64(volume.longitude))
+        reference_latitude  = volume_reference_position(volume)[1],
+        reference_longitude = volume_reference_position(volume)[2])
 
 function build_springsteel_grid_spec(sgrid::RRR_Grid;
         reference_latitude::Real, reference_longitude::Real)
@@ -1054,79 +1072,121 @@ end
 # path, then output through the Springsteel spectral API. The lower-level
 # `radar`-typed spectral functions remain for back-compat.
 
-function grid_radar_volume_spectral(volume::Volume, output_file::AbstractString,
-        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+# The grid's variable map must equal the configured field map, or
+# populate_physical! scrambles columns silently. Grids from
+# create_radar_grid(p) always match; this guards hand-built grids.
+function _require_radar_vars(sgrid::SpringsteelGrid, p::DaishoParameters;
+        for_op::String)
+    expected = field_index_dict(p)
+    actual = Dict{String,Int}(String(k) => Int(v)
+                              for (k, v) in sgrid.params.vars)
+    actual == expected && return nothing
+    throw(ArgumentError(
+        "$(for_op): the Springsteel grid's variable map does not match the " *
+        "configured [fields] (name → column in field-name-sorted order). " *
+        "Grid vars: $(_fmt_vars(actual)); expected: $(_fmt_vars(expected)). " *
+        "Build the grid with `create_radar_grid(p)`, or pass " *
+        "`vars = radar_vars(p)` when constructing the " *
+        "SpringsteelGridParameters yourself."))
+end
+_fmt_vars(d::AbstractDict) =
+    join(["$(k)=$(v)" for (k, v) in sort(collect(d); by = first)], ", ")
+
+# Shared scalar pipeline for the Volume-typed spectral entries: grid every
+# sweep of every volume onto the sgrid's quadrature lattice (centered on the
+# given reference position) with the unified accumulator, copy the result into
+# the Springsteel physical array (fill→NaN, undetect preserved), run the
+# spectral transform with fill masking, and write the spectral NetCDF.
+function _grid_volumes_spectral!(sgrid::SpringsteelGrid,
+        volumes::AbstractVector{<:Volume}, output_file::AbstractString,
+        p::DaishoParameters; ref_lat::Real, ref_lon::Real, for_op::String,
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    spec = build_springsteel_grid_spec(sgrid, volume)
+    isempty(volumes) && throw(ArgumentError("$(for_op): no volumes given"))
+    _require_radar_vars(sgrid, p; for_op = for_op)
+    spec = build_springsteel_grid_spec(sgrid;
+        reference_latitude = ref_lat, reference_longitude = ref_lon)
     acc  = ScalarGridAccumulator(spec, p)                       # scalar-only
     roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
                               v_factor = p.gridding.vertical_roi_factor)
-    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # (h, v)
-    for s in eachindex(volume.sweeps)
-        grid_sweep!(acc, volume, s, p; heading = heading, roi = roi3)
+    roi2 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # (h, v); the
+    for volume in volumes                                       # 2D/1D workers
+        for s in eachindex(volume.sweeps)                       # use one of them
+            grid_sweep!(acc, volume, s, p; heading = heading, roi = roi2)
+        end
     end
-    radar_grid = finalize_grid(acc)                            # (n_fields,k,j,i)
+    radar_grid = finalize_grid(acc)
     populate_physical!(sgrid, radar_grid, field_index_dict(p);
                        fill_value = p.io.fill_value)
     mask = mask_fill_for_transform!(sgrid)
     spectralTransform!(sgrid)
     gridTransform!(sgrid)
     restore_fill_from_mask!(sgrid, mask)
-    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
-        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
+    write_radar_netcdf(output_file, sgrid, volumes[1], field_index_dict(p);
+        ref_lat = ref_lat, ref_lon = ref_lon,
         institution = institution, source = source, heading = heading,
         include_derivatives = include_derivatives)
     return sgrid
+end
+
+function grid_radar_volume_spectral(volume::Volume, output_file::AbstractString,
+        index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    ref = volume_reference_position(volume)
+    return _grid_volumes_spectral!(sgrid, [volume], output_file, p;
+        ref_lat = ref[1], ref_lon = ref[2],
+        for_op = "grid_radar_volume_spectral",
+        heading = heading, institution = institution, source = source,
+        include_derivatives = include_derivatives)
+end
+
+"""
+    grid_radar_volume_spectral(volumes::AbstractVector{<:Volume}, output_file,
+        index_time, sgrid, p::DaishoParameters; heading=-9999.0,
+        institution="", source="", include_derivatives=false)
+
+Multi-radar overload: accumulate every sweep of every volume onto ONE shared
+Springsteel grid centered on the **centroid** of the radar reference positions
+(via [`volume_reference_position`](@ref)), so overlapping radars line up on a
+common origin. Everything else matches the single-volume form.
+"""
+function grid_radar_volume_spectral(volumes::AbstractVector{<:Volume},
+        output_file::AbstractString, index_time, sgrid::SpringsteelGrid,
+        p::DaishoParameters;
+        heading::Real=-9999.0, institution::String="", source::String="",
+        include_derivatives::Bool=false)
+    isempty(volumes) && throw(ArgumentError(
+        "grid_radar_volume_spectral: `volumes` is empty"))
+    refs = volume_reference_position.(volumes)
+    ref_lat = sum(first, refs) / length(refs)
+    ref_lon = sum(last, refs) / length(refs)
+    return _grid_volumes_spectral!(sgrid, volumes, output_file, p;
+        ref_lat = ref_lat, ref_lon = ref_lon,
+        for_op = "grid_radar_volume_spectral",
+        heading = heading, institution = institution, source = source,
+        include_derivatives = include_derivatives)
 end
 
 function grid_radar_ppi_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    spec = build_springsteel_grid_spec(sgrid, volume)
-    acc  = ScalarGridAccumulator(spec, p)
-    roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
-                              v_factor = p.gridding.vertical_roi_factor)
-    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # PPI uses h only
-    for s in eachindex(volume.sweeps)
-        grid_sweep!(acc, volume, s, p; heading = heading, roi = roi3)
-    end
-    radar_grid = finalize_grid(acc)                            # (n_fields,j,i)
-    populate_physical!(sgrid, radar_grid, field_index_dict(p);
-                       fill_value = p.io.fill_value)
-    mask = mask_fill_for_transform!(sgrid)
-    spectralTransform!(sgrid)
-    gridTransform!(sgrid)
-    restore_fill_from_mask!(sgrid, mask)
-    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
-        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
-        institution = institution, source = source, heading = heading,
+    ref = volume_reference_position(volume)
+    return _grid_volumes_spectral!(sgrid, [volume], output_file, p;
+        ref_lat = ref[1], ref_lon = ref[2],
+        for_op = "grid_radar_ppi_spectral",
+        heading = heading, institution = institution, source = source,
         include_derivatives = include_derivatives)
-    return sgrid
 end
 
 function grid_radar_column_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         institution::String="", source::String="", include_derivatives::Bool=false)
-    spec = build_springsteel_grid_spec(sgrid, volume)
-    acc  = ScalarGridAccumulator(spec, p)
-    roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
-                              v_factor = p.gridding.vertical_roi_factor)
-    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # column uses v only
-    for s in eachindex(volume.sweeps)
-        grid_sweep!(acc, volume, s, p; roi = roi3)
-    end
-    radar_grid = finalize_grid(acc)                            # (n_fields,k)
-    populate_physical!(sgrid, radar_grid, field_index_dict(p);
-                       fill_value = p.io.fill_value)
-    mask = mask_fill_for_transform!(sgrid)
-    spectralTransform!(sgrid)
-    gridTransform!(sgrid)
-    restore_fill_from_mask!(sgrid, mask)
-    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
-        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
+    ref = volume_reference_position(volume)
+    return _grid_volumes_spectral!(sgrid, [volume], output_file, p;
+        ref_lat = ref[1], ref_lon = ref[2],
+        for_op = "grid_radar_column_spectral",
         institution = institution, source = source,
         include_derivatives = include_derivatives)
-    return sgrid
 end

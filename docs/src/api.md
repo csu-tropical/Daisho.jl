@@ -19,8 +19,9 @@ Daisho.GridParameters
 Daisho.CartesianGridParameters
 Daisho.LatLonGridParameters
 Daisho.RhiGridParameters
-Daisho.SpectralGridParameters
-Daisho.SpectralBCParameters
+Daisho.SpringsteelGridConfig
+Daisho.SpringsteelAxisConfig
+Daisho.SPRINGSTEEL_AXIS_BASES
 Daisho.MetadataParameters
 Daisho.IOParameters
 ```
@@ -124,6 +125,10 @@ Daisho.create_radar_grid
 ### Spectral Helpers
 
 ```@docs
+Daisho.radar_vars
+Daisho.volume_reference_position
+Daisho.build_springsteel_grid_spec
+Daisho.compute_roi
 Daisho.get_springsteel_gridpoints_zyx
 Daisho.populate_physical!
 Daisho.write_radar_netcdf
