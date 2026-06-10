@@ -175,9 +175,9 @@ function process_volumes(date, time, temp_dir, archive_dir, plot_dir, raw_moment
     filter!(!isdir,qc_files)
     for file in qc_files
         radar_volume = read_cfradial(file, qc_moment_dict)
-        output_file = "$(cart_grid_dir)/$(date)/gridded_vol_" * 
-            Dates.format(radar_volume.time[1], "YYYYmmdd") * 
-            "_" * Dates.format(radar_volume.time[1], "HHMM") * ".nc"
+        output_file = "$(cart_grid_dir)/$(date)/gridded_vol_" *
+            Dates.format(radar_volume.time[1], "YYYYmmdd") *
+            "_" * Dates.format(radar_volume.time[1], "HHMMSS") * ".nc"
         @time grid_radar_composite(radar_volume, qc_moment_dict, output_file)
         #run(`Radx2Grid -params PICCOLO_cartesian_grid.params -outdir $cart_grid_dir -f $file`)
     end
