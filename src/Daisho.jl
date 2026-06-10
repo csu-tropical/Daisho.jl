@@ -31,8 +31,9 @@ include("springsteel_adapter.jl")
 export DaishoParameters, print_config
 export MomentParameters, QCParameters, GriddingParameters
 export GridParameters, CartesianGridParameters, LatLonGridParameters
-export RhiGridParameters, SpectralGridParameters, SpectralBCParameters
+export RhiGridParameters, SpringsteelGridConfig, SpringsteelAxisConfig
 export MetadataParameters
+export radar_vars
 export IOParameters
 export SynthesisParameters
 

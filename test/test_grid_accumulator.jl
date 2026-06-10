@@ -315,7 +315,7 @@ end
             Daisho.GridParameters(cartesian = new_cart,
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
-                                  spectral = p.grid.spectral),
+                                  springsteel = p.grid.springsteel),
             p.io, p.provided)
 
         # Two-sweep synthetic volume with rich content — DBZ/VEL/SQI/DBZ_QC
@@ -401,7 +401,7 @@ end
             Daisho.GridParameters(cartesian = new_cart,
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
-                                  spectral = p.grid.spectral),
+                                  springsteel = p.grid.springsteel),
             p.io, p.provided)
         v = synthetic_volume(n_sweeps = 2, n_rays = 36, n_gates = 6)
 
@@ -926,7 +926,7 @@ end
                 Daisho.GridParameters(cartesian = small_cart,
                                       latlon = p0.grid.latlon,
                                       rhi = p0.grid.rhi,
-                                      spectral = p0.grid.spectral),
+                                      springsteel = p0.grid.springsteel),
                 io, p0.provided)
             v = synthetic_volume(n_sweeps = 1, n_rays = 12, n_gates = 4)
             # Custom sentinels.

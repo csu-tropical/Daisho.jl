@@ -154,8 +154,36 @@ function create_radar_grid(geometry::String, moment_dict::Dict;
         error("Unsupported geometry: $geometry. Use \"R\", \"RR\", or \"RRR\".")
     end
 
-    gp = compute_derived_params(gp)
-    return createGrid(gp)
+    sgrid = createGrid(gp)
+    # Geometry-aware output sizing: Cartesian spline axes default to cells + 1
+    # regularly spaced output points (cell-edge spacing). Springsteel's own
+    # j default is the cylindrical outermost-ring rule and its k default is
+    # mish + 1, both wrong for Cartesian grids (csu-tropical/Springsteel.jl#6).
+    jout = geom in ("RR", "RRR") ? Int(ydim) + 1 : sgrid.params.j_regular_out
+    kout = geom == "RRR" ? Int(zdim) + 1 : sgrid.params.k_regular_out
+    return _with_regular_out(sgrid, Int(xdim) + 1, jout, kout)
+end
+
+# Rebuild a grid with explicit i/j/k_regular_out output sizing. Springsteel's
+# `compute_derived_params` (run inside `createGrid`) reconstructs the params
+# without carrying user-set `*_regular_out` values, so they can only be
+# injected after construction. The basis/spectral/physical arrays are shared,
+# not copied.
+function _with_regular_out(sgrid::SpringsteelGrid,
+        iout::Integer, jout::Integer, kout::Integer)
+    gp = sgrid.params
+    if gp.i_regular_out == iout && gp.j_regular_out == jout &&
+       gp.k_regular_out == kout
+        return sgrid
+    end
+    d = Dict{Symbol,Any}(f => getfield(gp, f)
+                         for f in fieldnames(SpringsteelGridParameters))
+    d[:i_regular_out] = Int(iout)
+    d[:j_regular_out] = Int(jout)
+    d[:k_regular_out] = Int(kout)
+    gp2 = SpringsteelGridParameters(; d...)
+    return typeof(sgrid)(gp2, sgrid.ibasis, sgrid.jbasis, sgrid.kbasis,
+                         sgrid.spectral, sgrid.physical)
 end
 
 """
@@ -360,10 +388,14 @@ end
 Compute horizontal and vertical radius-of-influence from a Springsteel grid's
 quadrature point spacing.
 
-Uses 0.75 × average spacing, matching Daisho convention.
+Uses `h_factor`/`v_factor` × average quadrature-point spacing (default 0.75,
+the legacy Daisho convention). The accumulator-path Springsteel provider passes
+`p.gridding.horizontal_roi_factor` / `vertical_roi_factor`.
 
 # Arguments
 - `sgrid`: A `SpringsteelGrid`.
+- `h_factor`: Horizontal ROI fraction of the mean horizontal node spacing.
+- `v_factor`: Vertical ROI fraction of the mean vertical node spacing (3D only).
 
 # Returns
 - For 3D grids: `(h_roi, v_roi)` tuple.
@@ -375,7 +407,7 @@ See also: [`create_radar_grid`](@ref)
 function compute_roi end
 
 # 3D: RRR_Grid
-function compute_roi(sgrid::RRR_Grid)
+function compute_roi(sgrid::RRR_Grid; h_factor::Real = 0.75, v_factor::Real = 0.75)
     pts = getGridpoints(sgrid)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -389,11 +421,11 @@ function compute_roi(sgrid::RRR_Grid)
     z_pts = [pts[k, 3] for k in 1:kDim]
     v_spacing = mean(diff(z_pts))
 
-    return (0.75 * abs(h_spacing), 0.75 * abs(v_spacing))
+    return (h_factor * abs(h_spacing), v_factor * abs(v_spacing))
 end
 
 # 2D: RR_Grid
-function compute_roi(sgrid::RR_Grid)
+function compute_roi(sgrid::RR_Grid; h_factor::Real = 0.75, v_factor::Real = 0.75)
     pts = getGridpoints(sgrid)
     iDim = sgrid.params.iDim
     jDim = sgrid.params.jDim
@@ -401,14 +433,14 @@ function compute_roi(sgrid::RR_Grid)
     x_pts = [pts[(i-1)*jDim + 1, 1] for i in 1:iDim]
     h_spacing = mean(diff(x_pts))
 
-    return (0.75 * abs(h_spacing),)
+    return (h_factor * abs(h_spacing),)
 end
 
 # 1D: R_Grid
-function compute_roi(sgrid::R_Grid)
+function compute_roi(sgrid::R_Grid; h_factor::Real = 0.75, v_factor::Real = 0.75)
     pts = getGridpoints(sgrid)
     spacing = mean(diff(pts))
-    return (0.75 * abs(spacing),)
+    return (v_factor * abs(spacing),)
 end
 
 """
@@ -443,6 +475,29 @@ function radar_global_attributes(radar_volume, ref_lat::Real, ref_lon::Real;
         "reference_longitude"=> Float64(ref_lon),
         "time_coverage_start"=> string(radar_volume.time[1]),
         "time_coverage_end"  => string(radar_volume.time[end]),
+    )
+    if heading != -9999.0
+        attrs["platform_heading"] = Float64(heading)
+    end
+    return attrs
+end
+
+# `Volume`-typed overload for the accumulator spectral path. A `Volume` carries
+# `time_coverage_start`/`time_coverage_end` rather than the legacy radar's
+# per-ray `time` vector, so the coverage window is read from those fields.
+function radar_global_attributes(volume::Volume, ref_lat::Real, ref_lon::Real;
+        institution::String="", source::String="", heading::Real=-9999.0)
+    attrs = Dict{String,Any}(
+        "Conventions"        => "CF-1.12",
+        "title"              => "Daisho.jl spectral radar gridded data",
+        "institution"        => institution,
+        "source"             => source,
+        "history"            => "Created " * Dates.format(Dates.now(), "yyyy-mm-dd HH:MM:SS") * " by Daisho.jl",
+        "references"         => "Daisho.jl radar analysis package",
+        "reference_latitude" => Float64(ref_lat),
+        "reference_longitude"=> Float64(ref_lon),
+        "time_coverage_start"=> string(volume.time_coverage_start),
+        "time_coverage_end"  => string(volume.time_coverage_end),
     )
     if heading != -9999.0
         attrs["platform_heading"] = Float64(heading)
@@ -759,29 +814,111 @@ function grid_radar_column_spectral(radar_volume, moment_dict::Dict, grid_type_d
 end
 
 # ── Parameter-struct overloads ──────────────────────────────────────────────
-# Read spectral-grid configuration directly from a `DaishoParameters`. Per-axis
-# BCs come from `p.grid.spectral.bc`; geometry/cell counts/bounds from
-# `p.grid.spectral`.
+# Build the Springsteel grid straight from the geometry-general
+# `[grid.springsteel]` config — no intermediate x/y/z vocabulary.
+
+"""
+    radar_vars(p::DaishoParameters) -> Dict{String,Int}
+
+The Springsteel variable map for hand-built grids: field name → 1-based
+column index in field-name-sorted order, identical to
+[`field_index_dict`](@ref). Pass it as `vars` when constructing a
+`Springsteel.SpringsteelGridParameters` yourself — the escape hatch for grids
+the `[grid.springsteel]` schema cannot express (per-variable spectral
+filters, Fourier/Chebyshev-primary geometries). The gridding entry points
+validate the grid's `vars` against the configured `[fields]` and refuse
+mismatches, since the gridded-array column order must line up with the
+spectral-grid variable order.
+"""
+radar_vars(p::DaishoParameters) = field_index_dict(p)
 
 """
     create_radar_grid(p::DaishoParameters)
+    create_radar_grid(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
 
-Parameter-struct overload that builds a Springsteel spectral grid from
-`p.grid.spectral` and `p.moments`. The Springsteel variable map is built via
+Build a Springsteel grid from the geometry-general `[grid.springsteel]`
+config (any supported spline-`i` geometry: R/RZ/RR/RRR, RL/RLZ/RLR,
+SL/SLZ/SLR). The Springsteel variable map is built via
 [`field_index_dict`](@ref) (1-based indices in field-name-sorted order,
-order-independent of the source TOML). Requires the `[grid.spectral]` section.
+order-independent of the source TOML).
+
+Axis mapping into `SpringsteelGridParameters`: per-axis `min`/`max` →
+`iMin`/`iMax` etc.; spline `cells` → `num_cells` (i) or `jDim`/`kDim` =
+`cells × mubar`; Chebyshev `points` → `kDim`. Boundary conditions map the
+axis' **min side** to Springsteel's `BCL`/`BCD`/`BCB` and **max side** to
+`BCR`/`BCU`/`BCT`. Output resampling counts (`regular_out`) are injected
+after construction (see `_with_regular_out`), defaulting to `cells + 1` on
+spline axes.
+
+Note the gridding engine itself currently traverses only the Cartesian
+R/RR/RRR grids; the other geometries can be built (and transformed/written)
+but not yet gridded onto — [`build_springsteel_grid_spec`](@ref) raises a
+clear error for them.
 """
 function create_radar_grid(p::DaishoParameters)
-    s = require_section(p, :grid, :spectral; for_op="create_radar_grid")
-    moment_dict = field_index_dict(p)
-    return create_radar_grid(s.geometry, moment_dict;
-        xmin=s.xmin, xmax=s.xmax, xdim=s.xdim,
-        ymin=s.ymin, ymax=s.ymax, ydim=s.ydim,
-        zmin=s.zmin, zmax=s.zmax, zdim=s.zdim,
-        mubar=s.mubar, quadrature=s.quadrature,
-        BCL=s.bc.xL, BCR=s.bc.xR,
-        BCU=s.bc.yL, BCD=s.bc.yR,
-        BCB=s.bc.zL, BCT=s.bc.zR)
+    s = require_section(p, :grid, :springsteel; for_op="create_radar_grid")
+    return create_radar_grid(s, field_index_dict(p))
+end
+
+function create_radar_grid(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
+    bases = SPRINGSTEEL_AXIS_BASES[cfg.geometry]
+    _validate_bc_fields(cfg, vars)
+    kw = Dict{Symbol,Any}(
+        :geometry   => cfg.geometry,
+        :vars       => Dict{String,Int}(vars),
+        :mubar      => cfg.mubar,
+        :quadrature => cfg.quadrature,
+        :iMin       => cfg.i.min,
+        :iMax       => cfg.i.max,
+        :num_cells  => cfg.i.cells,
+        :BCL        => cfg.i.bc_min,
+        :BCR        => cfg.i.bc_max,
+    )
+    jb, kb = bases[2], bases[3]
+    if jb === :spline
+        kw[:jMin] = cfg.j.min
+        kw[:jMax] = cfg.j.max
+        kw[:jDim] = cfg.j.cells * cfg.mubar
+        # Springsteel reads the j-spline's jMin-side BC from BCD and the
+        # jMax-side from BCU (factory.jl _create_cartesian_2d_rr/_3d_rrr).
+        kw[:BCD] = cfg.j.bc_min
+        kw[:BCU] = cfg.j.bc_max
+    elseif jb === :fourier && cfg.j.max_wavenumber >= 0
+        kw[:max_wavenumber] = Dict{String,Any}("default" => cfg.j.max_wavenumber)
+    end
+    if kb !== :none
+        kw[:kMin] = cfg.k.min
+        kw[:kMax] = cfg.k.max
+        kw[:kDim] = kb === :spline ? cfg.k.cells * cfg.mubar : cfg.k.points
+        kw[:BCB] = cfg.k.bc_min
+        kw[:BCT] = cfg.k.bc_max
+    end
+    sgrid = createGrid(SpringsteelGridParameters(; kw...))
+    gp = sgrid.params
+    iout = cfg.i.regular_out > 0 ? cfg.i.regular_out : cfg.i.cells + 1
+    jout = cfg.j.regular_out > 0 ? cfg.j.regular_out :
+           (jb === :spline ? cfg.j.cells + 1 : gp.j_regular_out)
+    kout = cfg.k.regular_out > 0 ? cfg.k.regular_out :
+           (kb === :spline ? cfg.k.cells + 1 : gp.k_regular_out)
+    return _with_regular_out(sgrid, iout, jout, kout)
+end
+
+# Per-field BC override keys must name configured fields (typo guard). The
+# TOML parser cannot check this — it runs before the field list is fixed — so
+# it happens here, at grid-construction time.
+function _validate_bc_fields(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
+    for (axis, name) in ((cfg.i, "i"), (cfg.j, "j"), (cfg.k, "k"))
+        for (sidedict, side) in ((axis.bc_min, "min"), (axis.bc_max, "max"))
+            for key in keys(sidedict)
+                key == "default" && continue
+                haskey(vars, key) || throw(ArgumentError(
+                    "[grid.springsteel.$(name).bc]: per-field override " *
+                    "`$(key)` ($(side) side) does not match any configured " *
+                    "field. Fields: $(join(sort(collect(keys(vars))), ", "))"))
+            end
+        end
+    end
+    return nothing
 end
 
 """
@@ -843,33 +980,153 @@ function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
         include_derivatives=include_derivatives)
 end
 
-# ── Volume-aware overloads (Phase C bridge) ──────────────────────────────────
+# ── Springsteel → GridSpec builder ───────────────────────────────────────────
+
+"""
+    build_springsteel_grid_spec(sgrid; reference_latitude, reference_longitude) -> GridSpec
+    build_springsteel_grid_spec(sgrid, volume::Volume) -> GridSpec
+
+Build a Daisho [`GridSpec`](@ref) whose per-axis coordinate sets reproduce the
+Springsteel grid's quadrature lattice, centered on the given reference
+position (the `volume` form uses the volume's reference position). The
+unified accumulator engine then grids onto exactly the Springsteel node
+layout.
+
+**Cartesian tensor-product assumption.** Springsteel Cartesian grids factorize
+as `node(i,j,k) = (X[i], Y[j], Z[k])`, so the per-axis coordinate sets fully
+describe the lattice. Non-Cartesian (cylindrical/spherical) grids raise an
+`ArgumentError` — that is where future per-node gridpoints + metric-ROI work
+plugs in.
+"""
+function build_springsteel_grid_spec end
+
+build_springsteel_grid_spec(sgrid::SpringsteelGrid, volume::Volume) =
+    build_springsteel_grid_spec(sgrid;
+        reference_latitude  = Float64(volume.latitude),
+        reference_longitude = Float64(volume.longitude))
+
+function build_springsteel_grid_spec(sgrid::RRR_Grid;
+        reference_latitude::Real, reference_longitude::Real)
+    gp = get_springsteel_gridpoints_zyx(sgrid)   # (kDim, jDim, iDim, 3): [z,y,x]
+    Z = collect(Float64, gp[:, 1, 1, 1])
+    Y = collect(Float64, gp[1, :, 1, 2])
+    X = collect(Float64, gp[1, 1, :, 3])
+    return GridSpec(shape = :volume_3d,
+        reference_latitude  = Float64(reference_latitude),
+        reference_longitude = Float64(reference_longitude),
+        x_axis = X, y_axis = Y, z_axis = Z)
+end
+
+function build_springsteel_grid_spec(sgrid::RR_Grid;
+        reference_latitude::Real, reference_longitude::Real)
+    gp = get_springsteel_gridpoints_zyx(sgrid)   # (jDim, iDim, 2): [y,x]
+    X = collect(Float64, gp[1, :, 2])
+    Y = collect(Float64, gp[:, 1, 1])
+    return GridSpec(shape = :ppi_2d,
+        reference_latitude  = Float64(reference_latitude),
+        reference_longitude = Float64(reference_longitude),
+        x_axis = X, y_axis = Y, z_axis = [0.0])
+end
+
+function build_springsteel_grid_spec(sgrid::R_Grid;
+        reference_latitude::Real, reference_longitude::Real)
+    # The single R axis is altitude for a column (mirrors grid_radar_column_spectral).
+    Z = collect(Float64, get_springsteel_gridpoints_zyx(sgrid))
+    return GridSpec(shape = :column_1d,
+        reference_latitude  = Float64(reference_latitude),
+        reference_longitude = Float64(reference_longitude),
+        x_axis = [0.0], y_axis = [0.0], z_axis = Z)
+end
+
+function build_springsteel_grid_spec(sgrid::SpringsteelGrid;
+        reference_latitude::Real, reference_longitude::Real)
+    throw(ArgumentError(
+        "build_springsteel_grid_spec: only the Cartesian R/RR/RRR Springsteel " *
+        "grids can be gridded by the accumulator engine today (got geometry " *
+        "`$(sgrid.params.geometry)`). Cylindrical/spherical gridding " *
+        "(per-node gridpoints + metric ROI) is a planned follow-on; such " *
+        "grids can still be built, transformed, and written."))
+end
+
+# ── Volume-aware spectral entries (unified accumulator path) ──────────────────
+# These grid radar *scalar* moments onto a Springsteel grid using the same
+# edge-referenced, beamwidth-correct accumulator engine as the regular Cartesian
+# path, then output through the Springsteel spectral API. The lower-level
+# `radar`-typed spectral functions remain for back-compat.
 
 function grid_radar_volume_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
-    grid_radar_volume_spectral(legacy, output_file, index_time, sgrid, p;
-        heading=heading, institution=institution, source=source,
-        include_derivatives=include_derivatives)
+    spec = build_springsteel_grid_spec(sgrid, volume)
+    acc  = ScalarGridAccumulator(spec, p)                       # scalar-only
+    roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
+                              v_factor = p.gridding.vertical_roi_factor)
+    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # (h, v)
+    for s in eachindex(volume.sweeps)
+        grid_sweep!(acc, volume, s, p; heading = heading, roi = roi3)
+    end
+    radar_grid = finalize_grid(acc)                            # (n_fields,k,j,i)
+    populate_physical!(sgrid, radar_grid, field_index_dict(p);
+                       fill_value = p.io.fill_value)
+    mask = mask_fill_for_transform!(sgrid)
+    spectralTransform!(sgrid)
+    gridTransform!(sgrid)
+    restore_fill_from_mask!(sgrid, mask)
+    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
+        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
+        institution = institution, source = source, heading = heading,
+        include_derivatives = include_derivatives)
+    return sgrid
 end
 
 function grid_radar_ppi_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         heading::Real=-9999.0, institution::String="", source::String="",
         include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
-    grid_radar_ppi_spectral(legacy, output_file, index_time, sgrid, p;
-        heading=heading, institution=institution, source=source,
-        include_derivatives=include_derivatives)
+    spec = build_springsteel_grid_spec(sgrid, volume)
+    acc  = ScalarGridAccumulator(spec, p)
+    roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
+                              v_factor = p.gridding.vertical_roi_factor)
+    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # PPI uses h only
+    for s in eachindex(volume.sweeps)
+        grid_sweep!(acc, volume, s, p; heading = heading, roi = roi3)
+    end
+    radar_grid = finalize_grid(acc)                            # (n_fields,j,i)
+    populate_physical!(sgrid, radar_grid, field_index_dict(p);
+                       fill_value = p.io.fill_value)
+    mask = mask_fill_for_transform!(sgrid)
+    spectralTransform!(sgrid)
+    gridTransform!(sgrid)
+    restore_fill_from_mask!(sgrid, mask)
+    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
+        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
+        institution = institution, source = source, heading = heading,
+        include_derivatives = include_derivatives)
+    return sgrid
 end
 
 function grid_radar_column_spectral(volume::Volume, output_file::AbstractString,
         index_time, sgrid::SpringsteelGrid, p::DaishoParameters;
         institution::String="", source::String="", include_derivatives::Bool=false)
-    legacy, _names = as_legacy_radar(volume; field_names=[fs.name for fs in _ordered_fields(p)])
-    grid_radar_column_spectral(legacy, output_file, index_time, sgrid, p;
-        institution=institution, source=source,
-        include_derivatives=include_derivatives)
+    spec = build_springsteel_grid_spec(sgrid, volume)
+    acc  = ScalarGridAccumulator(spec, p)
+    roi  = compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
+                              v_factor = p.gridding.vertical_roi_factor)
+    roi3 = (roi[1], length(roi) > 1 ? roi[2] : roi[1])          # column uses v only
+    for s in eachindex(volume.sweeps)
+        grid_sweep!(acc, volume, s, p; roi = roi3)
+    end
+    radar_grid = finalize_grid(acc)                            # (n_fields,k)
+    populate_physical!(sgrid, radar_grid, field_index_dict(p);
+                       fill_value = p.io.fill_value)
+    mask = mask_fill_for_transform!(sgrid)
+    spectralTransform!(sgrid)
+    gridTransform!(sgrid)
+    restore_fill_from_mask!(sgrid, mask)
+    write_radar_netcdf(output_file, sgrid, volume, field_index_dict(p);
+        ref_lat = spec.reference_latitude, ref_lon = spec.reference_longitude,
+        institution = institution, source = source,
+        include_derivatives = include_derivatives)
+    return sgrid
 end

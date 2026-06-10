@@ -54,32 +54,40 @@ zmin  =     0.0
 zincr =   250.0
 zdim  =      41
 
-[grid.spectral]
+# Springsteel spectral grid (i/j/k axis vocabulary; `cells` counts B-spline
+# cells, physical points = cells × mubar). See config/defaults.toml for the
+# full schema, BC types, and per-field override syntax.
+[grid.springsteel]
 geometry   = "RRR"
 mubar      = 3
 quadrature = "gauss"
-xmin       = -125000.0
-xmax       =  125000.0
-xdim       = 50
-ymin       = -125000.0
-ymax       =  125000.0
-ydim       = 50
-zmin       = 0.0
-zmax       = 15000.0
-zdim       = 10
 
-[grid.spectral.bc.xL]
-type = "natural"
-[grid.spectral.bc.xR]
-type = "natural"
-[grid.spectral.bc.yL]
-type = "natural"
-[grid.spectral.bc.yR]
-type = "natural"
-[grid.spectral.bc.zL]
-type = "natural"
-[grid.spectral.bc.zR]
-type = "natural"
+[grid.springsteel.i]
+min   = -125000.0
+max   =  125000.0
+cells = 50
+
+[grid.springsteel.i.bc]
+min = "natural"
+max = "natural"
+
+[grid.springsteel.j]
+min   = -125000.0
+max   =  125000.0
+cells = 50
+
+[grid.springsteel.j.bc]
+min = "natural"
+max = "natural"
+
+[grid.springsteel.k]
+min   = 0.0
+max   = 15000.0
+cells = 10
+
+[grid.springsteel.k.bc]
+min = "natural"
+max = "natural"
 
 [grid.metadata]
 Conventions      = "CF-1.12"

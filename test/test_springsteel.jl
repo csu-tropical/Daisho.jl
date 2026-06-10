@@ -550,6 +550,198 @@ using Springsteel
         end
     end
 
+    # ── compute_roi factor overrides ──────────────────────────────────────
+    @testset "compute_roi honors h_factor / v_factor" begin
+        moment_dict = Dict("DBZ" => 1)
+        sgrid = Daisho.create_radar_grid("RRR", moment_dict;
+            xmin=0.0, xmax=10000.0, xdim=5,
+            ymin=0.0, ymax=10000.0, ydim=5,
+            zmin=0.0, zmax=5000.0, zdim=3)
+        h0, v0 = Daisho.compute_roi(sgrid)                       # default 0.75
+        h1, v1 = Daisho.compute_roi(sgrid; h_factor=1.5, v_factor=0.75)
+        h2, v2 = Daisho.compute_roi(sgrid; h_factor=0.75, v_factor=1.5)
+        @test h1 ≈ 2 * h0
+        @test v1 ≈ v0                                            # v_factor unchanged
+        @test v2 ≈ 2 * v0
+        @test h2 ≈ h0                                            # h_factor unchanged
+    end
+
+    # ── Springsteel accumulator provider ──────────────────────────────────
+    @testset "build_springsteel_grid_spec + accumulator path" begin
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        md = Daisho.field_index_dict(p)
+
+        @testset "RRR spec reproduces sgrid node coordinates" begin
+            sgrid = Daisho.create_radar_grid("RRR", md;
+                xmin=-1500.0, xmax=1500.0, xdim=4,
+                ymin=-1500.0, ymax=1500.0, ydim=4,
+                zmin=0.0, zmax=300.0, zdim=3)
+            spec = Daisho.build_springsteel_grid_spec(sgrid, v)
+            gp = Daisho.get_springsteel_gridpoints_zyx(sgrid)
+            @test spec.shape === :volume_3d
+            @test spec.reference_latitude == Float64(v.latitude)
+            @test spec.reference_longitude == Float64(v.longitude)
+            @test spec.z_axis ≈ gp[:, 1, 1, 1]
+            @test spec.y_axis ≈ gp[1, :, 1, 2]
+            @test spec.x_axis ≈ gp[1, 1, :, 3]
+        end
+
+        @testset "field_index_dict ordering matches accumulator fields" begin
+            spec = Daisho.build_springsteel_grid_spec(
+                Daisho.create_radar_grid("RRR", md;
+                    xmin=-1500.0, xmax=1500.0, xdim=4,
+                    ymin=-1500.0, ymax=1500.0, ydim=4,
+                    zmin=0.0, zmax=300.0, zdim=3), v)
+            acc = ScalarGridAccumulator(spec, p)
+            # populate_physical! reads radar_grid[md[name], …]; that column index
+            # must equal the field's position in the accumulator's m-axis.
+            for (name, idx) in md
+                @test acc.fields[idx] == name
+            end
+        end
+
+        @testset "RRR end-to-end grids + writes NetCDF" begin
+            sgrid = Daisho.create_radar_grid("RRR", md;
+                xmin=-1500.0, xmax=1500.0, xdim=4,
+                ymin=-1500.0, ymax=1500.0, ydim=4,
+                zmin=0.0, zmax=300.0, zdim=3)
+            outfile = tempname() * ".nc"
+            try
+                ret = Daisho.grid_radar_volume_spectral(v, outfile, nothing, sgrid, p)
+                @test ret === sgrid
+                @test isfile(outfile)
+                # At least one node received gridded data (finite physical value).
+                @test any(isfinite, sgrid.physical[:, :, 1])
+                NCDataset(outfile, "r") do ds
+                    @test haskey(ds, "DBZ")
+                    @test haskey(ds, "grid_mapping")
+                end
+            finally
+                rm(outfile; force=true)
+            end
+        end
+
+        @testset "RR (PPI) end-to-end" begin
+            sgrid = Daisho.create_radar_grid("RR", md;
+                xmin=-1500.0, xmax=1500.0, xdim=4,
+                ymin=-1500.0, ymax=1500.0, ydim=4)
+            spec = Daisho.build_springsteel_grid_spec(sgrid, v)
+            @test spec.shape === :ppi_2d
+            gp = Daisho.get_springsteel_gridpoints_zyx(sgrid)
+            @test spec.x_axis ≈ gp[1, :, 2]
+            @test spec.y_axis ≈ gp[:, 1, 1]
+            outfile = tempname() * ".nc"
+            try
+                ret = Daisho.grid_radar_ppi_spectral(v, outfile, nothing, sgrid, p)
+                @test ret === sgrid
+                @test isfile(outfile)
+                @test any(isfinite, sgrid.physical[:, :, 1])
+            finally
+                rm(outfile; force=true)
+            end
+        end
+
+        @testset "R (column) end-to-end" begin
+            sgrid = Daisho.create_radar_grid("R", md;
+                xmin=0.0, xmax=300.0, xdim=4)
+            spec = Daisho.build_springsteel_grid_spec(sgrid, v)
+            @test spec.shape === :column_1d
+            @test spec.z_axis ≈ Daisho.get_springsteel_gridpoints_zyx(sgrid)
+            outfile = tempname() * ".nc"
+            try
+                ret = Daisho.grid_radar_column_spectral(v, outfile, nothing, sgrid, p)
+                @test ret === sgrid
+                @test isfile(outfile)
+            finally
+                rm(outfile; force=true)
+            end
+        end
+    end
+
+    # ── [grid.springsteel] config-driven construction ─────────────────────
+    @testset "SpringsteelGridConfig construction" begin
+        vars = Dict("DBZ" => 1, "VEL" => 2)
+
+        @testset "Output sizing defaults to cells + 1 on spline axes" begin
+            cfg = SpringsteelGridConfig(
+                i = SpringsteelAxisConfig(min = -120000.0, max = 120000.0, cells = 240),
+                j = SpringsteelAxisConfig(min = -120000.0, max = 120000.0, cells = 240),
+                k = SpringsteelAxisConfig(min = 0.0, max = 18000.0, cells = 19))
+            sgrid = Daisho.create_radar_grid(cfg, vars)
+            @test sgrid isa RRR_Grid
+            # The §8 bug case: a 240-cell square grid must come out 241×241×20,
+            # not Springsteel's geometry-unaware (242, 1447, 58).
+            @test sgrid.params.i_regular_out == 241
+            @test sgrid.params.j_regular_out == 241
+            @test sgrid.params.k_regular_out == 20
+        end
+
+        @testset "Explicit regular_out overrides the default" begin
+            cfg = SpringsteelGridConfig(
+                i = SpringsteelAxisConfig(min = 0.0, max = 1000.0, cells = 4,
+                                          regular_out = 9),
+                j = SpringsteelAxisConfig(min = 0.0, max = 1000.0, cells = 4),
+                k = SpringsteelAxisConfig(min = 0.0, max = 500.0, cells = 2))
+            sgrid = Daisho.create_radar_grid(cfg, vars)
+            @test sgrid.params.i_regular_out == 9
+            @test sgrid.params.j_regular_out == 5
+        end
+
+        @testset "Legacy create_radar_grid also sizes output per geometry" begin
+            sgrid = Daisho.create_radar_grid("RRR", vars;
+                xmin=-5000.0, xmax=5000.0, xdim=4,
+                ymin=-5000.0, ymax=5000.0, ydim=4,
+                zmin=0.0, zmax=5000.0, zdim=2)
+            @test sgrid.params.i_regular_out == 5
+            @test sgrid.params.j_regular_out == 5
+            @test sgrid.params.k_regular_out == 3
+        end
+
+        @testset "j-axis BCs land on the correct Springsteel sides" begin
+            # Springsteel reads the j-spline's jMin-side BC from BCD and the
+            # jMax-side from BCU; this pins the min→BCD / max→BCU mapping.
+            cfg = SpringsteelGridConfig(geometry = "RR",
+                i = SpringsteelAxisConfig(min = 0.0, max = 1000.0, cells = 3),
+                j = SpringsteelAxisConfig(min = 0.0, max = 1000.0, cells = 3,
+                    bc_min = Dict{String,Springsteel.BoundaryConditions}(
+                        "default" => DirichletBC(1.5)),
+                    bc_max = Dict{String,Springsteel.BoundaryConditions}(
+                        "default" => NeumannBC(0.0))))
+            sgrid = Daisho.create_radar_grid(cfg, vars)
+            @test sgrid.params.BCD["default"].u == 1.5     # jMin side
+            @test sgrid.params.BCU["default"].du == 0.0    # jMax side
+        end
+
+        @testset "Per-field BC override must name a configured field" begin
+            cfg = SpringsteelGridConfig(geometry = "R",
+                i = SpringsteelAxisConfig(min = 0.0, max = 1000.0, cells = 3,
+                    bc_min = Dict{String,Springsteel.BoundaryConditions}(
+                        "default" => NaturalBC(), "NOPE" => NaturalBC())))
+            @test_throws ArgumentError Daisho.create_radar_grid(cfg, vars)
+        end
+
+        @testset "Cylindrical grids build but refuse accumulator gridding" begin
+            cfg = SpringsteelGridConfig(geometry = "RLZ",
+                i = SpringsteelAxisConfig(min = 0.0, max = 60000.0, cells = 8),
+                j = SpringsteelAxisConfig(max_wavenumber = 4),
+                k = SpringsteelAxisConfig(min = 0.0, max = 12000.0, points = 7))
+            sgrid = Daisho.create_radar_grid(cfg, vars)
+            @test sgrid.params.geometry == "RLZ"
+            @test sgrid.params.kDim == 7
+            @test sgrid.params.max_wavenumber["default"] == 4
+            err = try
+                Daisho.build_springsteel_grid_spec(sgrid;
+                    reference_latitude = 0.0, reference_longitude = 0.0)
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin("RLZ", err.msg)
+        end
+    end
+
     # ── Backward compatibility ────────────────────────────────────────────
     @testset "Backward compatibility" begin
         @testset "initialize_regular_grid still works" begin

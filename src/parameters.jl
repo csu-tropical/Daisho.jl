@@ -226,50 +226,101 @@ Base.@kwdef struct RhiGridParameters
 end
 
 """
-    SpectralBCParameters
+    SpringsteelAxisConfig
 
-Per-axis-side boundary conditions for a Springsteel spectral grid. Each field
-holds a Springsteel `BoundaryConditions`. Defaults are `NaturalBC()` (no
-constraint).
+One axis of a `[grid.springsteel]` section, in Springsteel's native i/j/k
+vocabulary. Which keys are meaningful depends on the basis the geometry puts
+on the axis (see [`SpringsteelGridConfig`](@ref) and
+[`SPRINGSTEEL_AXIS_BASES`](@ref)):
+
+- **spline** axes use `min`/`max`/`cells`. `cells` counts B-spline **cells**
+  (the Springsteel `num_cells`), not gridpoints; physical quadrature points
+  per axis = `cells × mubar`.
+- **Chebyshev** axes (the `k` of `RZ`/`RLZ`/`SLZ`) use `min`/`max`/`points`
+  (physical gridpoints, the Springsteel `kDim`).
+- **Fourier** axes (the `j` of cylindrical/spherical geometries) are
+  auto-sized by Springsteel from the ring formula; only `max_wavenumber`
+  applies (`-1` = uncapped).
+
+`regular_out` is the number of regularly spaced output points
+`write_radar_netcdf` resamples onto along this axis; `0` selects the
+geometry-aware default (`cells + 1` for spline axes, Springsteel's default
+otherwise). `bc_min`/`bc_max` hold the boundary conditions for the axis'
+min/max sides as per-variable dicts keyed by field name with a `"default"`
+fallback, mirroring Springsteel's own convention.
 """
-Base.@kwdef struct SpectralBCParameters
-    xL::BoundaryConditions = NaturalBC()
-    xR::BoundaryConditions = NaturalBC()
-    yL::BoundaryConditions = NaturalBC()
-    yR::BoundaryConditions = NaturalBC()
-    zL::BoundaryConditions = NaturalBC()
-    zR::BoundaryConditions = NaturalBC()
+Base.@kwdef struct SpringsteelAxisConfig
+    min::Float64        = 0.0
+    max::Float64        = 0.0
+    cells::Int          = 0
+    points::Int         = 0
+    regular_out::Int    = 0
+    max_wavenumber::Int = -1
+    bc_min::Dict{String,BoundaryConditions} =
+        Dict{String,BoundaryConditions}("default" => NaturalBC())
+    bc_max::Dict{String,BoundaryConditions} =
+        Dict{String,BoundaryConditions}("default" => NaturalBC())
 end
 
 """
-    SpectralGridParameters
+    SPRINGSTEEL_AXIS_BASES
 
-Spectral (B-spline) grid specification for Springsteel. `xdim`/`ydim`/`zdim`
-count B-spline cells; physical points per dimension = `cells * mubar`.
+Basis placed on each (i, j, k) axis by every Springsteel geometry the
+`[grid.springsteel]` schema supports: `:spline`, `:chebyshev`, `:fourier`
+(auto-sized azimuthal), or `:none` (the axis does not exist). Drives both the
+TOML validation (which keys an axis table must/may carry) and the
+`SpringsteelGridParameters` construction in `create_radar_grid`.
+
+The Fourier/Chebyshev-primary geometries (`L*`, `Z*`) need explicit spectral
+dimensions and are out of the schema's scope — build those in Julia via
+`Springsteel.SpringsteelGridParameters`/`createGrid` and pass the grid to the
+gridding entry points directly.
+"""
+const SPRINGSTEEL_AXIS_BASES = Dict{String,NTuple{3,Symbol}}(
+    "R"   => (:spline, :none,    :none),
+    "RZ"  => (:spline, :none,    :chebyshev),
+    "RR"  => (:spline, :spline,  :none),
+    "RRR" => (:spline, :spline,  :spline),
+    "RL"  => (:spline, :fourier, :none),
+    "RLZ" => (:spline, :fourier, :chebyshev),
+    "RLR" => (:spline, :fourier, :spline),
+    "SL"  => (:spline, :fourier, :none),
+    "SLZ" => (:spline, :fourier, :chebyshev),
+    "SLR" => (:spline, :fourier, :spline),
+)
+
+"""
+    SpringsteelGridConfig
+
+Geometry-general Springsteel grid specification loaded from
+`[grid.springsteel]`. Expresses a `Springsteel.SpringsteelGridParameters`
+directly — geometry, quadrature, per-axis bounds/sizes, per-variable boundary
+conditions, and output resampling counts — with no intermediate x/y/z
+vocabulary (x/y/z only makes sense for the Cartesian geometries; i/j/k spans
+them all: i = easting or radius, j = northing or azimuth, k = altitude).
+
+Supported geometries (the spline-`i` families): Cartesian `R`/`RZ`/`RR`/`RRR`,
+cylindrical `RL`/`RLZ`/`RLR`, spherical `SL`/`SLZ`/`SLR`. The Springsteel
+variable map is **not** configured here — it is always derived from `[fields]`
+via [`field_index_dict`](@ref) so the gridded-array column order and the
+spectral-grid variable order can never disagree. Anything beyond this schema
+(per-variable spectral filters, exotic setups) should be built in Julia with
+`Springsteel.SpringsteelGridParameters(vars = radar_vars(p), …)` +
+`createGrid` and passed to the gridding entry points directly.
 
 # Fields
-- `geometry::String`: `"R"`, `"RR"`, or `"RRR"`.
-- `mubar::Int`: quadrature points per cell.
+- `geometry::String`: Springsteel geometry code (see above).
+- `mubar::Int`: quadrature points per spline cell.
 - `quadrature::Symbol`: `:gauss` or `:regular`.
-- `xmin`, `xmax`, `xdim`: i-axis (X) bounds and cell count.
-- `ymin`, `ymax`, `ydim`: j-axis (Y) bounds and cell count (for RR/RRR).
-- `zmin`, `zmax`, `zdim`: k-axis (Z) bounds and cell count (for RRR).
-- `bc::SpectralBCParameters`: per-axis-side boundary conditions.
+- `i`, `j`, `k`: per-axis [`SpringsteelAxisConfig`](@ref).
 """
-Base.@kwdef struct SpectralGridParameters
+Base.@kwdef struct SpringsteelGridConfig
     geometry::String   = "RRR"
     mubar::Int         = 3
     quadrature::Symbol = :gauss
-    xmin::Float64      = -125000.0
-    xmax::Float64      =  125000.0
-    xdim::Int          = 50
-    ymin::Float64      = -125000.0
-    ymax::Float64      =  125000.0
-    ydim::Int          = 50
-    zmin::Float64      = 0.0
-    zmax::Float64      = 15000.0
-    zdim::Int          = 10
-    bc::SpectralBCParameters = SpectralBCParameters()
+    i::SpringsteelAxisConfig = SpringsteelAxisConfig(min = -125000.0, max = 125000.0, cells = 50)
+    j::SpringsteelAxisConfig = SpringsteelAxisConfig(min = -125000.0, max = 125000.0, cells = 50)
+    k::SpringsteelAxisConfig = SpringsteelAxisConfig(min = 0.0,       max = 15000.0,  cells = 10)
 end
 
 """
@@ -348,11 +399,11 @@ out the one matching the gridding driver you are calling (e.g.,
 `p.grid.cartesian` for `grid_radar_volume`).
 """
 Base.@kwdef struct GridParameters
-    cartesian::CartesianGridParameters = CartesianGridParameters()
-    latlon::LatLonGridParameters       = LatLonGridParameters()
-    rhi::RhiGridParameters             = RhiGridParameters()
-    spectral::SpectralGridParameters   = SpectralGridParameters()
-    metadata::MetadataParameters       = MetadataParameters()
+    cartesian::CartesianGridParameters    = CartesianGridParameters()
+    latlon::LatLonGridParameters          = LatLonGridParameters()
+    rhi::RhiGridParameters                = RhiGridParameters()
+    springsteel::SpringsteelGridConfig    = SpringsteelGridConfig()
+    metadata::MetadataParameters          = MetadataParameters()
 end
 
 """
@@ -753,46 +804,166 @@ end
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;
 # any sub-table that is present is still validated strictly.
 function _grid_from_dict(d::AbstractDict)
-    cartesian = haskey(d, "cartesian") ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian") : CartesianGridParameters()
-    latlon    = haskey(d, "latlon")    ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon")    : LatLonGridParameters()
-    rhi       = haskey(d, "rhi")       ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi")       : RhiGridParameters()
-    spectral  = haskey(d, "spectral")  ? _spectral_from_dict(d["spectral"])                                                  : SpectralGridParameters()
-    metadata  = haskey(d, "metadata")  ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
+    if haskey(d, "spectral")
+        throw(ArgumentError(
+            "`[grid.spectral]` was replaced by `[grid.springsteel]`, which " *
+            "speaks Springsteel's native i/j/k axis vocabulary (general " *
+            "across geometries) and counts B-spline CELLS unambiguously " *
+            "(the old `xdim` counted cells but read like a gridpoint dim). " *
+            "Map xmin/xmax/xdim → `[grid.springsteel.i]` min/max/cells " *
+            "(likewise y → j, z → k) and `[grid.spectral.bc.xL/xR]` → " *
+            "`[grid.springsteel.i.bc]` min/max. " *
+            "Run `print_config(\"template.toml\")` for the new template."))
+    end
+    cartesian   = haskey(d, "cartesian")   ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian") : CartesianGridParameters()
+    latlon      = haskey(d, "latlon")      ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon")    : LatLonGridParameters()
+    rhi         = haskey(d, "rhi")         ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi")       : RhiGridParameters()
+    springsteel = haskey(d, "springsteel") ? _springsteel_from_dict(d["springsteel"])                                            : SpringsteelGridConfig()
+    metadata    = haskey(d, "metadata")    ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
     return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi,
-                          spectral=spectral, metadata=metadata)
+                          springsteel=springsteel, metadata=metadata)
 end
 
-function _spectral_from_dict(d::AbstractDict)
-    bc_dict = _section(d, "bc"; parent="grid.spectral")
-    bc = SpectralBCParameters(
-        xL = _parse_bc(_section(bc_dict, "xL"; parent="grid.spectral.bc"); side="xL"),
-        xR = _parse_bc(_section(bc_dict, "xR"; parent="grid.spectral.bc"); side="xR"),
-        yL = _parse_bc(_section(bc_dict, "yL"; parent="grid.spectral.bc"); side="yL"),
-        yR = _parse_bc(_section(bc_dict, "yR"; parent="grid.spectral.bc"); side="yR"),
-        zL = _parse_bc(_section(bc_dict, "zL"; parent="grid.spectral.bc"); side="zL"),
-        zR = _parse_bc(_section(bc_dict, "zR"; parent="grid.spectral.bc"); side="zR"),
-    )
-    # The scalar struct loader requires every field to be present; `bc`
-    # comes from the per-side parsing above, not from `d` itself, so stuff a
-    # placeholder in to satisfy the missing-key check and ignore it below.
-    rest = Dict{String,Any}(k => v for (k, v) in d if k != "bc")
-    rest["bc"] = SpectralBCParameters()
-    base = _struct_from_dict(SpectralGridParameters, rest; section="grid.spectral")
-    # Rebuild with parsed bc.
-    return SpectralGridParameters(
-        geometry   = base.geometry,
-        mubar      = base.mubar,
-        quadrature = base.quadrature,
-        xmin = base.xmin, xmax = base.xmax, xdim = base.xdim,
-        ymin = base.ymin, ymax = base.ymax, ydim = base.ydim,
-        zmin = base.zmin, zmax = base.zmax, zdim = base.zdim,
-        bc = bc,
-    )
+# Build a SpringsteelGridConfig from the `[grid.springsteel]` table. The
+# geometry decides which axis tables must/may exist and which keys each may
+# carry (see SPRINGSTEEL_AXIS_BASES); everything present is validated strictly.
+function _springsteel_from_dict(d::AbstractDict)
+    allowed = Set(["geometry", "mubar", "quadrature", "i", "j", "k"])
+    unknown = setdiff(Set(keys(d)), allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[grid.springsteel]`. " *
+        "Allowed keys: geometry, mubar, quadrature, i, j, k"))
+
+    haskey(d, "geometry") || throw(ArgumentError(
+        "Missing required key `geometry` in section `[grid.springsteel]`. " *
+        "Run `print_config(\"template.toml\")` for a complete template."))
+    geometry = String(d["geometry"])
+    haskey(SPRINGSTEEL_AXIS_BASES, geometry) || throw(ArgumentError(
+        "[grid.springsteel]: unsupported geometry `$(geometry)`. Supported: " *
+        "$(join(sort(collect(keys(SPRINGSTEEL_AXIS_BASES))), ", ")). " *
+        "Fourier/Chebyshev-primary geometries (L, LL, LLZ, Z, ZZ, ZZZ) need " *
+        "explicit spectral dimensions; build those in Julia via " *
+        "`Springsteel.SpringsteelGridParameters`/`createGrid` (with " *
+        "`vars = radar_vars(p)`) and pass the grid to the gridding entry " *
+        "points directly."))
+
+    mubar = haskey(d, "mubar") ? Int(d["mubar"]) : 3
+    quadrature = haskey(d, "quadrature") ? Symbol(String(d["quadrature"])) : :gauss
+    quadrature in (:gauss, :regular) || throw(ArgumentError(
+        "[grid.springsteel]: unknown quadrature `$(quadrature)`. " *
+        "Allowed: \"gauss\", \"regular\"."))
+
+    bases = SPRINGSTEEL_AXIS_BASES[geometry]
+    axis(name, basis) = _springsteel_axis_from_dict(
+        haskey(d, name) ? d[name] : nothing, name, basis)
+    return SpringsteelGridConfig(
+        geometry = geometry, mubar = mubar, quadrature = quadrature,
+        i = axis("i", bases[1]), j = axis("j", bases[2]), k = axis("k", bases[3]))
 end
+
+# Parse one `[grid.springsteel.<axis>]` table per the basis its geometry puts
+# on that axis. `d === nothing` means the table was absent.
+function _springsteel_axis_from_dict(d, name::String, basis::Symbol)
+    sect = "grid.springsteel.$(name)"
+
+    if basis === :none
+        d === nothing || throw(ArgumentError(
+            "[$(sect)]: this geometry has no $(name) axis; remove the table."))
+        return SpringsteelAxisConfig()
+    end
+
+    if basis === :fourier
+        # Auto-sized azimuthal Fourier axis: Springsteel derives the dimensions
+        # from the ring formula and the BCs are forced periodic; only the
+        # wavenumber cap and the output resampling count are configurable.
+        d === nothing && return SpringsteelAxisConfig()
+        allowed = Set(["max_wavenumber", "regular_out"])
+        unknown = setdiff(Set(keys(d)), allowed)
+        isempty(unknown) || throw(ArgumentError(
+            "Unknown key(s) $(_fmt_keys(unknown)) in section `[$(sect)]`. " *
+            "This geometry's $(name) axis is an auto-sized Fourier axis " *
+            "(periodic, ring-formula dimensions); allowed keys: " *
+            "max_wavenumber, regular_out"))
+        return SpringsteelAxisConfig(
+            max_wavenumber = haskey(d, "max_wavenumber") ? Int(d["max_wavenumber"]) : -1,
+            regular_out    = haskey(d, "regular_out")    ? Int(d["regular_out"])    : 0)
+    end
+
+    # Spline / Chebyshev axes need an explicit table.
+    d === nothing && throw(ArgumentError(
+        "Missing required TOML section `[$(sect)]` (this geometry's $(name) " *
+        "axis is $(basis === :spline ? "a B-spline" : "a Chebyshev") axis). " *
+        "Run `print_config(\"template.toml\")` for a complete template."))
+    sizekey = basis === :spline ? "cells" : "points"
+    required = ("min", "max", sizekey)
+    allowed = Set([required..., "regular_out", "bc"])
+    unknown = setdiff(Set(keys(d)), allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[$(sect)]`. " *
+        "Allowed keys: $(join(sort(collect(allowed)), ", ")) " *
+        (basis === :spline ?
+            "(`cells` counts B-spline cells; physical points = cells × mubar)" :
+            "(`points` counts Chebyshev gridpoints)")))
+    missing_keys = setdiff(Set(required), Set(keys(d)))
+    isempty(missing_keys) || throw(ArgumentError(
+        "Missing required key(s) $(_fmt_keys(Symbol.(collect(missing_keys)))) " *
+        "in section `[$(sect)]`. " *
+        "Run `print_config(\"template.toml\")` for a complete template."))
+
+    bc_min, bc_max = haskey(d, "bc") ?
+        _springsteel_bc_from_dict(d["bc"], sect) :
+        (Dict{String,BoundaryConditions}("default" => NaturalBC()),
+         Dict{String,BoundaryConditions}("default" => NaturalBC()))
+    return SpringsteelAxisConfig(
+        min = Float64(d["min"]), max = Float64(d["max"]),
+        cells  = basis === :spline    ? Int(d["cells"])  : 0,
+        points = basis === :chebyshev ? Int(d["points"]) : 0,
+        regular_out = haskey(d, "regular_out") ? Int(d["regular_out"]) : 0,
+        bc_min = bc_min, bc_max = bc_max)
+end
+
+# Parse a `[grid.springsteel.<axis>.bc]` table into per-variable (bc_min,
+# bc_max) dicts. The `min`/`max` keys set the side's "default" BC; any other
+# key names a field and maps to a table with its own `min`/`max` overrides.
+# Field names are validated against `[fields]` at `create_radar_grid` time
+# (this parser runs before the field list is fixed).
+function _springsteel_bc_from_dict(d::AbstractDict, sect::String)
+    bc_min = Dict{String,BoundaryConditions}("default" => NaturalBC())
+    bc_max = Dict{String,BoundaryConditions}("default" => NaturalBC())
+    for (k, v) in d
+        if k == "min" || k == "max"
+            (k == "min" ? bc_min : bc_max)["default"] =
+                _parse_bc_value(v; at = "[$(sect).bc] `$(k)`")
+        else
+            v isa AbstractDict || throw(ArgumentError(
+                "[$(sect).bc]: per-field override `$(k)` must be a table " *
+                "with `min` and/or `max` keys, e.g. " *
+                "$(k) = { min = \"natural\" }; got $(typeof(v))."))
+            unknown = setdiff(Set(keys(v)), Set(["min", "max"]))
+            isempty(unknown) || throw(ArgumentError(
+                "Unknown key(s) $(_fmt_keys(unknown)) in `[$(sect).bc]` " *
+                "override for field `$(k)`. Allowed keys: min, max"))
+            haskey(v, "min") && (bc_min[String(k)] =
+                _parse_bc_value(v["min"]; at = "[$(sect).bc] `$(k).min`"))
+            haskey(v, "max") && (bc_max[String(k)] =
+                _parse_bc_value(v["max"]; at = "[$(sect).bc] `$(k).max`"))
+        end
+    end
+    return bc_min, bc_max
+end
+
+# A BC value is either a plain string (a parameterless BC type, e.g.
+# "natural") or a table with a `type` key plus that type's parameters.
+_parse_bc_value(v::AbstractString; at::String) =
+    _parse_bc(Dict{String,Any}("type" => String(v)); at = at)
+_parse_bc_value(v::AbstractDict; at::String) = _parse_bc(v; at = at)
+_parse_bc_value(v; at::String) = throw(ArgumentError(
+    "$(at): a boundary condition must be a string (e.g. \"natural\") or a " *
+    "table (e.g. { type = \"dirichlet\", value = 0.0 }); got $(typeof(v))."))
 
 # Map a BC sub-table to a Springsteel BoundaryConditions.
-function _parse_bc(d::AbstractDict; side::String="")
-    where_ = isempty(side) ? "BC sub-table" : "[grid.spectral.bc.$(side)]"
+function _parse_bc(d::AbstractDict; at::String="BC sub-table")
+    where_ = at
     haskey(d, "type") || throw(ArgumentError(
         "$(where_) missing required `type` key"))
     t = lowercase(String(d["type"]))

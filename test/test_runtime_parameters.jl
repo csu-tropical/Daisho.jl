@@ -75,13 +75,17 @@ using TOML
         @test p.grid.cartesian.zdim == 37
     end
 
-    @testset "Spectral grid template uses NaturalBC on every side" begin
+    @testset "Springsteel grid template uses NaturalBC on every side" begin
         p = DaishoParameters()
-        s = p.grid.spectral
+        s = p.grid.springsteel
         @test s.geometry == "RRR"
         @test s.mubar == 3
         @test s.quadrature == :gauss
-        for side in (s.bc.xL, s.bc.xR, s.bc.yL, s.bc.yR, s.bc.zL, s.bc.zR)
+        @test s.i.cells == 50
+        @test s.k.max == 15000.0
+        for axis in (s.i, s.j, s.k), sidedict in (axis.bc_min, axis.bc_max)
+            @test collect(keys(sidedict)) == ["default"]
+            side = sidedict["default"]
             @test side isa Springsteel.BoundaryConditions
             @test side.u === nothing
             @test side.du === nothing
@@ -111,24 +115,29 @@ using TOML
         end
     end
 
-    @testset "BC sub-tables parse to BoundaryConditions" begin
+    @testset "BC tables parse to BoundaryConditions (defaults + per-field)" begin
         mktemp() do path, io
             close(io)
             _write_full_config(path, Dict(
-                "grid" => Dict("spectral" => Dict("bc" => Dict(
-                    "xL" => Dict("type" => "dirichlet", "value" => 1.5),
-                    "xR" => Dict("type" => "neumann"),
-                    "yL" => Dict("type" => "robin", "alpha" => 1.0, "beta" => -2.0, "gamma" => 3.0),
-                    "yR" => Dict("type" => "periodic"),
-                ))),
+                "grid" => Dict("springsteel" => Dict(
+                    "i" => Dict("bc" => Dict(
+                        "min" => Dict("type" => "dirichlet", "value" => 1.5),
+                        "max" => "neumann",                      # string shorthand
+                        "DBZ" => Dict("min" => Dict("type" => "robin",
+                            "alpha" => 1.0, "beta" => -2.0, "gamma" => 3.0)),
+                    )),
+                    "j" => Dict("bc" => Dict("min" => "periodic")),
+                )),
             ))
             p = DaishoParameters(path)
-            @test p.grid.spectral.bc.xL.u == 1.5
-            @test p.grid.spectral.bc.xR.du == 0.0
-            @test p.grid.spectral.bc.yL.robin == (1.0, -2.0, 3.0)
-            @test p.grid.spectral.bc.yR.periodic == true
-            # Untouched sides still come through as NaturalBC (from template).
-            @test p.grid.spectral.bc.zL.u === nothing
+            i = p.grid.springsteel.i
+            @test i.bc_min["default"].u == 1.5
+            @test i.bc_max["default"].du == 0.0
+            @test i.bc_min["DBZ"].robin == (1.0, -2.0, 3.0)
+            @test !haskey(i.bc_max, "DBZ")          # only min was overridden
+            @test p.grid.springsteel.j.bc_min["default"].periodic == true
+            # Untouched sides still come through as NaturalBC.
+            @test p.grid.springsteel.k.bc_min["default"].u === nothing
         end
     end
 
@@ -324,12 +333,74 @@ using TOML
         mktemp() do path, io
             close(io)
             _write_full_config(path, Dict(
-                "grid" => Dict("spectral" => Dict("bc" => Dict(
-                    "xL" => Dict("type" => "tornado"),
-                ))),
+                "grid" => Dict("springsteel" => Dict("i" => Dict("bc" => Dict(
+                    "min" => Dict("type" => "tornado"),
+                )))),
             ))
             @test_throws ArgumentError DaishoParameters(path)
         end
+    end
+
+    @testset "[grid.spectral] migration diagnostic" begin
+        mktemp() do path, io
+            close(io)
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            delete!(base["grid"], "springsteel")
+            base["grid"]["spectral"] = Dict{String,Any}("geometry" => "RRR")
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
+            err = try DaishoParameters(path); nothing catch e; e end
+            @test err isa ArgumentError
+            @test occursin("[grid.springsteel]", err.msg)
+            @test occursin("cells", err.msg)
+        end
+    end
+
+    @testset "[grid.springsteel] geometry-driven validation" begin
+        base() = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+        load(d) = mktemp() do path, io
+            close(io)
+            open(path, "w") do f
+                TOML.print(f, d)
+            end
+            DaishoParameters(path)
+        end
+
+        # Unsupported geometry names the escape hatch.
+        d = base(); d["grid"]["springsteel"]["geometry"] = "LL"
+        err = try load(d); nothing catch e; e end
+        @test err isa ArgumentError
+        @test occursin("SpringsteelGridParameters", err.msg)
+
+        # Spline axes reject `points`; Chebyshev axes reject `cells`.
+        d = base(); d["grid"]["springsteel"]["i"]["points"] = 12
+        @test_throws ArgumentError load(d)
+        d = base(); d["grid"]["springsteel"]["geometry"] = "RLZ"
+        d["grid"]["springsteel"]["j"] = Dict{String,Any}("max_wavenumber" => 4)
+        @test_throws ArgumentError load(d)   # k still says cells, RLZ k wants points
+        d["grid"]["springsteel"]["k"] = Dict{String,Any}(
+            "min" => 0.0, "max" => 15000.0, "points" => 10)
+        p = load(d)
+        @test p.grid.springsteel.k.points == 10
+        @test p.grid.springsteel.j.max_wavenumber == 4
+
+        # Fourier j axes reject min/max/cells/bc outright.
+        d2 = base(); d2["grid"]["springsteel"]["geometry"] = "RL"
+        delete!(d2["grid"]["springsteel"], "k")
+        d2["grid"]["springsteel"]["j"] = Dict{String,Any}("cells" => 10)
+        @test_throws ArgumentError load(d2)
+        delete!(d2["grid"]["springsteel"], "j")
+        p2 = load(d2)
+        @test p2.grid.springsteel.geometry == "RL"
+
+        # Geometries without an axis reject a table for it.
+        d3 = base(); d3["grid"]["springsteel"]["geometry"] = "R"
+        @test_throws ArgumentError load(d3)   # template still carries j/k tables
+        delete!(d3["grid"]["springsteel"], "j")
+        delete!(d3["grid"]["springsteel"], "k")
+        p3 = load(d3)
+        @test p3.grid.springsteel.geometry == "R"
     end
 
     # Replace the whole [fields] table (deep-merge would otherwise keep the
@@ -488,17 +559,18 @@ using TOML
     @testset "create_radar_grid(p) builds correct geometry" begin
         mktemp() do path, io
             close(io)
-            _write_config_with_fields(path, Dict(
-                    "DBZ" => ["linear_interp"],
-                    "VEL" => ["weighted_interp"],
-                ),
-                Dict("grid" => Dict("spectral" => Dict(
-                    "geometry" => "R",
-                    "xmin" => 0.0,
-                    "xmax" => 1000.0,
-                    "xdim" => 4,
-                ))),
-            )
+            base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+            base["fields"] = Dict{String,Any}(
+                "DBZ" => ["linear_interp"],
+                "VEL" => ["weighted_interp"])
+            # Replace (not merge) the grid table: an R geometry has no j/k axes.
+            base["grid"]["springsteel"] = Dict{String,Any}(
+                "geometry" => "R",
+                "i" => Dict{String,Any}(
+                    "min" => 0.0, "max" => 1000.0, "cells" => 4))
+            open(path, "w") do f
+                TOML.print(f, base)
+            end
             p = DaishoParameters(path)
             sgrid = Daisho.create_radar_grid(p)
             @test sgrid isa R_Grid

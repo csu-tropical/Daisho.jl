@@ -246,7 +246,7 @@
                 Daisho.GridParameters(cartesian = small_cart,
                                       latlon = small_latlon,
                                       rhi = small_rhi,
-                                      spectral = p.grid.spectral),
+                                      springsteel = p.grid.springsteel),
                 p.io, p.provided)
         end
 
@@ -314,7 +314,7 @@
             Daisho.GridParameters(cartesian = small_cart,
                                   latlon = small_latlon,
                                   rhi = small_rhi,
-                                  spectral = p_default.grid.spectral,
+                                  springsteel = p_default.grid.springsteel,
                                   metadata = custom_md),
             p_default.io, p_default.provided)
         v = synthetic_volume(n_sweeps = 2, n_rays = 24, n_gates = 6)
@@ -366,7 +366,7 @@
             Daisho.GridParameters(cartesian = small_cart,
                                   latlon = p_default.grid.latlon,
                                   rhi = p_default.grid.rhi,
-                                  spectral = p_default.grid.spectral,
+                                  springsteel = p_default.grid.springsteel,
                                   metadata = p_default.grid.metadata),
             p_default.io, p_default.provided)
         v = synthetic_volume(n_sweeps = 1, n_rays = 12, n_gates = 4)
@@ -405,7 +405,7 @@
             Daisho.GridParameters(cartesian = small_cart,
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
-                                  spectral = p.grid.spectral),
+                                  springsteel = p.grid.springsteel),
             p.io, p.provided)
         outfile = tempname() * "_seapol.nc"
         try

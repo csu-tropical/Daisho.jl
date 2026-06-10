@@ -9,7 +9,7 @@
             Daisho.GridParameters(cartesian = small_cart,
                                   latlon = p.grid.latlon,
                                   rhi = p.grid.rhi,
-                                  spectral = p.grid.spectral),
+                                  springsteel = p.grid.springsteel),
             p.io, p.provided)
     end
 

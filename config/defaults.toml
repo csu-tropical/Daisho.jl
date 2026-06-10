@@ -22,12 +22,12 @@
 #   [io]                   -> p.io
 #   [qc]                   -> p.qc
 #   [gridding]             -> p.gridding
-#   [grid.cartesian]       -> p.grid.cartesian
-#   [grid.latlon]          -> p.grid.latlon
-#   [grid.rhi]             -> p.grid.rhi
-#   [grid.spectral]        -> p.grid.spectral
-#   [grid.spectral.bc.*]   -> p.grid.spectral.bc.*  (sub-table per axis side)
-#   [grid.metadata]        -> p.grid.metadata  (CF global attrs for outputs)
+#   [grid.cartesian]          -> p.grid.cartesian
+#   [grid.latlon]             -> p.grid.latlon
+#   [grid.rhi]                -> p.grid.rhi
+#   [grid.springsteel]        -> p.grid.springsteel  (Springsteel spectral grid)
+#   [grid.springsteel.i/j/k]  -> p.grid.springsteel.i/j/k  (per-axis spec + bc)
+#   [grid.metadata]           -> p.grid.metadata  (CF global attrs for outputs)
 #
 # ── [fields] tag vocabulary ──────────────────────────────────────────────────
 # Each field maps to a flat ARRAY of tags `[ ... ]`. No tag is required;
@@ -81,7 +81,7 @@ rhohv_threshold      = 0.7
 # Beam power level defining the beam edge. The edge-referenced gate inclusion sets
 # the beam half-angle to beam_cutoff = ln(1/power_threshold)/beam_coef, so LOWER
 # power_threshold ⇒ WIDER beam (more of the exponential tail counts). 0.5 is the
-# half-power half-beamwidth (legacy behaviour).
+# half-power half-beamwidth.
 power_threshold = 0.5
 # ROI = grid increment × factor; the box half-width/half-height for gate
 # inclusion. Optional (default 0.75 each).
@@ -141,38 +141,68 @@ zmin  =     0.0
 zincr =   250.0
 zdim  =      41
 
-[grid.spectral]
-# Spectral grid for Springsteel. xdim/ydim/zdim count B-spline cells (not
-# physical points); physical points = cells * mubar.
-geometry   = "RRR"     # "R" | "RR" | "RRR"
+# Springsteel spectral grid. The section speaks Springsteel's native i/j/k
+# axis vocabulary, because x/y/z only makes sense for Cartesian geometries:
+#   i = easting (Cartesian) or radius (cylindrical/spherical)
+#   j = northing (Cartesian) or azimuth (auto-sized Fourier)
+#   k = altitude
+# Supported geometries: R, RZ, RR, RRR (Cartesian); RL, RLZ, RLR (cylindrical);
+# SL, SLZ, SLR (spherical). Per-axis keys depend on the basis the geometry
+# puts on the axis:
+#   B-spline axes  -> min, max, cells   (cells counts B-spline CELLS, not
+#                     gridpoints — physical quadrature points = cells × mubar;
+#                     unlike [grid.cartesian], whose dims count gridpoints)
+#   Chebyshev axes -> min, max, points  (the k of RZ/RLZ/SLZ)
+#   Fourier axes   -> auto-sized; optional max_wavenumber only (the j of
+#                     RL*/SL*; periodic by construction)
+# Every axis with output may set `regular_out`: the number of regularly
+# spaced points write_radar_netcdf resamples onto along that axis. Default:
+# cells + 1 on B-spline axes (clean cell-edge spacing), Springsteel's default
+# otherwise.
+# The Springsteel variable map is always derived from [fields]; it is not
+# configured here. Grids beyond this schema (per-variable spectral filters,
+# Fourier/Chebyshev-primary geometries): build the grid in Julia with
+# Springsteel.SpringsteelGridParameters(vars = radar_vars(p), ...) +
+# createGrid and pass it to the gridding entry points directly.
+[grid.springsteel]
+geometry   = "RRR"
 mubar      = 3
 quadrature = "gauss"   # "gauss" | "regular"
-xmin       = -125000.0
-xmax       =  125000.0
-xdim       = 50
-ymin       = -125000.0
-ymax       =  125000.0
-ydim       = 50
-zmin       = 0.0
-zmax       = 15000.0
-zdim       = 10
 
-# Boundary conditions per axis side. Each sub-table has a `type` key plus any
-# numeric parameters required by that BC. Recognized types:
+[grid.springsteel.i]
+min   = -125000.0
+max   =  125000.0
+cells = 50
+
+# Boundary conditions per axis: the `min`/`max` keys set that side's default
+# BC; any other key names a field and gives per-field overrides, e.g.
+#   DBZ = { min = { type = "dirichlet", value = 0.0 } }
+# Recognized types:
 #   natural | dirichlet | neumann | second_derivative | robin | periodic
 #   exponential | cauchy | antisymmetric | symmetric | zeros
-[grid.spectral.bc.xL]
-type = "natural"
-[grid.spectral.bc.xR]
-type = "natural"
-[grid.spectral.bc.yL]
-type = "natural"
-[grid.spectral.bc.yR]
-type = "natural"
-[grid.spectral.bc.zL]
-type = "natural"
-[grid.spectral.bc.zR]
-type = "natural"
+# Parameterless types may be written as plain strings; parameterized ones as
+# tables, e.g. { type = "robin", alpha = 1.0, beta = -2.0, gamma = 0.0 }.
+[grid.springsteel.i.bc]
+min = "natural"
+max = "natural"
+
+[grid.springsteel.j]
+min   = -125000.0
+max   =  125000.0
+cells = 50
+
+[grid.springsteel.j.bc]
+min = "natural"
+max = "natural"
+
+[grid.springsteel.k]
+min   = 0.0
+max   = 15000.0
+cells = 10
+
+[grid.springsteel.k.bc]
+min = "natural"
+max = "natural"
 
 # CF-1.12 global attributes copied into every gridded NetCDF output. Every
 # key below must be present in your config; the values shipped here are
