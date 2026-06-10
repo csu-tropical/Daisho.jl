@@ -724,6 +724,42 @@ end
         @test cover(_with_gridding(GriddingParameters(vertical_roi_factor = 3.0))) >= n_base
     end
 
+    @testset "explicit roi override replaces the axis-derived ROI" begin
+        # The `roi` kwarg lets a caller (e.g. the Springsteel provider, whose
+        # nodes are non-uniformly spaced) inject a representative ROI instead of
+        # the axis-increment × factor. `roi = nothing` must be bit-identical to
+        # the regular path; a larger explicit ROI must not shrink coverage.
+        p = DaishoParameters()
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = v.latitude, reference_longitude = v.longitude,
+            x_axis = collect(Float64, -1200.0:300.0:1200.0),
+            y_axis = collect(Float64, -1200.0:300.0:1200.0),
+            z_axis = [0.0, 60.0, 120.0])
+
+        run(roi) = begin
+            acc = ScalarGridAccumulator(spec, p)
+            for s in eachindex(v.sweeps); grid_sweep!(acc, v, s, p; roi = roi); end
+            acc
+        end
+
+        # roi = nothing reproduces the axis-derived run exactly. The 3D worker's
+        # axis ROI is (xincr * h_factor, zincr * v_factor).
+        xincr = spec.x_axis[2] - spec.x_axis[1]
+        zincr = spec.z_axis[2] - spec.z_axis[1]
+        axis_roi = (xincr * p.gridding.horizontal_roi_factor,
+                    zincr * p.gridding.vertical_roi_factor)
+        acc_default = run(nothing)
+        acc_axis    = run(axis_roi)
+        @test acc_default.weighted_sum == acc_axis.weighted_sum
+        @test acc_default.coverage == acc_axis.coverage
+
+        # A larger ROI differs and covers ≥ as many cells.
+        acc_big = run((xincr * 1.0, zincr * 3.0))
+        @test count(>(Int8(0)), acc_big.coverage) >= count(>(Int8(0)), acc_default.coverage)
+        @test acc_big.weighted_sum != acc_default.weighted_sum
+    end
+
     @testset "2D/1D workers: beamwidth widens edge-referenced coverage" begin
         # A wider beam (2°) admits a superset of gates ⇒ at least as many covered
         # cells in every 2D/1D shape. This also proves beam_width is plumbed into

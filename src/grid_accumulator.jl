@@ -551,23 +551,24 @@ function grid_sweep!(accum::FieldAccumulator, sweep::SweepGroup,
                      heading::Real = -9999.0,
                      instrument_name::AbstractString = "",
                      scan_name::AbstractString = "",
-                     beam_width::Real = 1.0)
+                     beam_width::Real = 1.0,
+                     roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     shape = _acc_grid_spec(accum).shape
     if shape === :volume_3d || shape === :latlon_3d
         _grid_sweep_products_3d!(accum, sweep, p, ref_latitude, ref_longitude,
-                                 ref_altitude; beam_width = beam_width)
+                                 ref_altitude; beam_width = beam_width, roi = roi)
     elseif shape === :rhi_2d
         _grid_sweep_rhi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
-                            beam_width = beam_width)
+                            beam_width = beam_width, roi = roi)
     elseif shape === :ppi_2d
         _grid_sweep_ppi_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
-                            beam_width = beam_width)
+                            beam_width = beam_width, roi = roi)
     elseif shape === :composite_2d
         _grid_sweep_composite_2d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
-                                  beam_width = beam_width)
+                                  beam_width = beam_width, roi = roi)
     elseif shape === :column_1d
         _grid_sweep_column_1d!(accum, sweep, p, ref_latitude, ref_longitude, ref_altitude;
-                               beam_width = beam_width)
+                               beam_width = beam_width, roi = roi)
     else
         throw(ArgumentError("grid_sweep!: unsupported shape $shape"))
     end
@@ -599,7 +600,8 @@ the radar's half-power beamwidth from `volume.radar_parameters.beam_width_h`
 """
 function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
                      p::DaishoParameters; heading::Real = -9999.0,
-                     source_file::AbstractString = "")
+                     source_file::AbstractString = "",
+                     roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     sweep = volume.sweeps[sweep_index]
     if sweep.georeference !== nothing && !isempty(sweep.georeference.latitude)
         ref_lat = sweep.georeference.latitude[1]
@@ -619,7 +621,8 @@ function grid_sweep!(accum::FieldAccumulator, volume::Volume, sweep_index::Int,
         heading = heading,
         instrument_name = volume.instrument_name,
         scan_name = volume.scan_name,
-        beam_width = bw)
+        beam_width = bw,
+        roi = roi)
 end
 
 # Horizontal half-power beamwidth (degrees) for the angular gate weighting,
@@ -776,7 +779,8 @@ _geometry_trigger_fields(acc::ScalarGridAccumulator, keys::SweepKeys) =
 function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                           p::DaishoParameters,
                           ref_latitude::Float64, ref_longitude::Float64,
-                          ref_altitude::Float64; beam_width::Real = 1.0)
+                          ref_altitude::Float64; beam_width::Real = 1.0,
+                          roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = _acc_grid_spec(acc)
     gd = p.gridding
     beam_coef = _beam_coef(beam_width)
@@ -819,6 +823,13 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     end
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
     vertical_roi = zincr * v_roi_factor
+
+    # An explicit ROI override (e.g. for non-uniform Springsteel node spacing)
+    # replaces the axis-increment-derived values; `roi === nothing` keeps the
+    # regular path bit-identical.
+    if roi !== nothing
+        horizontal_roi, vertical_roi = roi
+    end
 
     power_threshold = gd.power_threshold
     # Beam half-angle at the `power_threshold` power level; `s = sin(beam_cutoff)`
@@ -955,7 +966,8 @@ end
 function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               p::DaishoParameters,
                               ref_latitude::Float64, ref_longitude::Float64,
-                              ref_altitude::Float64; beam_width::Real = 1.0)
+                              ref_altitude::Float64; beam_width::Real = 1.0,
+                              roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
@@ -977,6 +989,9 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
     horizontal_roi = rincr * gd.horizontal_roi_factor
     vertical_roi   = zincr * gd.vertical_roi_factor
+    if roi !== nothing
+        horizontal_roi, vertical_roi = roi
+    end
 
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
@@ -1092,7 +1107,8 @@ end
 function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               p::DaishoParameters,
                               ref_latitude::Float64, ref_longitude::Float64,
-                              ref_altitude::Float64; beam_width::Real = 1.0)
+                              ref_altitude::Float64; beam_width::Real = 1.0,
+                              roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
@@ -1112,6 +1128,10 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
+    # PPI is purely horizontal; an explicit override uses the first component.
+    if roi !== nothing
+        horizontal_roi = roi[1]
+    end
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
@@ -1206,7 +1226,8 @@ end
 function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
                                     p::DaishoParameters,
                                     ref_latitude::Float64, ref_longitude::Float64,
-                                    ref_altitude::Float64; beam_width::Real = 1.0)
+                                    ref_altitude::Float64; beam_width::Real = 1.0,
+                                    roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
@@ -1226,6 +1247,10 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
+    # Composite is purely horizontal; an explicit override uses the first component.
+    if roi !== nothing
+        horizontal_roi = roi[1]
+    end
     # Composite has no beam-pattern/range weighting (it picks the column max), but
     # gate inclusion is still edge-referenced via the beam footprint.
     beam_cutoff = _beam_cutoff(gd.power_threshold, beam_coef)
@@ -1322,7 +1347,8 @@ end
 function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
                                  p::DaishoParameters,
                                  ref_latitude::Float64, ref_longitude::Float64,
-                                 ref_altitude::Float64; beam_width::Real = 1.0)
+                                 ref_altitude::Float64; beam_width::Real = 1.0,
+                                 roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = accum.grid_spec
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
@@ -1340,6 +1366,10 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
 
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
     vertical_roi    = zincr * gd.vertical_roi_factor
+    # Column is purely vertical; an explicit override uses the second component.
+    if roi !== nothing
+        vertical_roi = roi[2]
+    end
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
