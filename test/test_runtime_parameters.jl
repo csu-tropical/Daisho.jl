@@ -288,6 +288,47 @@ using TOML
         end
     end
 
+    @testset "Per-product Cartesian grids fall back to [grid.cartesian]" begin
+        mktemp() do path, io
+            close(io)
+            # Only [grid.cartesian] is present in the bundled template; the
+            # volume/composite/ppi/column products should all inherit it.
+            p = DaishoParameters(_write_full_config(path))
+            @test p.grid.volume == p.grid.cartesian
+            @test p.grid.composite == p.grid.cartesian
+            @test p.grid.ppi == p.grid.cartesian
+            @test p.grid.column == p.grid.cartesian
+        end
+    end
+
+    @testset "Per-product Cartesian overrides land independently" begin
+        mktemp() do path, io
+            close(io)
+            # A present [grid.<product>] table is strict, so it carries the full
+            # CartesianGridParameters schema (no partial inheritance).
+            full_cart(over::AbstractDict=Dict{String,Any}()) = merge(Dict{String,Any}(
+                "xmin" => -120000.0, "xincr" => 1000.0, "xdim" => 241,
+                "ymin" => -120000.0, "yincr" => 1000.0, "ydim" => 241,
+                "zmin" => 0.0, "zincr" => 1000.0, "zdim" => 19), over)
+            _write_full_config(path, Dict(
+                "grid" => Dict(
+                    "volume" => full_cart(),
+                    "column" => full_cart(Dict("zincr" => 100.0, "zdim" => 181)),
+                ),
+            ))
+            p = DaishoParameters(path)
+            # Overridden products take their own values...
+            @test p.grid.volume.xdim == 241
+            @test p.grid.column.zincr == 100.0
+            @test p.grid.column.zdim == 181
+            # Products without an override section still inherit cartesian.
+            @test p.grid.composite == p.grid.cartesian
+            @test p.grid.ppi == p.grid.cartesian
+            @test p.grid.cartesian.xdim == 501
+            @test p.grid.volume != p.grid.cartesian
+        end
+    end
+
     @testset "Mandatory [fields]/[io] absent → ArgumentError" begin
         for sect in ("fields", "io")
             mktemp() do path, io

@@ -22,7 +22,11 @@
 #   [io]                   -> p.io
 #   [qc]                   -> p.qc
 #   [gridding]             -> p.gridding
-#   [grid.cartesian]          -> p.grid.cartesian
+#   [grid.cartesian]          -> p.grid.cartesian  (shared base for the products below)
+#   [grid.volume]             -> p.grid.volume     (grid_radar_volume;    falls back to cartesian)
+#   [grid.composite]          -> p.grid.composite  (grid_radar_composite; falls back to cartesian)
+#   [grid.ppi]                -> p.grid.ppi         (grid_radar_ppi;       falls back to cartesian)
+#   [grid.column]             -> p.grid.column     (grid_radar_column/QVP; falls back to cartesian)
 #   [grid.latlon]             -> p.grid.latlon
 #   [grid.rhi]                -> p.grid.rhi
 #   [grid.springsteel]        -> p.grid.springsteel  (Springsteel spectral grid)
@@ -110,6 +114,8 @@ max_sigma_2       = 2.0   # max normalized σ on output component 2 (V for Carte
 # Optional; defaults to 45.0.
 max_elevation     = 45.0
 
+# Shared Cartesian base geometry. The volume, composite, ppi, and column (QVP)
+# products all read this unless they have their own override section below.
 [grid.cartesian]
 xmin  = -125000.0
 xincr =     500.0
@@ -120,6 +126,16 @@ ydim  =       501
 zmin  =       0.0
 zincr =     500.0
 zdim  =        37
+
+# Per-product Cartesian overrides. Each is OPTIONAL and inherits [grid.cartesian]
+# when omitted, so define one only when that product needs a different geometry.
+# All four use the CartesianGridParameters schema (the same keys as
+# [grid.cartesian]); composite/ppi ignore the z-axis fields and column uses only
+# the z-axis fields.
+#   [grid.volume]      # grid_radar_volume     (full 3D x/y/z)
+#   [grid.composite]   # grid_radar_composite  (2D x/y, z ignored)
+#   [grid.ppi]         # grid_radar_ppi        (2D x/y, z ignored)
+#   [grid.column]      # grid_radar_column/QVP (z only, x/y ignored)
 
 [grid.latlon]
 # lon/lat domain bounds; degincr is the angular grid spacing.

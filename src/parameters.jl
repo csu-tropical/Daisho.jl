@@ -395,15 +395,48 @@ end
     GridParameters
 
 Aggregates the spatial-grid sub-specs plus the NetCDF metadata block. Pull
-out the one matching the gridding driver you are calling (e.g.,
-`p.grid.cartesian` for `grid_radar_volume`).
+out the one matching the gridding driver you are calling.
+
+The Cartesian-family products each get their own section so a single config can
+drive different geometries for each: `volume` (`grid_radar_volume`), `composite`
+(`grid_radar_composite`), `ppi` (`grid_radar_ppi`), and `column`
+(`grid_radar_column`, used for QVPs). Each defaults to `cartesian` when its
+own `[grid.<product>]` table is absent, so `[grid.cartesian]` acts as the
+shared base geometry and the per-product tables are overrides.
 """
-Base.@kwdef struct GridParameters
-    cartesian::CartesianGridParameters    = CartesianGridParameters()
-    latlon::LatLonGridParameters          = LatLonGridParameters()
-    rhi::RhiGridParameters                = RhiGridParameters()
-    springsteel::SpringsteelGridConfig    = SpringsteelGridConfig()
-    metadata::MetadataParameters          = MetadataParameters()
+struct GridParameters
+    cartesian::CartesianGridParameters
+    volume::CartesianGridParameters
+    composite::CartesianGridParameters
+    ppi::CartesianGridParameters
+    column::CartesianGridParameters
+    latlon::LatLonGridParameters
+    rhi::RhiGridParameters
+    springsteel::SpringsteelGridConfig
+    metadata::MetadataParameters
+end
+
+# Keyword constructor centralizing the per-product fallback: a Cartesian-family
+# product passed as `nothing` (or omitted) inherits `cartesian`. This keeps the
+# inheritance identical whether a `GridParameters` is built from a TOML (see
+# `_grid_from_dict`) or constructed directly in Julia — `p.grid.volume` is
+# always a concrete `CartesianGridParameters`, never a sentinel.
+function GridParameters(;
+        cartesian::CartesianGridParameters = CartesianGridParameters(),
+        volume::Union{Nothing,CartesianGridParameters}    = nothing,
+        composite::Union{Nothing,CartesianGridParameters} = nothing,
+        ppi::Union{Nothing,CartesianGridParameters}       = nothing,
+        column::Union{Nothing,CartesianGridParameters}    = nothing,
+        latlon::LatLonGridParameters       = LatLonGridParameters(),
+        rhi::RhiGridParameters             = RhiGridParameters(),
+        springsteel::SpringsteelGridConfig = SpringsteelGridConfig(),
+        metadata::MetadataParameters       = MetadataParameters())
+    GridParameters(cartesian,
+        volume    === nothing ? cartesian : volume,
+        composite === nothing ? cartesian : composite,
+        ppi       === nothing ? cartesian : ppi,
+        column    === nothing ? cartesian : column,
+        latlon, rhi, springsteel, metadata)
 end
 
 """
@@ -816,11 +849,20 @@ function _grid_from_dict(d::AbstractDict)
             "Run `print_config(\"template.toml\")` for the new template."))
     end
     cartesian   = haskey(d, "cartesian")   ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian") : CartesianGridParameters()
+    # The Cartesian-family products fall back to `cartesian` when their own table
+    # is absent (resolved by the GridParameters constructor from these `nothing`s),
+    # so `[grid.cartesian]` is the shared base geometry and the per-product tables
+    # are overrides for radars that need distinct grids.
+    volume      = haskey(d, "volume")      ? _struct_from_dict(CartesianGridParameters, d["volume"];    section="grid.volume")    : nothing
+    composite   = haskey(d, "composite")   ? _struct_from_dict(CartesianGridParameters, d["composite"]; section="grid.composite") : nothing
+    ppi         = haskey(d, "ppi")         ? _struct_from_dict(CartesianGridParameters, d["ppi"];        section="grid.ppi")       : nothing
+    column      = haskey(d, "column")      ? _struct_from_dict(CartesianGridParameters, d["column"];     section="grid.column")    : nothing
     latlon      = haskey(d, "latlon")      ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon")    : LatLonGridParameters()
     rhi         = haskey(d, "rhi")         ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi")       : RhiGridParameters()
     springsteel = haskey(d, "springsteel") ? _springsteel_from_dict(d["springsteel"])                                            : SpringsteelGridConfig()
     metadata    = haskey(d, "metadata")    ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
-    return GridParameters(cartesian=cartesian, latlon=latlon, rhi=rhi,
+    return GridParameters(cartesian=cartesian, volume=volume, composite=composite,
+                          ppi=ppi, column=column, latlon=latlon, rhi=rhi,
                           springsteel=springsteel, metadata=metadata)
 end
 

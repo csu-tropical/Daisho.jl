@@ -1485,7 +1485,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
     end
 
     if shape === :volume_3d
-        g = p.grid.cartesian
+        g = p.grid.volume
         return GridSpec(
             shape = :volume_3d,
             reference_latitude = ref_lat,
@@ -1539,7 +1539,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
             rhi_azimuth = az,
         )
     elseif shape === :ppi_2d || shape === :composite_2d
-        g = p.grid.cartesian
+        g = shape === :ppi_2d ? p.grid.ppi : p.grid.composite
         return GridSpec(
             shape = shape,
             reference_latitude = ref_lat,
@@ -1549,7 +1549,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
             z_axis = [0.0],
         )
     elseif shape === :column_1d
-        g = p.grid.cartesian
+        g = p.grid.column
         return GridSpec(
             shape = :column_1d,
             reference_latitude = ref_lat,

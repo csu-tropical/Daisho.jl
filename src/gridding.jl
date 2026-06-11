@@ -2205,12 +2205,13 @@ end
 """
     grid_radar_volume(radar_volume, output_file, index_time, p::DaishoParameters; heading=-9999.0)
 
-Parameter-struct overload reading from `p.grid.cartesian`, `p.gridding`, and
-`p.moments`.
+Parameter-struct overload reading from `p.grid.volume`, `p.gridding`, and
+`p.moments`. `p.grid.volume` falls back to `p.grid.cartesian` when no
+`[grid.volume]` table is configured.
 """
 function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
-    g = require_section(p, :grid, :cartesian; for_op="grid_radar_volume")
+    g = require_section(p, :grid, :volume; for_op="grid_radar_volume")
     gd = p.gridding
     mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_volume")
     dk = field_with_tag(p, :define_detection; for_op="grid_radar_volume")
@@ -2263,12 +2264,13 @@ end
     grid_radar_ppi(radar_volume, output_file, index_time, p::DaishoParameters; heading=-9999.0)
 
 Parameter-struct overload using the (xmin/xincr/xdim, ymin/yincr/ydim) fields
-of `p.grid.cartesian` plus `p.gridding` and `p.moments`. The Cartesian z-axis
-fields are ignored.
+of `p.grid.ppi` plus `p.gridding` and `p.moments`. The Cartesian z-axis
+fields are ignored. `p.grid.ppi` falls back to `p.grid.cartesian` when no
+`[grid.ppi]` table is configured.
 """
 function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
                          index_time, p::DaishoParameters; heading::Real=-9999.0)
-    g = require_section(p, :grid, :cartesian; for_op="grid_radar_ppi")
+    g = require_section(p, :grid, :ppi; for_op="grid_radar_ppi")
     gd = p.gridding
     mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_ppi")
     dk = field_with_tag(p, :define_detection; for_op="grid_radar_ppi")
@@ -2283,12 +2285,13 @@ end
     grid_radar_composite(radar_volume, output_file, index_time, p::DaishoParameters; mean_heading=-9999.0)
 
 Parameter-struct overload using the (xmin/xincr/xdim, ymin/yincr/ydim) fields
-of `p.grid.cartesian` plus `p.gridding` and `p.moments`. `power_threshold` is
-not applicable to composite gridding.
+of `p.grid.composite` plus `p.gridding` and `p.moments`. `power_threshold` is
+not applicable to composite gridding. `p.grid.composite` falls back to
+`p.grid.cartesian` when no `[grid.composite]` table is configured.
 """
 function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
                                index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
-    g = require_section(p, :grid, :cartesian; for_op="grid_radar_composite")
+    g = require_section(p, :grid, :composite; for_op="grid_radar_composite")
     gd = p.gridding
     mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_composite")
     dk = field_with_tag(p, :define_detection; for_op="grid_radar_composite")
@@ -2302,12 +2305,13 @@ end
 """
     grid_radar_column(radar_volume, output_file, index_time, p::DaishoParameters)
 
-Parameter-struct overload using `p.grid.cartesian.z*` as the column axis,
-plus `p.gridding` and `p.moments`.
+Parameter-struct overload using `p.grid.column.z*` as the column axis,
+plus `p.gridding` and `p.moments`. `p.grid.column` falls back to
+`p.grid.cartesian` when no `[grid.column]` table is configured.
 """
 function grid_radar_column(radar_volume::radar, output_file::AbstractString,
                             index_time, p::DaishoParameters)
-    g = require_section(p, :grid, :cartesian; for_op="grid_radar_column")
+    g = require_section(p, :grid, :column; for_op="grid_radar_column")
     gd = p.gridding
     mk = field_with_tag(p, :define_scanned;   for_op="grid_radar_column")
     dk = field_with_tag(p, :define_detection; for_op="grid_radar_column")
@@ -2326,7 +2330,7 @@ end
 
 function grid_radar_volume(volume::Volume, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
-    require_section(p, :grid, :cartesian; for_op="grid_radar_volume")
+    require_section(p, :grid, :volume; for_op="grid_radar_volume")
     spec = build_grid_spec(:volume_3d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2382,7 +2386,7 @@ end
 
 function grid_radar_ppi(volume::Volume, output_file::AbstractString,
                         index_time, p::DaishoParameters; heading::Real=-9999.0)
-    require_section(p, :grid, :cartesian; for_op="grid_radar_ppi")
+    require_section(p, :grid, :ppi; for_op="grid_radar_ppi")
     spec = build_grid_spec(:ppi_2d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2400,7 +2404,7 @@ end
 
 function grid_radar_composite(volume::Volume, output_file::AbstractString,
                               index_time, p::DaishoParameters; mean_heading::Real=-9999.0)
-    require_section(p, :grid, :cartesian; for_op="grid_radar_composite")
+    require_section(p, :grid, :composite; for_op="grid_radar_composite")
     spec = build_grid_spec(:composite_2d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
@@ -2418,7 +2422,7 @@ end
 
 function grid_radar_column(volume::Volume, output_file::AbstractString,
                            index_time, p::DaishoParameters)
-    require_section(p, :grid, :cartesian; for_op="grid_radar_column")
+    require_section(p, :grid, :column; for_op="grid_radar_column")
     spec = build_grid_spec(:column_1d, volume, p)
     accum = GridAccumulator(spec, p)
     for i in eachindex(volume.sweeps)
