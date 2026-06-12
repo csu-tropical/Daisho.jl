@@ -2071,26 +2071,10 @@ function read_cartesian_gridded_radar(file, moment_dict)
     return x0, y0, z0, lat0, lon0, start_time, stop_time, radardata
 end
 
-"""
-    read_gridded_radar(file, moment_dict) -> Tuple
-
-Read a gridded 3D radar volume from a NetCDF file with X, Y, Z coordinates.
-
-Opens the specified NetCDF file and reads the `X`, `Y`, `Z` coordinate arrays, `latitude`/`longitude`
-fields, time bounds, and all radar moment data specified in `moment_dict`.
-
-# Arguments
-- `file`: Path to the input NetCDF file.
-- `moment_dict`: Dictionary mapping moment names (e.g., `"DBZ"`) to integer indices.
-
-# Returns
-A tuple `(x, y, z, lat, lon, start_time, stop_time, radardata)` where:
-- `x`, `y`, `z`: Coordinate arrays from the file (meters).
-- `lat`, `lon`: 2D latitude and longitude arrays.
-- `start_time`, `stop_time`: Time bounds of the data.
-- `radardata`: A `(n_moments, n_points)` array of `Union{Missing, Float32}` moment values.
-"""
-function read_gridded_radar(file, moment_dict)
+# Core 3D-volume reader (no deprecation warning). Returns coordinates and an
+# index-keyed `(n_moments, n_points)` radardata array. Shared by the deprecated
+# moment_dict method and the Fields-API `DaishoParameters` method below.
+function _read_gridded_radar(file, moment_dict)
 
     inputds = Dataset(file);
 
@@ -2114,25 +2098,50 @@ function read_gridded_radar(file, moment_dict)
 end
 
 """
-    read_gridded_ppi(file, moment_dict) -> Tuple
+    read_gridded_radar(file, moment_dict::AbstractDict) -> Tuple
 
-Read a gridded 2D PPI radar scan from a NetCDF file with X, Y coordinates.
+!!! warning "Deprecated"
+    The `moment_dict` (name→index) reader is the legacy v0.1 API. Prefer
+    `read_gridded_radar(file, p::DaishoParameters)`, which returns fields keyed
+    by name and resolves I/O sentinels from `p.io`.
 
-Opens the specified NetCDF file and reads the `X`, `Y` coordinate arrays, `latitude`/`longitude`
-fields, time bounds, and all radar moment data specified in `moment_dict`.
-
-# Arguments
-- `file`: Path to the input NetCDF file.
-- `moment_dict`: Dictionary mapping moment names (e.g., `"DBZ"`) to integer indices.
+Read a gridded 3D radar volume from a NetCDF file with X, Y, Z coordinates.
 
 # Returns
-A tuple `(x, y, lat, lon, start_time, stop_time, radardata)` where:
-- `x`, `y`: Coordinate arrays from the file (meters).
-- `lat`, `lon`: 2D latitude and longitude arrays.
-- `start_time`, `stop_time`: Time bounds of the data.
-- `radardata`: A `(n_moments, n_points)` array of `Union{Missing, Float32}` moment values.
+A tuple `(x, y, z, lat, lon, start_time, stop_time, radardata)` where `radardata`
+is a `(n_moments, n_points)` array of `Union{Missing, Float32}` moment values
+indexed by `moment_dict`.
 """
-function read_gridded_ppi(file, moment_dict)
+function read_gridded_radar(file, moment_dict::AbstractDict)
+    Base.depwarn("read_gridded_radar(file, moment_dict) is deprecated; pass a " *
+                 "DaishoParameters instead.", :read_gridded_radar)
+    return _read_gridded_radar(file, moment_dict)
+end
+
+"""
+    read_gridded_radar(file, p::DaishoParameters) -> NamedTuple
+
+Fields-API reader for a gridded 3D radar volume. Returns
+`(; X, Y, Z, latitude, longitude, start_time, stop_time, fields, io)` where
+`fields::Dict{String,Array{Float32,3}}` is keyed by field name (every field in
+`p`), each shaped `(length(X), length(Y), length(Z))`. `io` is `p.io` so callers
+resolve `fill_value`/`undetect` without re-reading config. Sentinels are
+preserved in the data (not collapsed) — display masking is the caller's choice
+(see [`mask_sentinels`](@ref)).
+"""
+function read_gridded_radar(file, p::DaishoParameters)
+    md = field_index_dict(p)
+    x, y, z, lat, lon, t0, t1, radardata = _read_gridded_radar(file, md)
+    fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
+                                  length(x), length(y), length(z)) for (name, i) in md)
+    return (; X=collect(x), Y=collect(y), Z=collect(z),
+            latitude=collect(lat), longitude=collect(lon),
+            start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)
+end
+
+# Core 2D-PPI/composite reader (no deprecation warning). Shared by the
+# deprecated moment_dict method and the Fields-API method below.
+function _read_gridded_ppi(file, moment_dict)
 
     inputds = Dataset(file);
 
@@ -2155,26 +2164,43 @@ function read_gridded_ppi(file, moment_dict)
 end
 
 """
-    read_gridded_rhi(file, moment_dict) -> Tuple
+    read_gridded_ppi(file, moment_dict::AbstractDict) -> Tuple
 
-Read a gridded 2D RHI radar scan from a NetCDF file with R (range) and Z (altitude) coordinates.
+!!! warning "Deprecated"
+    The `moment_dict` reader is the legacy v0.1 API. Prefer
+    `read_gridded_ppi(file, p::DaishoParameters)`.
 
-Opens the specified NetCDF file and reads the `R`, `Z` coordinate arrays, `latitude`/`longitude`
-fields along the RHI azimuth, time bounds, and all radar moment data specified in `moment_dict`.
-
-# Arguments
-- `file`: Path to the input NetCDF file.
-- `moment_dict`: Dictionary mapping moment names (e.g., `"DBZ"`) to integer indices.
-
-# Returns
-A tuple `(R, Z, lat, lon, start_time, stop_time, radardata)` where:
-- `R`: Range coordinate array (meters).
-- `Z`: Altitude coordinate array (meters).
-- `lat`, `lon`: Latitude and longitude arrays along the RHI azimuth.
-- `start_time`, `stop_time`: Time bounds of the data.
-- `radardata`: A `(n_moments, n_points)` array of `Union{Missing, Float32}` moment values.
+Read a gridded 2D PPI/composite radar scan from a NetCDF file with X, Y
+coordinates. Returns `(x, y, lat, lon, start_time, stop_time, radardata)` where
+`radardata` is a `(n_moments, n_points)` array indexed by `moment_dict`.
 """
-function read_gridded_rhi(file, moment_dict)
+function read_gridded_ppi(file, moment_dict::AbstractDict)
+    Base.depwarn("read_gridded_ppi(file, moment_dict) is deprecated; pass a " *
+                 "DaishoParameters instead.", :read_gridded_ppi)
+    return _read_gridded_ppi(file, moment_dict)
+end
+
+"""
+    read_gridded_ppi(file, p::DaishoParameters) -> NamedTuple
+
+Fields-API reader for a gridded 2D PPI/composite scan. Returns
+`(; X, Y, latitude, longitude, start_time, stop_time, fields, io)` where
+`fields::Dict{String,Matrix{Float32}}` is keyed by field name, each shaped
+`(length(X), length(Y))`. Sentinels are preserved; see [`mask_sentinels`](@ref).
+"""
+function read_gridded_ppi(file, p::DaishoParameters)
+    md = field_index_dict(p)
+    x, y, lat, lon, t0, t1, radardata = _read_gridded_ppi(file, md)
+    fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
+                                  length(x), length(y)) for (name, i) in md)
+    return (; X=collect(x), Y=collect(y),
+            latitude=collect(lat), longitude=collect(lon),
+            start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)
+end
+
+# Core 2D-RHI reader (no deprecation warning). Shared by the deprecated
+# moment_dict method and the Fields-API method below.
+function _read_gridded_rhi(file, moment_dict)
 
     inputds = Dataset(file);
 
@@ -2194,6 +2220,56 @@ function read_gridded_rhi(file, moment_dict)
     end
 
     return R, Z, lat, lon, start_time, stop_time, radardata
+end
+
+"""
+    read_gridded_rhi(file, moment_dict::AbstractDict) -> Tuple
+
+!!! warning "Deprecated"
+    The `moment_dict` reader is the legacy v0.1 API. Prefer
+    `read_gridded_rhi(file, p::DaishoParameters)`.
+
+Read a gridded 2D RHI radar scan from a NetCDF file with R (range) and Z
+(altitude) coordinates. Returns `(R, Z, lat, lon, start_time, stop_time,
+radardata)` where `radardata` is a `(n_moments, n_points)` array indexed by
+`moment_dict`.
+"""
+function read_gridded_rhi(file, moment_dict::AbstractDict)
+    Base.depwarn("read_gridded_rhi(file, moment_dict) is deprecated; pass a " *
+                 "DaishoParameters instead.", :read_gridded_rhi)
+    return _read_gridded_rhi(file, moment_dict)
+end
+
+"""
+    read_gridded_rhi(file, p::DaishoParameters) -> NamedTuple
+
+Fields-API reader for a gridded 2D RHI scan. Returns
+`(; R, Z, latitude, longitude, start_time, stop_time, fields, io)` where
+`fields::Dict{String,Matrix{Float32}}` is keyed by field name, each shaped
+`(length(R), length(Z))`. Sentinels are preserved; see [`mask_sentinels`](@ref).
+"""
+function read_gridded_rhi(file, p::DaishoParameters)
+    md = field_index_dict(p)
+    R, Z, lat, lon, t0, t1, radardata = _read_gridded_rhi(file, md)
+    fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
+                                  length(R), length(Z)) for (name, i) in md)
+    return (; R=collect(R), Z=collect(Z),
+            latitude=collect(lat), longitude=collect(lon),
+            start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)
+end
+
+"""
+    mask_sentinels(a::AbstractArray, io::IOParameters) -> Array{Float32}
+
+Return a `Float32` copy of `a` with both the true-missing (`io.fill_value`) and
+undetect (`io.undetect`) sentinels replaced by `NaN`, for display. The gridded
+Fields-API readers keep the raw sentinels so the missing-vs-undetect distinction
+is preserved in the data; call this only when rendering.
+"""
+function mask_sentinels(a::AbstractArray, io::IOParameters)
+    b = Array{Float32}(a)
+    replace!(b, Float32(io.fill_value) => NaN32, Float32(io.undetect) => NaN32)
+    return b
 end
 
 # ── Parameter-struct overloads ──────────────────────────────────────────────

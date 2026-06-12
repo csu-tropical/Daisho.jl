@@ -1,5 +1,21 @@
 # Daisho.jl release notes
 
+## Unreleased
+
+### Fields-API gridded readers
+
+`read_gridded_rhi` / `read_gridded_ppi` / `read_gridded_radar` gain a
+`DaishoParameters` method (`read_gridded_*(file, p::DaishoParameters)`) that
+returns a `NamedTuple` of coordinates plus a `fields::Dict{String,Array}` keyed
+by field name and pre-shaped to the grid, with `io = p.io` carried along so
+callers resolve `fill_value`/`undetect` without re-reading config. Raw sentinels
+are preserved in the data; `mask_sentinels(a, io)` collapses both to `NaN` for
+display. This is the standard reading path going forward — symmetric with the
+`DaishoParameters` grid writers.
+
+The legacy `read_gridded_*(file, moment_dict)` (name→index) methods are
+**deprecated** (they emit `Base.depwarn`) but still work.
+
 ## v0.2.0 — Flat per-field tag vocabulary, optional blocks, gate-state terminology
 
 **Breaking TOML / config change.** There is no transitional reader (consistent
