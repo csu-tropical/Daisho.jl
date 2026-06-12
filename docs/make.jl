@@ -23,7 +23,16 @@ makedocs(
             "theory/gridding_algo.md",
             "theory/wind_synthesis.md",
         ],
-        "API Reference" => "api.md",
+        "API Reference" => [
+            "api/parameters.md",
+            "api/types.md",
+            "api/radar_io.md",
+            "api/quality_control.md",
+            "api/gridding.md",
+            "api/spectral_gridding.md",
+            "api/wind_synthesis.md",
+            "api/srtm.md",
+        ],
     ],
     checkdocs = :none,
 )
