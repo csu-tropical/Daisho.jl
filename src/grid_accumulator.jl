@@ -1926,9 +1926,16 @@ function finalize_grid(accum::GridAccumulator)
     out = fill(fill_value, size(accum.weighted_sum))
     n_fields = length(accum.fields)
     trailing_size = size(accum.weighted_sum)[2:end]
+    # Composite gridding selects a single column-maximum gate per cell and stores
+    # that gate's value directly in `weighted_sum` (with `weight_total` overloaded
+    # as the max-selection strength; see `_grid_sweep_composite_2d!`). It must
+    # therefore pass through unchanged like `:nearest`, regardless of each field's
+    # interpolation tag — otherwise a `:linear` field such as DBZ would be divided
+    # by `weight_total` and dB-reconverted, collapsing to ~0 dBZ.
+    composite = accum.grid_spec.shape === :composite_2d
     @inbounds for m in 1:n_fields
         name = accum.fields[m]
-        mode = accum.grid_type[name]
+        mode = composite ? :nearest : accum.grid_type[name]
         for ix in CartesianIndices(trailing_size)
             cov = accum.coverage[m, ix]
             w   = accum.weight_total[m, ix]
