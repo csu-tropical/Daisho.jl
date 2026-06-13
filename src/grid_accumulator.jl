@@ -434,7 +434,18 @@ end
 # (see [`_beam_coef`](@ref)), so a 2° beam gets ≈39.7 — twice the angular reach.
 # `beam_cutoff` is the matching half-angle at the power level `power_threshold`
 # (see [`_beam_cutoff`](@ref)).
-#
+
+# Restrict a candidate gate list to the configured slant-range gate-inclusion
+# window `[range_min, range_max]` (metres; `beams[g, 3]` is the gate slant range).
+# A no-op when the window is the full `[0, Inf]` default, so unfiltered gridding
+# pays nothing. Filtering the shared `gates` list excludes out-of-range gates from
+# both the coverage and the contribution passes that iterate it.
+@inline function _filter_gates_by_range!(gates, beams, range_min::Float64, range_max::Float64)
+    (range_min > 0.0 || isfinite(range_max)) || return gates
+    filter!(g -> range_min <= beams[g, 3] <= range_max, gates)
+    return gates
+end
+
 # `range_weight = gridpt_r / r` is the one remaining division (the inclusion is
 # distance-form, no /r). It is guarded against the near-radar singularity: the
 # divisor is floored at `range_guard_min` (`r_eff = max(r, range_guard_min)`) and the
@@ -837,8 +848,9 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     # conservative BallTree query radius.
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_guard_min      = gd.range_guard_min
+    range_guard_min  = gd.range_guard_min
     range_weight_max = gd.range_weight_max
+    range_min = gd.range_minimum; range_max = gd.range_maximum
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -852,6 +864,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
         origin_dist = euclidean(yx_point, [0.0, 0.0])
         R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
         gates = inrange(balltree, yx_point, R_q)
+        _filter_gates_by_range!(gates, beams, range_min, range_max)
         isempty(gates) && continue
 
         # Per-column scratch reused across z (each thread owns distinct columns).
@@ -997,6 +1010,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
+    range_min = gd.range_minimum; range_max = gd.range_maximum
 
     # Use rhi_azimuth if explicitly supplied, else fall back to sweep.azimuth[1].
     az_rhi = if g.rhi_azimuth !== nothing
@@ -1015,6 +1029,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
         origin_dist = euclidean(r_point, [0.0])
         R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
         gates = inrange(balltree, [origin_dist], R_q)
+        _filter_gates_by_range!(gates, beams, range_min, range_max)
         isempty(gates) && continue
 
         for k_z in 1:nz
@@ -1136,6 +1151,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
+    range_min = gd.range_minimum; range_max = gd.range_maximum
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -1144,6 +1160,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
         origin_dist = euclidean(yx_point, [0.0, 0.0])
         R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
         gates = inrange(balltree, yx_point, R_q)
+        _filter_gates_by_range!(gates, beams, range_min, range_max)
         isempty(gates) && continue
 
         # Any in-range gate with non-missing missing_key → coverage 1.
@@ -1255,6 +1272,7 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
     # gate inclusion is still edge-referenced via the beam footprint.
     beam_cutoff = _beam_cutoff(gd.power_threshold, beam_coef)
     s = sin(beam_cutoff)
+    range_min = gd.range_minimum; range_max = gd.range_maximum
 
     # Find the valid_key column index for the max selection. If the valid_key
     # field isn't in the accumulator, composite produces no contribution.
@@ -1267,6 +1285,7 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
         origin_dist = euclidean(yx_point, [0.0, 0.0])
         R_q = (horizontal_roi + origin_dist * s) / (1.0 - s)
         gates = inrange(balltree, yx_point, R_q)
+        _filter_gates_by_range!(gates, beams, range_min, range_max)
         isempty(gates) && continue
 
         any_scanned = false
@@ -1374,6 +1393,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
+    range_min = gd.range_minimum; range_max = gd.range_maximum
 
     Threads.@threads for k_z in 1:nz
         grid_z = g.z_axis[k_z]
@@ -1382,6 +1402,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
         # non-missing missing_key.
         any_scanned = false
         for g_flat in 1:n_gate_total
+            range_min <= beams[g_flat, 3] <= range_max || continue
             abs(beams[g_flat, 4] - grid_z) > vertical_roi + beams[g_flat, 3] * s && continue
             ray  = _ray_of(g_flat, n_gates_s)
             gate = _gate_in_ray(g_flat, n_gates_s)
@@ -1401,6 +1422,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
         end
 
         for g_flat in 1:n_gate_total
+            range_min <= beams[g_flat, 3] <= range_max || continue
             ray  = _ray_of(g_flat, n_gates_s)
             gate_in = _gate_in_ray(g_flat, n_gates_s)
             vk = _gate_value(sweep, valid_key, ray, gate_in)

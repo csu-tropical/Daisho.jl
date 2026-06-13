@@ -154,8 +154,17 @@ Engine-level gridding knobs shared across all gridding drivers.
   setting the box half-height for gate inclusion (default `0.75`).
 - `range_guard_min::Float64`: lower clamp (metres) on the gate slant range used as
   the `range_weight` divisor, guarding the near-radar singularity (default `1.0`).
-- `range_weight_max::Float64`: upper clamp on `range_weight`, bounding the
-  near-radar singularity (default `10.0`).
+  This is a *weighting* guard, not a gate filter — see `range_minimum` below.
+- `range_weight_max::Float64`: upper clamp on the (unitless) `range_weight` ratio,
+  bounding the near-radar singularity (default `10.0`).
+- `range_minimum::Float64` / `range_maximum::Float64`: slant-range
+  **gate-inclusion** bounds (metres). A gate is gridded only when its slant range
+  `r` satisfies `range_minimum ≤ r ≤ range_maximum`; out-of-range gates are
+  excluded entirely (they contribute no coverage and no value), so a grid cell
+  reachable only by excluded gates is left as true-missing. Defaults `0.0` / `Inf`
+  apply no filtering. Use them to homogenise a volume whose low sweep ranges
+  farther than the others, or to cap a product at a higher-quality range. Distinct
+  from the `range_guard_min` / `range_weight_max` weighting guards above.
 
 The `*_factor`/`range_*` knobs are **optional** in a config file (they fall back
 to the defaults above when omitted) so existing configs still load. The former
@@ -173,8 +182,10 @@ Base.@kwdef struct GriddingParameters
     power_threshold::Float64       = 0.5
     horizontal_roi_factor::Float64 = 0.75
     vertical_roi_factor::Float64   = 0.75
-    range_guard_min::Float64           = 1.0
+    range_guard_min::Float64       = 1.0
     range_weight_max::Float64      = 10.0
+    range_minimum::Float64         = 0.0
+    range_maximum::Float64         = Inf
 end
 
 """
@@ -782,7 +793,7 @@ function _gridding_from_dict(d::AbstractDict)
     # deprecation path; per-range reach is now beamwidth/footprint-derived).
     required   = (:power_threshold,)
     optional   = (:horizontal_roi_factor, :vertical_roi_factor, :range_guard_min,
-                  :range_weight_max)
+                  :range_weight_max, :range_minimum, :range_maximum)
     deprecated = (:beam_inflation,)
     allowed = (required..., optional..., deprecated...)
     keysyms = Set(Symbol.(keys(d)))
@@ -801,7 +812,13 @@ function _gridding_from_dict(d::AbstractDict)
         sym in deprecated && continue   # accept and ignore
         kw[sym] = _coerce_field(GriddingParameters, sym, v)
     end
-    return GriddingParameters(; kw...)
+    gp = GriddingParameters(; kw...)
+    gp.range_minimum >= 0.0 || throw(ArgumentError(
+        "`[gridding]` `range_minimum` must be ≥ 0 (got $(gp.range_minimum))."))
+    gp.range_maximum >= gp.range_minimum || throw(ArgumentError(
+        "`[gridding]` `range_maximum` ($(gp.range_maximum)) must be ≥ " *
+        "`range_minimum` ($(gp.range_minimum))."))
+    return gp
 end
 
 # Build IOParameters (mandatory). Targeted migration diagnostic for the old
