@@ -152,7 +152,7 @@ Engine-level gridding knobs shared across all gridding drivers.
   setting the box half-width for gate inclusion (default `0.75`).
 - `vertical_roi_factor::Float64`: multiplier on the vertical grid increment
   setting the box half-height for gate inclusion (default `0.75`).
-- `range_floor::Float64`: lower clamp (metres) on the gate slant range used as
+- `range_guard_min::Float64`: lower clamp (metres) on the gate slant range used as
   the `range_weight` divisor, guarding the near-radar singularity (default `1.0`).
 - `range_weight_max::Float64`: upper clamp on `range_weight`, bounding the
   near-radar singularity (default `10.0`).
@@ -173,7 +173,7 @@ Base.@kwdef struct GriddingParameters
     power_threshold::Float64       = 0.5
     horizontal_roi_factor::Float64 = 0.75
     vertical_roi_factor::Float64   = 0.75
-    range_floor::Float64           = 1.0
+    range_guard_min::Float64           = 1.0
     range_weight_max::Float64      = 10.0
 end
 
@@ -768,12 +768,20 @@ function _gridding_from_dict(d::AbstractDict)
             "(was `valid_key`) in `[fields]`. " *
             "Run `print_config(\"template.toml\")` for the new template."))
     end
+    if haskey(d, "range_floor")
+        throw(ArgumentError(
+            "`[gridding]` `range_floor` has been renamed to `range_guard_min` " *
+            "(the near-radar minimum on the range-weight divisor, in metres). " *
+            "Rename the key; note it is distinct from the new gate-inclusion " *
+            "`range_minimum`/`range_maximum` bounds. " *
+            "Run `print_config(\"template.toml\")` for the new template."))
+    end
     # The ROI factors and numerical guards are optional (default when absent) so
     # configs predating them still load; `power_threshold` stays required. The
     # deprecated `beam_inflation` key is accepted and silently ignored (short
     # deprecation path; per-range reach is now beamwidth/footprint-derived).
     required   = (:power_threshold,)
-    optional   = (:horizontal_roi_factor, :vertical_roi_factor, :range_floor,
+    optional   = (:horizontal_roi_factor, :vertical_roi_factor, :range_guard_min,
                   :range_weight_max)
     deprecated = (:beam_inflation,)
     allowed = (required..., optional..., deprecated...)

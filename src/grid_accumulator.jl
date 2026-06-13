@@ -437,7 +437,7 @@ end
 #
 # `range_weight = gridpt_r / r` is the one remaining division (the inclusion is
 # distance-form, no /r). It is guarded against the near-radar singularity: the
-# divisor is floored at `range_floor` (`r_eff = max(r, range_floor)`) and the
+# divisor is floored at `range_guard_min` (`r_eff = max(r, range_guard_min)`) and the
 # result clamped to `[0, range_weight_max]`. Within the radial tolerance
 # `range_weight ≈ 1`, so the guards only bite for a gate sitting essentially on
 # the radar — where `gridpt_r/r` would otherwise blow up.
@@ -446,7 +446,7 @@ end
                                      horizontal_roi::Float64, vertical_roi::Float64,
                                      beam_cutoff::Float64,
                                      beam_coef::Float64 = 79.43,
-                                     range_floor::Float64 = 1.0,
+                                     range_guard_min::Float64 = 1.0,
                                      range_weight_max::Float64 = 10.0)
     # Refraction-corrected height angle.
     dz = grid_z - radar_zyx[g_flat][1]
@@ -477,7 +477,7 @@ end
     angle_weight = exp(-angle_diff * beam_coef)
 
     gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
-    r_eff = max(r, range_floor)
+    r_eff = max(r, range_guard_min)
     range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
     if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
         range_weight = 0.0
@@ -837,7 +837,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     # conservative BallTree query radius.
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_floor      = gd.range_floor
+    range_guard_min      = gd.range_guard_min
     range_weight_max = gd.range_weight_max
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
@@ -885,7 +885,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
                 triggered || continue
                 az, el, w = _gate_grid_geometry(grid_z, yx_point, radar_zyx, beams,
                     gate_yx, g_flat, horizontal_roi, vertical_roi, beam_cutoff,
-                    beam_coef, range_floor, range_weight_max)
+                    beam_coef, range_guard_min, range_weight_max)
                 w > 0.0 || continue
                 push!(contribs, GateContribution(g_flat, ray, gate, az, el, w,
                     beams[g_flat, 4]))
@@ -996,7 +996,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
+    range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
 
     # Use rhi_azimuth if explicitly supplied, else fall back to sweep.azimuth[1].
     az_rhi = if g.rhi_azimuth !== nothing
@@ -1068,7 +1068,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                 angle_weight = exp(-angle_diff * beam_coef)
 
                 gridpt_r = sin(sqrt(dx^2 + dy^2) / Reff) * (Reff + dz) / cos(gridpt_el)
-                r_eff = max(r, range_floor)
+                r_eff = max(r, range_guard_min)
                 range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
                 if abs(gridpt_r - r) > horizontal_roi || abs(gridpt_r - r) > vertical_roi
                     range_weight = 0.0
@@ -1135,7 +1135,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
+    range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -1188,7 +1188,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
             angle_weight = exp(-angle_diff * beam_coef)
 
             gridpt_r = sqrt(dx^2 + dy^2)
-            r_eff = max(r, range_floor)
+            r_eff = max(r, range_guard_min)
             range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
             if abs(gridpt_r - r) > horizontal_roi
                 range_weight = 0.0
@@ -1373,7 +1373,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     power_threshold = gd.power_threshold
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
+    range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
 
     Threads.@threads for k_z in 1:nz
         grid_z = g.z_axis[k_z]
@@ -1420,7 +1420,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
             angle_weight = exp(-angle_diff * beam_coef)
 
             gridpt_r = grid_z / cos(beams[g_flat, 2])
-            r_eff = max(r, range_floor)
+            r_eff = max(r, range_guard_min)
             range_weight = clamp(gridpt_r / r_eff, 0.0, range_weight_max)
             if abs(gridpt_r - r) > vertical_roi
                 range_weight = 0.0

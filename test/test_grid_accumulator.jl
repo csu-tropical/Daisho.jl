@@ -40,7 +40,7 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
     power_threshold = gd.power_threshold
     beam_cutoff = Daisho._beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_floor = gd.range_floor; range_weight_max = gd.range_weight_max
+    range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
 
     for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -74,7 +74,7 @@ function _ref_grid_sweep_3d!(accum, sweep, p, ref_latitude, ref_longitude, ref_a
                 ismissing(Daisho._gate_value(sweep, valid_key, ray, gate_in)) && continue
                 _, _, total_weight = Daisho._gate_grid_geometry(grid_z, yx_point,
                     radar_zyx, beams, gate_yx, g_flat, horizontal_roi, vertical_roi,
-                    beam_cutoff, beam_coef, range_floor, range_weight_max)
+                    beam_cutoff, beam_coef, range_guard_min, range_weight_max)
                 total_weight > 0.0 || continue
                 for m in 1:n_fields
                     fname = accum.fields[m]
@@ -652,7 +652,7 @@ end
         # range_weight = gridpt_r / r ≈ 5000 would otherwise dominate every cell.
         yx = [5.0, 0.0]
 
-        # range_floor = 1.0 tames the divisor: range_weight ≈ gridpt_r ≈ 5.
+        # range_guard_min = 1.0 tames the divisor: range_weight ≈ gridpt_r ≈ 5.
         _, _, w_floor = Daisho._gate_grid_geometry(0.0, yx, radar_zyx, beams,
             gate_yx, 1, h_roi, v_roi, beam_cutoff, bc, 1.0, 100.0)
         # A negligible floor lets the singularity through, but the cap binds.

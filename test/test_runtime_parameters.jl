@@ -203,7 +203,7 @@ using TOML
         p = DaishoParameters()
         @test p.gridding.horizontal_roi_factor == 0.75
         @test p.gridding.vertical_roi_factor == 0.75
-        @test p.gridding.range_floor == 1.0
+        @test p.gridding.range_guard_min == 1.0
         @test p.gridding.range_weight_max == 10.0
     end
 
@@ -224,7 +224,7 @@ using TOML
             @test !hasproperty(p.gridding, :beam_inflation)   # accepted + ignored
             @test p.gridding.horizontal_roi_factor == 0.75
             @test p.gridding.vertical_roi_factor == 0.75
-            @test p.gridding.range_floor == 1.0
+            @test p.gridding.range_guard_min == 1.0
             @test p.gridding.range_weight_max == 10.0
         end
     end
@@ -235,12 +235,12 @@ using TOML
             _write_full_config(path, Dict(
                 "gridding" => Dict("horizontal_roi_factor" => 0.9,
                                    "vertical_roi_factor" => 0.6,
-                                   "range_floor" => 5.0,
+                                   "range_guard_min" => 5.0,
                                    "range_weight_max" => 3.0)))
             p = DaishoParameters(path)
             @test p.gridding.horizontal_roi_factor == 0.9
             @test p.gridding.vertical_roi_factor == 0.6
-            @test p.gridding.range_floor == 5.0
+            @test p.gridding.range_guard_min == 5.0
             @test p.gridding.range_weight_max == 3.0
         end
     end
@@ -255,6 +255,20 @@ using TOML
             catch e; e end
             @test err isa ArgumentError
             @test occursin("[gridding]", err.msg)
+        end
+    end
+
+    @testset "Renamed [gridding] range_floor key raises migration error" begin
+        mktemp() do path, io
+            close(io)
+            _write_full_config(path, Dict(
+                "gridding" => Dict("power_threshold" => 0.5,
+                                   "range_floor" => 1.0)))
+            err = try
+                DaishoParameters(path); nothing
+            catch e; e end
+            @test err isa ArgumentError
+            @test occursin("range_guard_min", err.msg)
         end
     end
 
