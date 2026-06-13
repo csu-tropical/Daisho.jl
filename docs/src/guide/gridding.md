@@ -17,29 +17,28 @@ Several gridding modes are available:
 
 ## Basic Usage
 
+All grid geometry, field selection, interpolation, weighting, and CF metadata
+come from a [`DaishoParameters`](@ref) loaded from a TOML config (see
+*Configuration files* below). The drivers take the `Volume`, an output path, an
+index time, and the parameters:
+
 ### Volume Gridding
 
 ```julia
-Daisho.grid_radar_volume(
-    volume, qc_dict, grid_type_dict, "output.nc", index_time,
-    -50000.0, 500.0, 201,    # X: min, increment, dimension
-    -50000.0, 500.0, 201,    # Y: min, increment, dimension
-    0.0, 500.0, 37,          # Z: min, increment, dimension
-    0.01,                     # beam_inflation
-    0.5                       # power_threshold
-)
+p = DaishoParameters("mygrid.toml")
+volume = read_cfradial("scan.nc")
+Daisho.grid_radar_volume(volume, "output.nc", volume.time_coverage_start, p)
 ```
 
 ### PPI Gridding
 
 ```julia
-Daisho.grid_radar_ppi(
-    volume, qc_dict, grid_type_dict, "output_ppi.nc", index_time,
-    -125000.0, 500.0, 501,   # X
-    -125000.0, 500.0, 501,   # Y
-    0.01, 0.5                # beam_inflation, power_threshold
-)
+Daisho.grid_radar_ppi(volume, "output_ppi.nc", volume.time_coverage_start, p)
 ```
+
+The `[grid.*]` sub-tables of the config select each product's geometry
+(`grid_radar_volume` uses `[grid.volume]`, falling back to `[grid.cartesian]`;
+`grid_radar_rhi` uses `[grid.rhi]`; and so on).
 
 ## Gridding Algorithm
 
@@ -57,8 +56,7 @@ The algorithm uses a BallTree spatial index for efficient nearest-neighbor queri
 - **`horizontal_roi_factor`** / **`vertical_roi_factor`**: Multipliers on the horizontal/vertical grid increment setting the grid-cell half-width/half-height for gate inclusion. Optional; default `0.75` each.
 - **`range_guard_min`** / **`range_weight_max`**: Numerical guards on the near-radar `range_weight` singularity — a lower clamp (metres) on the slant-range divisor and an upper clamp on the resulting (unitless) weight. Optional; defaults `1.0` and `10.0`. These are *weighting* guards, not gate filters.
 - **`range_minimum`** / **`range_maximum`**: Slant-range **gate-inclusion** bounds (metres). A gate is gridded only when its slant range `r` satisfies `range_minimum ≤ r ≤ range_maximum`; out-of-range gates are excluded from every product (no coverage, no value), so a cell reachable only by excluded gates is left true-missing. Optional; defaults `0.0` / `Inf` (no filtering). Use them to homogenise a volume whose low sweep ranges farther than the others, or to cap a product at a higher-quality range.
-- **`missing_key`**: The moment used to determine if a gate has valid data (e.g., "SQI").
-- **`valid_key`**: The moment used to check for non-missing data (e.g., "DBZ").
+- **Field roles (`define_detection` / `define_scanned`)**: The gate-role moments are not gridding parameters — they are declared as field *tags* in `[fields]`. Tag the detection field (its presence proves a detectable echo; formerly `valid_key`, e.g. `DBZ`) with `define_detection`, and the scanned-indicator field (its presence proves the gate was scanned; formerly `missing_key`, e.g. `SQI` or `PID`) with `define_scanned`. They are resolved at gridding time via [`field_with_tag`](@ref Daisho.field_with_tag).
 
 ## Configuration files
 
