@@ -13,6 +13,7 @@ using JLD2
 const Reff = 4.0 * 6371000.0 / 3.0
 
 include("netcdf_parameters.jl")
+include("temperature_profile.jl")
 include("parameters.jl")
 include("radar.jl")
 include("cfradial.jl")
@@ -25,6 +26,9 @@ include("qualitycontrol.jl")
 include("grid_accumulator.jl")
 include("wind_synthesis.jl")
 include("gridding.jl")
+include("fhc.jl")
+include("rainrate.jl")
+include("echo_products.jl")
 include("springsteel_adapter.jl")
 
 # Runtime parameter system exports
@@ -61,5 +65,14 @@ export SynthesisFrame, CartesianFrame, component_names, rotation_at
 export finalize_wind, build_accumulator
 export save_wind_accumulator, load_wind_accumulator, merge_wind_accumulators!
 export write_wind_synthesis, write_grid_products
+
+# Hydrometeor identification (FHC) and rain-rate echo products
+export csu_fhc_summer, get_mbf_sets_summer, beta_mbf
+export FHC_SUMMER_CLASSES, FHC_N_TYPES, DEFAULT_FHC_WEIGHTS
+export calc_blended_rain_tropical
+export calc_rain_zr, calc_rain_kdp, calc_rain_kdp_zdr, calc_rain_z_zdr
+export TemperatureProfile, read_temperature_profile, temperature_celsius
+export EchoProductsParameters
+export apply_echo_products, add_echo_products!
 
 end # module Daisho

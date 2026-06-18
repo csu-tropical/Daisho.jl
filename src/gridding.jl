@@ -2285,6 +2285,17 @@ Parameter-struct overload reading from `p.grid.volume`, `p.gridding`, and
 `p.moments`. `p.grid.volume` falls back to `p.grid.cartesian` when no
 `[grid.volume]` table is configured.
 """
+# Post-write hook: when `[echo]` is enabled, append the hydrometeor-ID and
+# rain-rate products to the just-written grid file. Implemented as a post-write
+# append so every geometry (volume/latlon/rhi/ppi) and the accumulator path share
+# the single `add_echo_products!` implementation; the resulting NetCDF is
+# identical to computing the products before the write.
+function _maybe_add_echo_products(output_file::AbstractString, p::DaishoParameters)
+    (:echo in p.provided && p.echo.enabled) || return nothing
+    add_echo_products!(output_file, p)
+    return nothing
+end
+
 function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
                             index_time, p::DaishoParameters; heading::Real=-9999.0)
     g = require_section(p, :grid, :volume; for_op="grid_radar_volume")
@@ -2296,6 +2307,7 @@ function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
+    _maybe_add_echo_products(output_file, p)
 end
 
 """
@@ -2316,6 +2328,7 @@ function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractStri
         g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
+    _maybe_add_echo_products(output_file, p)
 end
 
 """
@@ -2334,6 +2347,7 @@ function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
         g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk,
         p.grid.metadata)
+    _maybe_add_echo_products(output_file, p)
 end
 
 """
@@ -2355,6 +2369,7 @@ function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
         gd.power_threshold, mk, dk, heading,
         p.grid.metadata)
+    _maybe_add_echo_products(output_file, p)
 end
 
 """
@@ -2420,6 +2435,7 @@ function grid_radar_volume(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _maybe_add_echo_products(output_file, p)
     return accum
 end
 
@@ -2439,6 +2455,7 @@ function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _maybe_add_echo_products(output_file, p)
     return accum
 end
 
@@ -2457,6 +2474,7 @@ function grid_radar_rhi(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
         fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _maybe_add_echo_products(output_file, p)
     return accum
 end
 
@@ -2475,6 +2493,7 @@ function grid_radar_ppi(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _maybe_add_echo_products(output_file, p)
     return accum
 end
 

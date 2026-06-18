@@ -248,3 +248,52 @@ keywords         = "radar, precipitation"
 processing_level = "Level 4"
 license          = "CC-BY-4.0"
 references       = ""
+
+# ── Echo products (post-gridding) ────────────────────────────────────────────
+# Fuzzy hydrometeor identification (HID/FHC) and polarimetric rain rate, computed
+# from the GRIDDED radar variables (beam-power-weighted averages) — not gridded as
+# echo products themselves. CSU_RadarTools ports (csu_fhc_summer, the warm-
+# season FHC; calc_blended_rain_tropical, Thompson et al. 2016). Applied as an
+# in-grid step (post-finalize, pre-write) and/or standalone via
+# `add_echo_products!` on already-written grids (incl. multi-time files).
+# This block is OPTIONAL; the section is shown disabled as a starting template.
+[echo]
+enabled              = false        # master switch
+band                 = "S"          # "S", "C", or "X"
+compute_fhc          = true         # write hydrometeor classification
+compute_blended_rain = true         # write blended rain rate
+# Individual rain components to also write (any subset). Useful for visualization
+# and as fallbacks when blended inputs (e.g. Kdp) are missing/noisy:
+#   RATE_Z, RATE_Z_CONV, RATE_Z_STRAT, RATE_KDP, RATE_Z_ZDR, RATE_KDP_ZDR
+rain_components      = []
+# Input field names read from the grid (ldr_field = "" disables LDR):
+dbz_field            = "DBZ"
+zdr_field            = "ZDR"
+kdp_field            = "KDP"
+rhohv_field          = "RHOHV"
+ldr_field            = ""
+# FHC options:
+fhc_method           = "hybrid"     # "hybrid" or "linear"
+use_temp             = true         # include temperature (needs [echo.temperature])
+temp_factor          = 1.0          # > 1 broadens the temperature membership functions
+correct_ice_method   = true         # hail-only rain method label (fixes a Python bug)
+# Output variable names:
+fhc_output           = "HID_CSU"
+rain_output          = "RATE_CSU_BLENDED"
+rain_method_output   = ""           # "" suppresses the method field
+
+# FHC per-variable weights (hybrid uses only the polarimetric weights).
+[echo.weights]
+DZ = 1.5
+DR = 0.8
+KD = 1.0
+RH = 0.8
+LD = 0.5
+T  = 0.4
+
+# Temperature profile T(z): height (m) -> temperature (°C), linearly interpolated.
+# Temporary stand-in for a future shared hydrostatic reference state. Provide
+# `heights` + `temperatures`, or a 2-column `file`, or a `profile` of [h, T] pairs.
+[echo.temperature]
+heights      = [0.0,  1000.0, 3000.0, 5000.0, 10000.0, 15000.0]
+temperatures = [25.0, 18.0,    5.0,   -8.0,   -40.0,   -70.0]

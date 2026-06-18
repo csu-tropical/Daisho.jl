@@ -31,4 +31,7 @@ include("test_helpers.jl")
     include("test_grid_accumulator.jl")
     include("test_grid_accumulator_workflow.jl")
     include("test_wind_synthesis.jl")
+    include("test_fhc.jl")
+    include("test_rainrate.jl")
+    include("test_echo_products.jl")
 end

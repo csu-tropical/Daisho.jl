@@ -500,6 +500,66 @@ Base.@kwdef struct SynthesisParameters
 end
 
 """
+    EchoProductsParameters
+
+Configuration for the post-gridding echo products — fuzzy hydrometeor
+identification (HID/FHC) and polarimetric rain rate — applied to the *gridded*
+radar variables (the beam-power-weighted averages), loaded from the optional
+`[echo]` block. Both algorithms are CSU_RadarTools ports
+([`csu_fhc_summer`](@ref), [`calc_blended_rain_tropical`](@ref)).
+
+# Fields
+- `enabled::Bool`: master switch; when `false` the gridding drivers skip echo
+  products entirely.
+- `band::String`: radar frequency band (`"S"`, `"C"`, `"X"`) selecting both the
+  FHC membership functions and the rain-rate coefficients.
+- `compute_fhc::Bool`: write the hydrometeor classification field.
+- `compute_blended_rain::Bool`: write the blended rain-rate field.
+- `rain_components::Vector{String}`: which individual rain components to also
+  write, any subset of `RATE_Z`, `RATE_Z_CONV`, `RATE_Z_STRAT`, `RATE_KDP`,
+  `RATE_Z_ZDR`, `RATE_KDP_ZDR`. These are computed directly from the gridded
+  variables and are available even when `compute_blended_rain` is `false` — useful
+  for visualization and as fallbacks when blended inputs (e.g. Kdp) are
+  missing/noisy.
+- `dbz_field`/`zdr_field`/`kdp_field`/`rhohv_field`/`ldr_field::String`: input
+  field names to read from the grid; `ldr_field=""` disables LDR.
+- `fhc_method::Symbol`: `:hybrid` (default) or `:linear`.
+- `use_temp::Bool`: include temperature in the FHC (requires `temperature`).
+- `temp_factor::Float64`: broadens the temperature membership functions when > 1.
+- `correct_ice_method::Bool`: label rain method code `2` only on hail cells
+  (default `true`); `false` replicates the Python ice-method bug exactly.
+- `fhc_output`/`rain_output`/`rain_method_output::String`: output variable names.
+  `rain_method_output=""` suppresses the method field.
+- `weights::Dict{Symbol,Float64}`: per-variable FHC weights (keys `:DZ, :DR, :KD,
+  :RH, :LD, :T`).
+- `temperature::Union{TemperatureProfile,Nothing}`: vertical T(z) profile (°C),
+  required when `use_temp` is `true`. A temporary stand-in for a future shared
+  hydrostatic reference state (see `temperature_profile.jl`).
+"""
+Base.@kwdef struct EchoProductsParameters
+    enabled::Bool                 = false
+    band::String                  = "S"
+    compute_fhc::Bool             = true
+    compute_blended_rain::Bool    = true
+    rain_components::Vector{String} = String[]
+    dbz_field::String             = "DBZ"
+    zdr_field::String             = "ZDR"
+    kdp_field::String             = "KDP"
+    rhohv_field::String           = "RHOHV"
+    ldr_field::String             = ""
+    fhc_method::Symbol            = :hybrid
+    use_temp::Bool                = true
+    temp_factor::Float64          = 1.0
+    correct_ice_method::Bool      = true
+    fhc_output::String            = "HID_CSU"
+    rain_output::String           = "RATE_CSU_BLENDED"
+    rain_method_output::String    = ""
+    weights::Dict{Symbol,Float64} = Dict(:DZ => 1.5, :DR => 0.8, :KD => 1.0,
+                                          :RH => 0.8, :LD => 0.5, :T => 0.4)
+    temperature::Union{TemperatureProfile,Nothing} = nothing
+end
+
+"""
     DaishoParameters
 
 Top-level immutable runtime configuration loaded from a TOML file. Construct
@@ -541,16 +601,28 @@ struct DaishoParameters
     grid::GridParameters
     io::IOParameters
     synthesis::SynthesisParameters
+    echo::EchoProductsParameters
     provided::Set{Symbol}
 end
 
 # Back-compat convenience: callers that built a `DaishoParameters` before the
 # `[synthesis]` block existed pass six positional args (…, io, provided). Inject
-# a default synthesis block so those call sites keep working.
+# default synthesis and echo blocks so those call sites keep working.
 DaishoParameters(moments::MomentParameters, qc::QCParameters,
                  gridding::GriddingParameters, grid::GridParameters,
                  io::IOParameters, provided::Set{Symbol}) =
-    DaishoParameters(moments, qc, gridding, grid, io, SynthesisParameters(), provided)
+    DaishoParameters(moments, qc, gridding, grid, io, SynthesisParameters(),
+                     EchoProductsParameters(), provided)
+
+# Back-compat convenience for callers built before the `[echo]` block existed
+# (seven positional args ending …, synthesis, provided). Inject a default
+# echo block.
+DaishoParameters(moments::MomentParameters, qc::QCParameters,
+                 gridding::GriddingParameters, grid::GridParameters,
+                 io::IOParameters, synthesis::SynthesisParameters,
+                 provided::Set{Symbol}) =
+    DaishoParameters(moments, qc, gridding, grid, io, synthesis,
+                     EchoProductsParameters(), provided)
 
 # ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -578,7 +650,7 @@ DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 # numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
     provided = Set{Symbol}()
-    for s in (:qc, :gridding, :grid, :synthesis)
+    for s in (:qc, :gridding, :grid, :synthesis, :echo)
         haskey(d, string(s)) && push!(provided, s)
     end
 
@@ -588,7 +660,8 @@ function DaishoParameters(d::AbstractDict)
     grid      = haskey(d, "grid")      ? _grid_from_dict(d["grid"])                             : GridParameters()
     io        = _io_from_dict(_section(d, "io"))
     synthesis = haskey(d, "synthesis") ? _synthesis_from_dict(d["synthesis"])                   : SynthesisParameters()
-    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, provided)
+    echo      = haskey(d, "echo")      ? _echo_from_dict(d["echo"])                             : EchoProductsParameters()
+    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, provided)
 end
 
 """
@@ -857,6 +930,80 @@ function _synthesis_from_dict(d::AbstractDict)
         max_elevation = haskey(d, "max_elevation") ? Float64(d["max_elevation"]) :
                         SynthesisParameters().max_elevation,
     )
+end
+
+# Build a TemperatureProfile from a `[echo.temperature]` sub-table. Accepts a
+# 2-column `file`, paired `heights`/`temperatures` arrays, or a `profile` list of
+# `[height_m, temperature_C]` pairs.
+function _temperature_from_dict(d::AbstractDict)
+    if haskey(d, "file")
+        return read_temperature_profile(String(d["file"]))
+    elseif haskey(d, "heights") && haskey(d, "temperatures")
+        return TemperatureProfile(Float64.(d["heights"]), Float64.(d["temperatures"]))
+    elseif haskey(d, "profile")
+        return TemperatureProfile([(Float64(p[1]), Float64(p[2])) for p in d["profile"]])
+    end
+    throw(ArgumentError("`[echo.temperature]` needs either `file`, or " *
+        "`heights` + `temperatures`, or a `profile` list of [height, temp] pairs."))
+end
+
+# Build EchoProductsParameters from the optional `[echo]` block. Scalar keys
+# default when absent (a large convenience block) but unknown keys raise to catch
+# typos, matching the rest of the loader. `weights` and `temperature` are
+# sub-tables.
+function _echo_from_dict(d::AbstractDict)
+    scalar_fields = (:enabled, :band, :compute_fhc, :compute_blended_rain,
+        :rain_components, :dbz_field, :zdr_field, :kdp_field, :rhohv_field,
+        :ldr_field, :fhc_method, :use_temp, :temp_factor, :correct_ice_method,
+        :fhc_output, :rain_output, :rain_method_output)
+    subtables = (:weights, :temperature)
+    allowed = Set((scalar_fields..., subtables...))
+    unknown = setdiff(Set(Symbol.(keys(d))), allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[echo]`. " *
+        "Allowed keys: $(join((scalar_fields..., subtables...), ", "))"))
+
+    valid_components = ("RATE_Z", "RATE_Z_CONV", "RATE_Z_STRAT", "RATE_KDP",
+                        "RATE_Z_ZDR", "RATE_KDP_ZDR")
+    kw = Dict{Symbol,Any}()
+    for f in scalar_fields
+        sk = String(f)
+        haskey(d, sk) || continue
+        if f === :rain_components
+            comps = String.(d[sk])
+            for c in comps
+                c in valid_components || throw(ArgumentError(
+                    "`[echo]` rain_components entry \"$c\" is not valid. " *
+                    "Allowed: $(join(valid_components, ", "))"))
+            end
+            kw[f] = comps
+        else
+            kw[f] = _coerce_field(EchoProductsParameters, f, d[sk])
+        end
+    end
+
+    if haskey(d, "weights")
+        w = Dict{Symbol,Float64}(:DZ => 1.5, :DR => 0.8, :KD => 1.0,
+                                 :RH => 0.8, :LD => 0.5, :T => 0.4)
+        for (k, v) in d["weights"]
+            ks = Symbol(k)
+            ks in keys(w) || throw(ArgumentError(
+                "Unknown weight key `$k` in `[echo.weights]`; allowed: " *
+                "DZ, DR, KD, RH, LD, T"))
+            w[ks] = Float64(v)
+        end
+        kw[:weights] = w
+    end
+
+    if haskey(d, "temperature")
+        kw[:temperature] = _temperature_from_dict(d["temperature"])
+    end
+
+    dp = EchoProductsParameters(; kw...)
+    (dp.use_temp && dp.temperature === nothing) && throw(ArgumentError(
+        "`[echo]` has `use_temp = true` but no `[echo.temperature]` " *
+        "profile. Add a temperature profile or set `use_temp = false`."))
+    return dp
 end
 
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;

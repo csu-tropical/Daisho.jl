@@ -95,6 +95,45 @@ hid_attrib = OrderedDict(
     "units"                     => "none",
 )
 
+# Individual polarimetric rain-rate components (CSU_RadarTools port). Each is
+# computed directly from the gridded variables and can be written alongside (or
+# instead of) the blended product.
+rate_z_attrib = OrderedDict(
+    "standard_name"             => "RATE_Z",
+    "long_name"                 => "Rain rate from R(Z)",
+    "units"                     => "mm/hr",
+)
+rate_z_conv_attrib = OrderedDict(
+    "standard_name"             => "RATE_Z_CONV",
+    "long_name"                 => "Rain rate from convective R(Z)",
+    "units"                     => "mm/hr",
+)
+rate_z_strat_attrib = OrderedDict(
+    "standard_name"             => "RATE_Z_STRAT",
+    "long_name"                 => "Rain rate from stratiform R(Z)",
+    "units"                     => "mm/hr",
+)
+rate_kdp_attrib = OrderedDict(
+    "standard_name"             => "RATE_KDP",
+    "long_name"                 => "Rain rate from R(Kdp)",
+    "units"                     => "mm/hr",
+)
+rate_z_zdr_attrib = OrderedDict(
+    "standard_name"             => "RATE_Z_ZDR",
+    "long_name"                 => "Rain rate from R(Z, Zdr)",
+    "units"                     => "mm/hr",
+)
+rate_kdp_zdr_attrib = OrderedDict(
+    "standard_name"             => "RATE_KDP_ZDR",
+    "long_name"                 => "Rain rate from R(Kdp, Zdr)",
+    "units"                     => "mm/hr",
+)
+rain_method_attrib = OrderedDict(
+    "standard_name"             => "RATE_CSU_BLENDED_METHOD",
+    "long_name"                 => "CSU blended rain method code",
+    "units"                     => "none",
+)
+
 # Level 1 variables
 dbz_l1_attrib = OrderedDict(
         "standard_name"             => "DBZ_L1",
@@ -161,6 +200,13 @@ variable_attrib_dict["KDP_L1"] = kdp_l1_attrib
 variable_attrib_dict["WIDTH_L1"] = width_l1_attrib
 variable_attrib_dict["VEL_L1"] = vel_l1_attrib
 variable_attrib_dict["RATE_CSU_BLENDED"] = rainrate_attrib
+variable_attrib_dict["RATE_CSU_BLENDED_METHOD"] = rain_method_attrib
+variable_attrib_dict["RATE_Z"] = rate_z_attrib
+variable_attrib_dict["RATE_Z_CONV"] = rate_z_conv_attrib
+variable_attrib_dict["RATE_Z_STRAT"] = rate_z_strat_attrib
+variable_attrib_dict["RATE_KDP"] = rate_kdp_attrib
+variable_attrib_dict["RATE_Z_ZDR"] = rate_z_zdr_attrib
+variable_attrib_dict["RATE_KDP_ZDR"] = rate_kdp_zdr_attrib
 variable_attrib_dict["PID"] = pid_attrib
 variable_attrib_dict["PID_FOR_QC"] = pid_qc_attrib
 variable_attrib_dict["HID_CSU"] = hid_attrib
