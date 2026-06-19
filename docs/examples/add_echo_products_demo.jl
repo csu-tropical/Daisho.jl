@@ -44,10 +44,17 @@ function main(args)
         @warn "No [echo] block in $config; using defaults — temperature will NOT " *
               "be used and field names default to DBZ/ZDR/KDP/RHOHV."
     end
-    if e.use_temp && e.temperature === nothing
-        @warn "[echo] requests use_temp but no temperature profile is configured; " *
-              "FHC will run WITHOUT the temperature term."
+    if e.use_temp && e.temp_source === :profile && e.temperature === nothing
+        @warn "[echo] requests use_temp with temp_source=\"profile\" but no " *
+              "temperature profile is configured; FHC will run WITHOUT temperature."
+    elseif e.use_temp && e.temp_source === :reference_state
+        @warn "[echo] temp_source=\"reference_state\" is not yet implemented; " *
+              "processing will error. Use \"profile\" or \"field\"."
     end
+
+    temp_desc = !e.use_temp ? "off" :
+        e.temp_source === :field ? "field $(e.temp_field) [$(e.temp_field_units)]" :
+        e.temp_source === :profile ? "profile" : String(e.temp_source)
 
     println("Echo products configuration:")
     println("  band                 = ", e.band)
@@ -58,8 +65,7 @@ function main(args)
     println("  inputs               = ", e.dbz_field, ", ", e.zdr_field, ", ",
             e.kdp_field, ", ", e.rhohv_field,
             isempty(e.ldr_field) ? "" : ", " * e.ldr_field)
-    println("  use_temp             = ", e.use_temp,
-            e.temperature === nothing ? " (no profile)" : "")
+    println("  temperature          = ", temp_desc)
     println()
 
     for f in files

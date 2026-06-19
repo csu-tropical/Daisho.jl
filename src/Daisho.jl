@@ -73,6 +73,6 @@ export calc_blended_rain_tropical
 export calc_rain_zr, calc_rain_kdp, calc_rain_kdp_zdr, calc_rain_z_zdr
 export TemperatureProfile, read_temperature_profile, temperature_celsius
 export EchoProductsParameters
-export apply_echo_products, add_echo_products!
+export apply_echo_products, add_echo_products!, echo_output_names
 
 end # module Daisho

@@ -524,7 +524,15 @@ radar variables (the beam-power-weighted averages), loaded from the optional
 - `dbz_field`/`zdr_field`/`kdp_field`/`rhohv_field`/`ldr_field::String`: input
   field names to read from the grid; `ldr_field=""` disables LDR.
 - `fhc_method::Symbol`: `:hybrid` (default) or `:linear`.
-- `use_temp::Bool`: include temperature in the FHC (requires `temperature`).
+- `use_temp::Bool`: include temperature in the FHC.
+- `temp_source::Symbol`: where temperature comes from — `:profile` (the
+  `temperature` T(z) profile, default), `:field` (a gridded temperature field,
+  `temp_field`), or `:reference_state` (future Springsteel reference state;
+  currently errors at runtime).
+- `temp_field::String`: gridded temperature field name used when
+  `temp_source = :field` (default `"TEMP_FOR_PID"`).
+- `temp_field_units::String`: units of `temp_field`, `"C"` (default) or `"K"`
+  (converted to °C internally; the FHC works in °C).
 - `temp_factor::Float64`: broadens the temperature membership functions when > 1.
 - `correct_ice_method::Bool`: label rain method code `2` only on hail cells
   (default `true`); `false` replicates the Python ice-method bug exactly.
@@ -533,8 +541,9 @@ radar variables (the beam-power-weighted averages), loaded from the optional
 - `weights::Dict{Symbol,Float64}`: per-variable FHC weights (keys `:DZ, :DR, :KD,
   :RH, :LD, :T`).
 - `temperature::Union{TemperatureProfile,Nothing}`: vertical T(z) profile (°C),
-  required when `use_temp` is `true`. A temporary stand-in for a future shared
-  hydrostatic reference state (see `temperature_profile.jl`).
+  required when `use_temp` is `true` and `temp_source = :profile`. A temporary
+  stand-in for a future shared hydrostatic reference state (see
+  `temperature_profile.jl`).
 """
 Base.@kwdef struct EchoProductsParameters
     enabled::Bool                 = false
@@ -549,6 +558,9 @@ Base.@kwdef struct EchoProductsParameters
     ldr_field::String             = ""
     fhc_method::Symbol            = :hybrid
     use_temp::Bool                = true
+    temp_source::Symbol           = :profile
+    temp_field::String            = "TEMP_FOR_PID"
+    temp_field_units::String      = "C"
     temp_factor::Float64          = 1.0
     correct_ice_method::Bool      = true
     fhc_output::String            = "HID_CSU"
@@ -954,7 +966,8 @@ end
 function _echo_from_dict(d::AbstractDict)
     scalar_fields = (:enabled, :band, :compute_fhc, :compute_blended_rain,
         :rain_components, :dbz_field, :zdr_field, :kdp_field, :rhohv_field,
-        :ldr_field, :fhc_method, :use_temp, :temp_factor, :correct_ice_method,
+        :ldr_field, :fhc_method, :use_temp, :temp_source, :temp_field,
+        :temp_field_units, :temp_factor, :correct_ice_method,
         :fhc_output, :rain_output, :rain_method_output)
     subtables = (:weights, :temperature)
     allowed = Set((scalar_fields..., subtables...))
@@ -1000,9 +1013,25 @@ function _echo_from_dict(d::AbstractDict)
     end
 
     dp = EchoProductsParameters(; kw...)
-    (dp.use_temp && dp.temperature === nothing) && throw(ArgumentError(
-        "`[echo]` has `use_temp = true` but no `[echo.temperature]` " *
-        "profile. Add a temperature profile or set `use_temp = false`."))
+
+    dp.temp_source in (:profile, :field, :reference_state) || throw(ArgumentError(
+        "`[echo]` temp_source = \"$(dp.temp_source)\" is not valid; allowed: " *
+        "\"profile\", \"field\", \"reference_state\"."))
+    dp.temp_field_units in ("C", "K") || throw(ArgumentError(
+        "`[echo]` temp_field_units = \"$(dp.temp_field_units)\" is not valid; " *
+        "allowed: \"C\", \"K\"."))
+    if dp.use_temp
+        if dp.temp_source === :profile && dp.temperature === nothing
+            throw(ArgumentError(
+                "`[echo]` has `use_temp = true` with `temp_source = \"profile\"` " *
+                "but no `[echo.temperature]` profile. Add a temperature profile, " *
+                "switch `temp_source`, or set `use_temp = false`."))
+        elseif dp.temp_source === :field && isempty(dp.temp_field)
+            throw(ArgumentError(
+                "`[echo]` has `temp_source = \"field\"` but `temp_field` is empty; " *
+                "set it to the gridded temperature field name."))
+        end
+    end
     return dp
 end
 

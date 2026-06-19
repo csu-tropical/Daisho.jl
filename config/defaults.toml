@@ -274,7 +274,14 @@ rhohv_field          = "RHOHV"
 ldr_field            = ""
 # FHC options:
 fhc_method           = "hybrid"     # "hybrid" or "linear"
-use_temp             = true         # include temperature (needs [echo.temperature])
+use_temp             = true         # include temperature in the FHC
+# Temperature source:
+#   "profile"         the [echo.temperature] piecewise-linear T(z) below
+#   "field"           a gridded temperature field (temp_field), used per cell
+#   "reference_state" future Springsteel reference state (not yet implemented)
+temp_source          = "profile"
+temp_field           = "TEMP_FOR_PID"  # gridded temperature field (temp_source = "field")
+temp_field_units     = "C"          # units of temp_field: "C" or "K" (K converted to C)
 temp_factor          = 1.0          # > 1 broadens the temperature membership functions
 correct_ice_method   = true         # hail-only rain method label (fixes a Python bug)
 # Output variable names:

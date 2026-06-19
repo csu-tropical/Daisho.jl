@@ -1,7 +1,8 @@
 using NCDatasets
 
 # Build a DaishoParameters carrying polarimetric fields and a [echo] block.
-function _echo_test_params(; enabled::Bool, rain_components = ["RATE_Z", "RATE_KDP"])
+function _echo_test_params(; enabled::Bool, rain_components = ["RATE_Z", "RATE_KDP"],
+        temp_source::Symbol = :profile, temp_field_units::String = "C")
     fields = [
         Daisho.FieldSpec("DBZ",   Set([:linear_interp, :define_detection])),
         Daisho.FieldSpec("ZDR",   Set([:linear_interp])),
@@ -20,6 +21,7 @@ function _echo_test_params(; enabled::Bool, rain_components = ["RATE_Z", "RATE_K
         compute_fhc = true, compute_blended_rain = true,
         rain_components = rain_components,
         use_temp = true, temp_factor = 1.0,
+        temp_source = temp_source, temp_field_units = temp_field_units,
         temperature = TemperatureProfile([0.0, 2000.0, 6000.0], [25.0, 10.0, -15.0]))
     return Daisho.DaishoParameters(moments, Daisho.QCParameters(),
         Daisho.GriddingParameters(), grid, Daisho.IOParameters(),
@@ -68,11 +70,14 @@ end
             @test size(v) == (nx, ny, nz)
             @test eltype(v) == Float32
         end
-        # Sentinel policy: missing → fill_value, clear-air → undetect (HID) / 0 (rain).
+        # Sentinel policy: missing → fill_value, clear-air → undetect for BOTH HID
+        # and rain (the undetect flag is preserved, never collapsed to 0).
         @test out["HID_CSU"][1, 1, 1] == Float32(io.fill_value)
         @test out["HID_CSU"][2, 1, 1] == Float32(io.undetect)
         @test out["RATE_CSU_BLENDED"][1, 1, 1] == Float32(io.fill_value)
-        @test out["RATE_CSU_BLENDED"][2, 1, 1] == 0.0f0
+        @test out["RATE_CSU_BLENDED"][2, 1, 1] == Float32(io.undetect)
+        @test out["RATE_Z"][1, 1, 1] == Float32(io.fill_value)
+        @test out["RATE_Z"][2, 1, 1] == Float32(io.undetect)
         # Valid cells classify within range and produce a finite rain rate.
         @test 1 <= out["HID_CSU"][3, 3, 1] <= FHC_N_TYPES
         @test isfinite(out["RATE_CSU_BLENDED"][3, 3, 1]) && out["RATE_CSU_BLENDED"][3, 3, 1] >= 0
@@ -92,6 +97,17 @@ end
                 end
                 @test ds["RATE_CSU_BLENDED"].attrib["units"] == "mm/hr"
             end
+
+            # The Fields-API reader surfaces echo outputs even though they are NOT
+            # listed in [fields] (echo products are appended post-grid).
+            @test !("HID_CSU" in [fs.name for fs in p.moments.fields])
+            g = Daisho.read_gridded_radar(outfile, p)
+            for name in ("HID_CSU", "RATE_CSU_BLENDED", "RATE_Z", "RATE_KDP")
+                @test haskey(g.fields, name)
+                @test size(g.fields[name]) == (length(g.X), length(g.Y), length(g.Z))
+            end
+            @test echo_output_names(p.echo) ==
+                  ["HID_CSU", "RATE_CSU_BLENDED", "RATE_Z", "RATE_KDP"]
         finally
             isfile(outfile) && rm(outfile)
         end
@@ -167,6 +183,130 @@ end
             end
         finally
             isfile(f) && rm(f)
+        end
+    end
+
+    @testset "temperature source: gridded field" begin
+        io = IOParameters()
+        nx, ny, nz = 4, 3, 2
+        dbz = fill(40.0f0, nx, ny, nz)
+        zdr = fill(1.0f0, nx, ny, nz)
+        kdp = fill(1.5f0, nx, ny, nz)
+        rho = fill(0.98f0, nx, ny, nz)
+        prof = TemperatureProfile([0.0, 5000.0], [20.0, -20.0])
+        z_axis = [1000.0, 4000.0]
+        heights = Daisho._heights_array((nx, ny, nz), z_axis, 3)
+        # A 3-D temperature field equal to the profile sampled at each cell.
+        tfield = Float32.(map(h -> temperature_celsius(prof, h), heights))
+
+        dp_prof = Daisho.EchoProductsParameters(enabled = true, band = "S",
+            use_temp = true, temp_source = :profile, temperature = prof)
+        dp_field = Daisho.EchoProductsParameters(enabled = true, band = "S",
+            use_temp = true, temp_source = :field, temp_field = "TEMP_FOR_PID")
+
+        base = Dict{String,Any}("DBZ" => dbz, "ZDR" => zdr, "KDP" => kdp, "RHOHV" => rho)
+        fields_c = merge(base, Dict("TEMP_FOR_PID" => tfield))
+
+        out_prof = apply_echo_products(base, dp_prof; io = io, heights = heights)
+        out_field = apply_echo_products(fields_c, dp_field; io = io, heights = heights)
+
+        @testset "field (°C) == profile sampled at the same heights" begin
+            @test out_field["HID_CSU"] == out_prof["HID_CSU"]
+        end
+
+        @testset "Kelvin units convert to identical result" begin
+            dp_k = Daisho.EchoProductsParameters(enabled = true, band = "S",
+                use_temp = true, temp_source = :field, temp_field = "TEMP_FOR_PID",
+                temp_field_units = "K")
+            fields_k = merge(base, Dict("TEMP_FOR_PID" => tfield .+ 273.15f0))
+            out_k = apply_echo_products(fields_k, dp_k; io = io, heights = heights)
+            @test out_k["HID_CSU"] == out_field["HID_CSU"]
+        end
+
+        @testset "sentinel/NaN temperature cells skip the T term" begin
+            t_sent = copy(tfield)
+            t_sent[1, 1, 1] = Float32(io.fill_value)
+            t_sent[2, 1, 1] = Float32(io.undetect)
+            out_s = apply_echo_products(merge(base, Dict("TEMP_FOR_PID" => t_sent)),
+                                        dp_field; io = io, heights = heights)
+            # Those cells classify as if no temperature was supplied.
+            c_noT = csu_fhc_summer(; dz = 40.0, zdr = 1.0, kdp = 1.5, rho = 0.98,
+                                   band = "S", use_temp = false)
+            @test out_s["HID_CSU"][1, 1, 1] == Float32(c_noT)
+            @test out_s["HID_CSU"][2, 1, 1] == Float32(c_noT)
+        end
+
+        @testset "missing field errors clearly" begin
+            @test_throws ArgumentError apply_echo_products(base, dp_field;
+                                                           io = io, heights = heights)
+        end
+
+        @testset "reference_state is not yet implemented" begin
+            dp_ref = Daisho.EchoProductsParameters(enabled = true, band = "S",
+                use_temp = true, temp_source = :reference_state)
+            @test_throws ArgumentError apply_echo_products(base, dp_ref;
+                                                           io = io, heights = heights)
+        end
+
+        @testset "standalone add_echo_products! reads gridded temperature" begin
+            nt = 2
+            dbz4 = Array{Float32}(undef, nx, ny, nz, nt)
+            dbz4[:, :, :, 1] .= 45.0f0
+            dbz4[:, :, :, 2] .= 18.0f0
+            zdr4 = fill(0.5f0, nx, ny, nz, nt)
+            kdp4 = fill(1.0f0, nx, ny, nz, nt)
+            rho4 = fill(0.97f0, nx, ny, nz, nt)
+            temp4 = Array{Float32}(undef, nx, ny, nz, nt)
+            temp4[:, :, :, 1] .= 15.0f0
+            temp4[:, :, :, 2] .= -10.0f0
+
+            f = tempname() * "_tempfield.nc"
+            try
+                NCDataset(f, "c") do ds
+                    ds.dim["X"] = nx; ds.dim["Y"] = ny; ds.dim["Z"] = nz; ds.dim["time"] = nt
+                    defVar(ds, "X", Float32, ("X",))[:] = collect(0:nx-1) .* 1000.0
+                    defVar(ds, "Y", Float32, ("Y",))[:] = collect(0:ny-1) .* 1000.0
+                    defVar(ds, "Z", Float32, ("Z",))[:] = [500.0, 1500.0]
+                    defVar(ds, "DBZ", Float32, ("X", "Y", "Z", "time"))[:] = dbz4
+                    defVar(ds, "ZDR", Float32, ("X", "Y", "Z", "time"))[:] = zdr4
+                    defVar(ds, "KDP", Float32, ("X", "Y", "Z", "time"))[:] = kdp4
+                    defVar(ds, "RHOHV", Float32, ("X", "Y", "Z", "time"))[:] = rho4
+                    defVar(ds, "TEMP_FOR_PID", Float32, ("X", "Y", "Z", "time"))[:] = temp4
+                end
+                p = _echo_test_params(enabled = true, temp_source = :field)
+                written = add_echo_products!(f, p)
+                @test "HID_CSU" in written
+                NCDataset(f) do ds
+                    hid = Array(ds["HID_CSU"].var)
+                    for t in 1:nt
+                        sl = Dict{String,Any}("DBZ" => dbz4[:, :, :, t],
+                            "ZDR" => zdr4[:, :, :, t], "KDP" => kdp4[:, :, :, t],
+                            "RHOHV" => rho4[:, :, :, t], "TEMP_FOR_PID" => temp4[:, :, :, t])
+                        ref = apply_echo_products(sl, p.echo; io = io)
+                        @test isequal(hid[:, :, :, t], ref["HID_CSU"])
+                    end
+                end
+
+                # Missing temperature variable with temp_source=:field errors.
+                f2 = tempname() * "_notemp.nc"
+                try
+                    NCDataset(f2, "c") do ds
+                        ds.dim["X"] = nx; ds.dim["Y"] = ny; ds.dim["Z"] = nz; ds.dim["time"] = nt
+                        defVar(ds, "X", Float32, ("X",))[:] = collect(0:nx-1) .* 1000.0
+                        defVar(ds, "Y", Float32, ("Y",))[:] = collect(0:ny-1) .* 1000.0
+                        defVar(ds, "Z", Float32, ("Z",))[:] = [500.0, 1500.0]
+                        defVar(ds, "DBZ", Float32, ("X", "Y", "Z", "time"))[:] = dbz4
+                        defVar(ds, "ZDR", Float32, ("X", "Y", "Z", "time"))[:] = zdr4
+                        defVar(ds, "KDP", Float32, ("X", "Y", "Z", "time"))[:] = kdp4
+                        defVar(ds, "RHOHV", Float32, ("X", "Y", "Z", "time"))[:] = rho4
+                    end
+                    @test_throws ArgumentError add_echo_products!(f2, p)
+                finally
+                    isfile(f2) && rm(f2)
+                end
+            finally
+                isfile(f) && rm(f)
+            end
         end
     end
 end

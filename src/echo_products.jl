@@ -42,12 +42,16 @@ const _RAIN_COMPONENT_BUILDERS = (
 function _finalize_rain(raw::AbstractArray, dbz, required::Tuple, io::IOParameters)
     out = Array{Float32}(undef, size(raw))
     fv = Float32(io.fill_value)
+    ud = Float32(io.undetect)
     @inbounds for i in eachindex(raw)
         d = dbz[i]
         if _dp_missing(d, io)
             out[i] = fv
         elseif _dp_undetect(d, io)
-            out[i] = 0.0f0
+            # Clear air (scanned, no echo): preserve the undetect sentinel rather
+            # than writing 0, so the missing/undetect/value distinction carries
+            # through to the rain fields (downstream masking relies on it).
+            out[i] = ud
         elseif !isfinite(raw[i]) || any(r -> _dp_invalid(r[i], io), required)
             out[i] = fv
         else
@@ -59,6 +63,87 @@ end
 
 _at_field(::Nothing, i) = nothing
 _at_field(v::AbstractArray, i) = v[i]
+
+"""
+    echo_output_names(dp::EchoProductsParameters) -> Vector{String}
+
+The names of the netCDF variables this echo configuration writes: the HID field,
+the blended rain field, the optional rain-method field, and any individual rain
+components. Echo products are appended *after* gridding and are therefore not part
+of `[fields]`; this list lets the gridded readers surface them anyway.
+"""
+function echo_output_names(dp::EchoProductsParameters)
+    names = String[]
+    dp.compute_fhc && push!(names, dp.fhc_output)
+    dp.compute_blended_rain && push!(names, dp.rain_output)
+    isempty(dp.rain_method_output) || push!(names, dp.rain_method_output)
+    append!(names, dp.rain_components)
+    return names
+end
+
+# Add any configured echo output variables that exist in `file` (and are not
+# already present) to a reader's `fields` dict, reshaped to `shape`. Echo products
+# are written post-grid and need not appear in `[fields]`, so the Fields-API
+# readers would otherwise miss them. Read raw (`.var`) to preserve sentinels.
+function _merge_echo_fields!(fields::AbstractDict, file::AbstractString,
+        p::DaishoParameters, shape::Tuple)
+    :echo in p.provided || return fields
+    names = echo_output_names(p.echo)
+    isempty(names) && return fields
+    NCDataset(file) do ds
+        for name in names
+            (haskey(ds, name) && !haskey(fields, name)) || continue
+            fields[name] = reshape(Float32.(Array(ds[name].var)), shape...)
+        end
+    end
+    return fields
+end
+
+"""
+    _echo_temperature_field(dp, fields, heights, io) -> Union{Array,Nothing}
+
+Produce the per-cell temperature array (°C, shaped like the reflectivity grid) for
+the FHC, or `nothing` when temperature is not used. Dispatches on `dp.temp_source`:
+
+  * `:profile`  — sample the `dp.temperature` T(z) profile at each cell's height
+    (needs `heights`); the legacy behavior.
+  * `:field`    — use the gridded `dp.temp_field` directly (it is already per-cell
+    and may be 3-D), converting K→°C when `dp.temp_field_units == "K"`. Sentinel /
+    non-finite cells become `NaN` so `csu_fhc_summer` skips the temperature term
+    there (the conversion is applied only to valid cells).
+  * `:reference_state` — reserved for a future Springsteel reference state.
+"""
+function _echo_temperature_field(dp::EchoProductsParameters, fields::AbstractDict,
+        heights, io::IOParameters)
+    dp.use_temp || return nothing
+
+    if dp.temp_source === :profile
+        (dp.temperature === nothing || heights === nothing) && return nothing
+        return map(h -> temperature_celsius(dp.temperature, h), heights)
+
+    elseif dp.temp_source === :field
+        haskey(fields, dp.temp_field) || throw(ArgumentError(
+            "apply_echo_products: temp_source=:field but temperature field " *
+            "\"$(dp.temp_field)\" not found in the grid " *
+            "(have: $(join(sort(collect(keys(fields))), ", ")))."))
+        raw = fields[dp.temp_field]
+        to_celsius = dp.temp_field_units == "K"
+        T = Array{Float64}(undef, size(raw))
+        @inbounds for i in eachindex(raw)
+            v = raw[i]
+            if _dp_invalid(v, io)
+                T[i] = NaN
+            else
+                T[i] = to_celsius ? Float64(v) - 273.15 : Float64(v)
+            end
+        end
+        return T
+
+    else  # :reference_state (validated at config load; reserved)
+        throw(ArgumentError("apply_echo_products: temp_source=:reference_state " *
+            "is not yet implemented; use :profile or :field."))
+    end
+end
 
 """
     apply_echo_products(fields, dp::EchoProductsParameters;
@@ -88,10 +173,9 @@ function apply_echo_products(fields::AbstractDict, dp::EchoProductsParameters;
     fv = io.fill_value
     ud = io.undetect
 
-    # Build the temperature field from the profile and per-cell heights.
-    use_temp = dp.use_temp && dp.temperature !== nothing && heights !== nothing
-    T_arr = use_temp ?
-        map(h -> temperature_celsius(dp.temperature, h), heights) : nothing
+    # Resolve the per-cell temperature array from the configured source.
+    T_arr = _echo_temperature_field(dp, fields, heights, io)
+    use_temp = T_arr !== nothing
 
     out = Dict{String,Array{Float32}}()
 
@@ -226,6 +310,15 @@ function add_echo_products!(file::AbstractString, p::DaishoParameters)
         kdp_all = readvar(dp.kdp_field)
         rho_all = readvar(dp.rhohv_field)
         ldr_all = isempty(dp.ldr_field) ? nothing : readvar(dp.ldr_field)
+        # Gridded temperature field, when that source is selected. Fail early with
+        # a clear message if it is absent (no silent fallback).
+        temp_all = nothing
+        if dp.use_temp && dp.temp_source === :field
+            temp_all = readvar(dp.temp_field)
+            temp_all === nothing && throw(ArgumentError(
+                "add_echo_products!: temp_source=:field but temperature variable " *
+                "\"$(dp.temp_field)\" not present in $file."))
+        end
 
         # Per-time-slice indexer into a (spatial..., time) array.
         slice(::Nothing, t) = nothing
@@ -249,6 +342,7 @@ function add_echo_products!(file::AbstractString, p::DaishoParameters)
             kdp_all !== nothing && (fields[dp.kdp_field] = slice(kdp_all, t))
             rho_all !== nothing && (fields[dp.rhohv_field] = slice(rho_all, t))
             ldr_all !== nothing && (fields[dp.ldr_field] = slice(ldr_all, t))
+            temp_all !== nothing && (fields[dp.temp_field] = slice(temp_all, t))
 
             prods = apply_echo_products(fields, dp; io = io, heights = heights)
             for (name, arr) in prods

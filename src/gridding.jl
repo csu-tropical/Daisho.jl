@@ -2134,6 +2134,7 @@ function read_gridded_radar(file, p::DaishoParameters)
     x, y, z, lat, lon, t0, t1, radardata = _read_gridded_radar(file, md)
     fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
                                   length(x), length(y), length(z)) for (name, i) in md)
+    _merge_echo_fields!(fields, file, p, (length(x), length(y), length(z)))
     return (; X=collect(x), Y=collect(y), Z=collect(z),
             latitude=collect(lat), longitude=collect(lon),
             start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)
@@ -2193,6 +2194,7 @@ function read_gridded_ppi(file, p::DaishoParameters)
     x, y, lat, lon, t0, t1, radardata = _read_gridded_ppi(file, md)
     fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
                                   length(x), length(y)) for (name, i) in md)
+    _merge_echo_fields!(fields, file, p, (length(x), length(y)))
     return (; X=collect(x), Y=collect(y),
             latitude=collect(lat), longitude=collect(lon),
             start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)
@@ -2253,6 +2255,7 @@ function read_gridded_rhi(file, p::DaishoParameters)
     R, Z, lat, lon, t0, t1, radardata = _read_gridded_rhi(file, md)
     fields = Dict(name => reshape(Float32.(coalesce.(radardata[i, :], Float32(p.io.fill_value))),
                                   length(R), length(Z)) for (name, i) in md)
+    _merge_echo_fields!(fields, file, p, (length(R), length(Z)))
     return (; R=collect(R), Z=collect(Z),
             latitude=collect(lat), longitude=collect(lon),
             start_time=collect(t0), stop_time=collect(t1), fields, io=p.io)

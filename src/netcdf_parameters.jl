@@ -134,6 +134,12 @@ rain_method_attrib = OrderedDict(
     "units"                     => "none",
 )
 
+temp_for_pid_attrib = OrderedDict(
+    "standard_name"             => "air_temperature",
+    "long_name"                 => "Temperature for hydrometeor ID",
+    "units"                     => "degC",
+)
+
 # Level 1 variables
 dbz_l1_attrib = OrderedDict(
         "standard_name"             => "DBZ_L1",
@@ -210,5 +216,6 @@ variable_attrib_dict["RATE_KDP_ZDR"] = rate_kdp_zdr_attrib
 variable_attrib_dict["PID"] = pid_attrib
 variable_attrib_dict["PID_FOR_QC"] = pid_qc_attrib
 variable_attrib_dict["HID_CSU"] = hid_attrib
+variable_attrib_dict["TEMP_FOR_PID"] = temp_for_pid_attrib
 variable_attrib_dict["UNKNOWN"] = unknown_attrib
 
