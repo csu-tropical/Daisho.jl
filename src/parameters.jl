@@ -210,6 +210,13 @@ end
     CartesianGridParameters
 
 Regular Cartesian grid specification (3D Easting × Northing × Altitude, meters).
+
+`range_minimum`/`range_maximum` are optional per-product overrides of the
+`[gridding]` slant-range gate-inclusion bounds: when set (non-`nothing`) on a
+product's table (e.g. `[grid.volume]`) they take precedence over the `[gridding]`
+global for that product only; `nothing` (default) inherits the global. This lets,
+say, the volume grid cap range at 120 km while composite/PPI stay full-range from
+one config.
 """
 Base.@kwdef struct CartesianGridParameters
     xmin::Float64  = -125000.0
@@ -221,6 +228,8 @@ Base.@kwdef struct CartesianGridParameters
     zmin::Float64  = 0.0
     zincr::Float64 = 500.0
     zdim::Int      = 37
+    range_minimum::Union{Float64,Nothing} = nothing
+    range_maximum::Union{Float64,Nothing} = nothing
 end
 
 """
@@ -238,6 +247,10 @@ Base.@kwdef struct LatLonGridParameters
     zmin::Float64    = 0.0
     zincr::Float64   = 500.0
     zdim::Int        = 37
+    # Optional per-product slant-range overrides of the `[gridding]` global
+    # (`nothing` inherits); see `CartesianGridParameters`.
+    range_minimum::Union{Float64,Nothing} = nothing
+    range_maximum::Union{Float64,Nothing} = nothing
 end
 
 """
@@ -252,6 +265,10 @@ Base.@kwdef struct RhiGridParameters
     zmin::Float64  = 0.0
     zincr::Float64 = 250.0
     zdim::Int      = 41
+    # Optional per-product slant-range overrides of the `[gridding]` global
+    # (`nothing` inherits); see `CartesianGridParameters`.
+    range_minimum::Union{Float64,Nothing} = nothing
+    range_maximum::Union{Float64,Nothing} = nothing
 end
 
 """
@@ -772,7 +789,8 @@ end
 # Build a struct by pulling matching keys out of `d`. Unknown keys are
 # reported (so users notice typos); missing keys are reported (so silent
 # fallback to defaults can't happen).
-function _struct_from_dict(::Type{T}, d::AbstractDict; section::String="") where {T}
+function _struct_from_dict(::Type{T}, d::AbstractDict; section::String="",
+        optional::Set{Symbol}=Set{Symbol}()) where {T}
     fields = fieldnames(T)
     field_set = Set(fields)
     keysyms = Set(Symbol.(keys(d)))
@@ -785,7 +803,8 @@ function _struct_from_dict(::Type{T}, d::AbstractDict; section::String="") where
             "Allowed keys: $(join(fields, ", "))"))
     end
 
-    missing_keys = setdiff(field_set, keysyms)
+    # `optional` fields default (via the struct's @kwdef) when absent.
+    missing_keys = setdiff(field_set, keysyms, optional)
     if !isempty(missing_keys)
         throw(ArgumentError(
             "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
@@ -810,6 +829,8 @@ function _coerce_field(::Type{T}, sym::Symbol, v) where {T}
     if F === Symbol && v isa AbstractString
         return Symbol(v)
     elseif F === Float64 && v isa Real
+        return Float64(v)
+    elseif F === Union{Float64,Nothing} && v isa Real
         return Float64(v)
     elseif F === Int && v isa Integer
         return Int(v)
@@ -1073,17 +1094,20 @@ function _grid_from_dict(d::AbstractDict)
             "`[grid.springsteel.i.bc]` min/max. " *
             "Run `print_config(\"template.toml\")` for the new template."))
     end
-    cartesian   = haskey(d, "cartesian")   ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian") : CartesianGridParameters()
+    # `range_minimum`/`range_maximum` are optional per-product overrides of the
+    # `[gridding]` global; absent ⇒ `nothing` ⇒ inherit (see `_range_bounds`).
+    range_opt = Set([:range_minimum, :range_maximum])
+    cartesian   = haskey(d, "cartesian")   ? _struct_from_dict(CartesianGridParameters, d["cartesian"]; section="grid.cartesian", optional=range_opt) : CartesianGridParameters()
     # The Cartesian-family products fall back to `cartesian` when their own table
     # is absent (resolved by the GridParameters constructor from these `nothing`s),
     # so `[grid.cartesian]` is the shared base geometry and the per-product tables
     # are overrides for radars that need distinct grids.
-    volume      = haskey(d, "volume")      ? _struct_from_dict(CartesianGridParameters, d["volume"];    section="grid.volume")    : nothing
-    composite   = haskey(d, "composite")   ? _struct_from_dict(CartesianGridParameters, d["composite"]; section="grid.composite") : nothing
-    ppi         = haskey(d, "ppi")         ? _struct_from_dict(CartesianGridParameters, d["ppi"];        section="grid.ppi")       : nothing
-    column      = haskey(d, "column")      ? _struct_from_dict(CartesianGridParameters, d["column"];     section="grid.column")    : nothing
-    latlon      = haskey(d, "latlon")      ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon")    : LatLonGridParameters()
-    rhi         = haskey(d, "rhi")         ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi")       : RhiGridParameters()
+    volume      = haskey(d, "volume")      ? _struct_from_dict(CartesianGridParameters, d["volume"];    section="grid.volume",    optional=range_opt) : nothing
+    composite   = haskey(d, "composite")   ? _struct_from_dict(CartesianGridParameters, d["composite"]; section="grid.composite", optional=range_opt) : nothing
+    ppi         = haskey(d, "ppi")         ? _struct_from_dict(CartesianGridParameters, d["ppi"];        section="grid.ppi",       optional=range_opt) : nothing
+    column      = haskey(d, "column")      ? _struct_from_dict(CartesianGridParameters, d["column"];     section="grid.column",    optional=range_opt) : nothing
+    latlon      = haskey(d, "latlon")      ? _struct_from_dict(LatLonGridParameters,    d["latlon"];    section="grid.latlon",    optional=range_opt) : LatLonGridParameters()
+    rhi         = haskey(d, "rhi")         ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi",       optional=range_opt) : RhiGridParameters()
     springsteel = haskey(d, "springsteel") ? _springsteel_from_dict(d["springsteel"])                                            : SpringsteelGridConfig()
     metadata    = haskey(d, "metadata")    ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
     return GridParameters(cartesian=cartesian, volume=volume, composite=composite,

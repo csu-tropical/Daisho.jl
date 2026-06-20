@@ -101,9 +101,11 @@ range_guard_min  = 1.0    # metres; lower clamp on the slant-range divisor
 range_weight_max = 10.0   # upper clamp on the (unitless) range_weight
 # Slant-range gate-inclusion filter (optional). A gate is gridded only when its
 # slant range r is within [range_minimum, range_maximum] metres; out-of-range
-# gates are excluded from every product. Distinct from the weighting guards
-# above. Defaults apply no filtering.
-range_minimum = 0.0        # metres; lower bound on gate slant range
+# gates are excluded. Distinct from the weighting guards above. Defaults apply no
+# filtering. These are the GLOBAL defaults; any product may override them in its
+# own [grid.<product>] table (see below) — e.g. cap the volume at 120 km while the
+# composite/PPI stay full-range, all in one file.
+range_minimum = 0.0        # metres; lower bound on gate slant range (global default)
 # range_maximum = 150000.0 # metres; upper bound — omit for no limit (default Inf)
 
 # Stage-1 dual-Doppler retrieval QC. Quality is judged ONLY by the per-component
@@ -147,6 +149,12 @@ zdim  =        37
 #   [grid.composite]   # grid_radar_composite  (2D x/y, z ignored)
 #   [grid.ppi]         # grid_radar_ppi        (2D x/y, z ignored)
 #   [grid.column]      # grid_radar_column/QVP (z only, x/y ignored)
+# Each may also set `range_minimum`/`range_maximum` to override the [gridding]
+# global slant-range filter for that product only (omit to inherit the global).
+# Example: cap the volume at 120 km (it combines scans of differing max range)
+# while composite/ppi stay full-range —
+#   [grid.volume]
+#   range_maximum = 120000.0
 
 [grid.latlon]
 # lon/lat domain bounds; degincr is the angular grid spacing.

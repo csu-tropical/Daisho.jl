@@ -850,7 +850,7 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     s = sin(beam_cutoff)
     range_guard_min  = gd.range_guard_min
     range_weight_max = gd.range_weight_max
-    range_min = gd.range_minimum; range_max = gd.range_maximum
+    range_min, range_max = _range_bounds(p, g.shape)
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -921,6 +921,35 @@ function _height_field_index(acc, p::DaishoParameters)
     isempty(hname) && return 0
     idx = findfirst(==(hname), acc.fields)
     return idx === nothing ? 0 : idx
+end
+
+# Map a grid shape to its per-product grid-parameter struct and config name.
+function _shape_product(p::DaishoParameters, shape::Symbol)
+    shape === :volume_3d    && return (p.grid.volume,    "volume")
+    shape === :latlon_3d    && return (p.grid.latlon,    "latlon")
+    shape === :rhi_2d       && return (p.grid.rhi,       "rhi")
+    shape === :ppi_2d       && return (p.grid.ppi,       "ppi")
+    shape === :composite_2d && return (p.grid.composite, "composite")
+    shape === :column_1d    && return (p.grid.column,    "column")
+    return (nothing, String(shape))
+end
+
+# Effective slant-range gate-inclusion bounds for a grid `shape`: a per-product
+# `[grid.<product>]` override (non-`nothing`) takes precedence over the
+# `[gridding]` global; `nothing` inherits. Validated max ≥ min ≥ 0.
+function _range_bounds(p::DaishoParameters, shape::Symbol)
+    prod, name = _shape_product(p, shape)
+    rmin = p.gridding.range_minimum
+    rmax = p.gridding.range_maximum
+    if prod !== nothing
+        rmin = something(prod.range_minimum, rmin)
+        rmax = something(prod.range_maximum, rmax)
+    end
+    rmin >= 0.0 || throw(ArgumentError(
+        "[grid.$name]: range_minimum ($rmin) must be ≥ 0."))
+    rmax >= rmin || throw(ArgumentError(
+        "[grid.$name]: range_maximum ($rmax) must be ≥ range_minimum ($rmin)."))
+    return rmin, rmax
 end
 
 """
@@ -1028,7 +1057,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
-    range_min = gd.range_minimum; range_max = gd.range_maximum
+    range_min, range_max = _range_bounds(p, g.shape)
 
     # Use rhi_azimuth if explicitly supplied, else fall back to sweep.azimuth[1].
     az_rhi = if g.rhi_azimuth !== nothing
@@ -1174,7 +1203,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
-    range_min = gd.range_minimum; range_max = gd.range_maximum
+    range_min, range_max = _range_bounds(p, g.shape)
 
     Threads.@threads for ii in CartesianIndices((ny, nx))
         j_y, i_x = ii.I
@@ -1300,7 +1329,7 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
     # gate inclusion is still edge-referenced via the beam footprint.
     beam_cutoff = _beam_cutoff(gd.power_threshold, beam_coef)
     s = sin(beam_cutoff)
-    range_min = gd.range_minimum; range_max = gd.range_maximum
+    range_min, range_max = _range_bounds(p, g.shape)
 
     # Find the valid_key column index for the max selection. If the valid_key
     # field isn't in the accumulator, composite produces no contribution.
@@ -1426,7 +1455,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     beam_cutoff = _beam_cutoff(power_threshold, beam_coef)
     s = sin(beam_cutoff)
     range_guard_min = gd.range_guard_min; range_weight_max = gd.range_weight_max
-    range_min = gd.range_minimum; range_max = gd.range_maximum
+    range_min, range_max = _range_bounds(p, g.shape)
 
     Threads.@threads for k_z in 1:nz
         grid_z = g.z_axis[k_z]
