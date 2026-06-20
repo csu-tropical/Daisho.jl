@@ -20,9 +20,10 @@ const FIELD_TAG_VOCAB = (
     :linear_interp, :weighted_interp, :nearest_interp,  # interpolation
     :define_detection, :define_scanned,                 # role tags (consumed)
     :velocity,                                          # reserved
+    :beam_height,                                       # value sourced from gate geometry
 )
 const FIELD_INTERP_TAGS   = (:linear_interp, :weighted_interp, :nearest_interp)
-const FIELD_SINGULAR_TAGS = (:define_detection, :define_scanned, :velocity)
+const FIELD_SINGULAR_TAGS = (:define_detection, :define_scanned, :velocity, :beam_height)
 
 # ── Section structs ──────────────────────────────────────────────────────────
 
@@ -67,9 +68,11 @@ has_tag(fs::FieldSpec, t::Symbol) = t in fs.tags
 
 Interpolation mode derived from a field's tags: `:linear` (`linear_interp`),
 `:nearest` (`nearest_interp`), or `:weighted` (the default when no
-interpolation tag is present).
+interpolation tag is present). A `:beam_height` field is always `:weighted` (a
+height must never be dB-averaged), regardless of any interpolation tag.
 """
 function interp_of(fs::FieldSpec)
+    :beam_height    in fs.tags && return :weighted
     :linear_interp  in fs.tags && return :linear
     :nearest_interp in fs.tags && return :nearest
     return :weighted
@@ -116,6 +119,21 @@ function field_with_tag(p, tag::Symbol; for_op::String="")
     end
     throw(ArgumentError("[fields]: tag `$tag` is on multiple fields " *
         "$m; it must be on exactly one."))
+end
+
+"""
+    field_with_tag_or(p, tag::Symbol, default="") -> String
+
+Like [`field_with_tag`](@ref) but for an *optional* singular tag: returns the
+single field carrying `tag`, or `default` when no field carries it (still errors
+if more than one does). Used for `:beam_height`, which is optional.
+"""
+function field_with_tag_or(p, tag::Symbol, default::AbstractString="")
+    m = [fs.name for fs in p.moments.fields if tag in fs.tags]
+    isempty(m) && return default
+    length(m) == 1 && return m[1]
+    throw(ArgumentError("[fields]: tag `$tag` is on multiple fields " *
+        "$m; it must be on at most one."))
 end
 
 """
@@ -533,6 +551,11 @@ radar variables (the beam-power-weighted averages), loaded from the optional
   `temp_source = :field` (default `"TEMP_FOR_PID"`).
 - `temp_field_units::String`: units of `temp_field`, `"C"` (default) or `"K"`
   (converted to °C internally; the FHC works in °C).
+- `height_field::String`: name of a gridded beam-height field (e.g. a field
+  tagged `beam_height`). When set and present, the `:profile` temperature source
+  samples the T(z) profile at this per-cell height — enabling temperature on 2-D
+  PPI/RHI grids that have no Z axis. Empty (default) falls back to the grid's
+  z-axis heights.
 - `temp_factor::Float64`: broadens the temperature membership functions when > 1.
 - `correct_ice_method::Bool`: label rain method code `2` only on hail cells
   (default `true`); `false` replicates the Python ice-method bug exactly.
@@ -561,6 +584,7 @@ Base.@kwdef struct EchoProductsParameters
     temp_source::Symbol           = :profile
     temp_field::String            = "TEMP_FOR_PID"
     temp_field_units::String      = "C"
+    height_field::String          = ""
     temp_factor::Float64          = 1.0
     correct_ice_method::Bool      = true
     fhc_output::String            = "HID_CSU"
@@ -967,7 +991,7 @@ function _echo_from_dict(d::AbstractDict)
     scalar_fields = (:enabled, :band, :compute_fhc, :compute_blended_rain,
         :rain_components, :dbz_field, :zdr_field, :kdp_field, :rhohv_field,
         :ldr_field, :fhc_method, :use_temp, :temp_source, :temp_field,
-        :temp_field_units, :temp_factor, :correct_ice_method,
+        :temp_field_units, :height_field, :temp_factor, :correct_ice_method,
         :fhc_output, :rain_output, :rain_method_output)
     subtables = (:weights, :temperature)
     allowed = Set((scalar_fields..., subtables...))

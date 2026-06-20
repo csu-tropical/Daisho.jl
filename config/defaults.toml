@@ -68,6 +68,11 @@ DBZ   = ["linear_interp",   "define_detection"]
 VEL   = ["weighted_interp",  "velocity"]
 WIDTH = ["weighted_interp"]
 SQI   = ["weighted_interp",  "define_scanned"]
+# A `beam_height` field takes its value from each gate's geometry (elevation +
+# range), gridded as a beam-power-weighted mean — a per-cell height even on 2-D
+# PPI/RHI grids (no Z axis). Useful on its own and as the [echo] height_field so
+# the profile temperature source works on PPIs. Uncomment to enable:
+# HEIGHT = ["beam_height"]
 
 # Output flags, named to match the CfRadial 2.1 / ODIM data model and
 # FieldMetadata exactly.
@@ -282,6 +287,10 @@ use_temp             = true         # include temperature in the FHC
 temp_source          = "profile"
 temp_field           = "TEMP_FOR_PID"  # gridded temperature field (temp_source = "field")
 temp_field_units     = "C"          # units of temp_field: "C" or "K" (K converted to C)
+# For temp_source = "profile" on a 2-D PPI/RHI grid (no Z axis), set height_field
+# to a gridded beam_height field (e.g. "HEIGHT") so the profile can be sampled per
+# cell; empty uses the grid z-axis (3-D only).
+height_field         = ""
 temp_factor          = 1.0          # > 1 broadens the temperature membership functions
 correct_ice_method   = true         # hail-only rain method label (fixes a Python bug)
 # Output variable names:

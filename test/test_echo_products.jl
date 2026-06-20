@@ -309,4 +309,114 @@ end
             end
         end
     end
+
+    @testset "beam-height field enables profile temperature on PPI" begin
+        io = IOParameters()
+        # Config with a beam_height HEIGHT field; small grid within gate range.
+        fields = [
+            Daisho.FieldSpec("DBZ",   Set([:linear_interp, :define_detection])),
+            Daisho.FieldSpec("ZDR",   Set([:linear_interp])),
+            Daisho.FieldSpec("KDP",   Set([:weighted_interp])),
+            Daisho.FieldSpec("RHOHV", Set([:weighted_interp])),
+            Daisho.FieldSpec("SQI",   Set([:weighted_interp, :define_scanned])),
+            Daisho.FieldSpec("HEIGHT", Set([:beam_height])),
+        ]
+        moments = Daisho.MomentParameters(fields)
+        sc = Daisho.CartesianGridParameters(
+            xmin = -2000.0, xincr = 250.0, xdim = 17,
+            ymin = -2000.0, yincr = 250.0, ydim = 17,
+            zmin = 500.0, zincr = 500.0, zdim = 1)
+        prof = TemperatureProfile([0.0, 3000.0, 8000.0], [20.0, 0.0, -30.0])
+        dp = Daisho.EchoProductsParameters(enabled = true, band = "S",
+            use_temp = true, temp_source = :profile, height_field = "HEIGHT",
+            temperature = prof)
+        p = Daisho.DaishoParameters(moments, Daisho.QCParameters(),
+            Daisho.GriddingParameters(), Daisho.GridParameters(cartesian = sc),
+            io, Daisho.SynthesisParameters(), dp, Set([:grid, :gridding, :echo]))
+
+        v = synthetic_volume(n_sweeps = 1, n_rays = 180, n_gates = 24,
+                             fields = ["DBZ", "ZDR", "KDP", "RHOHV", "SQI"])
+        v.sweeps[1].elevation .= 10.0   # visible height gradient with range
+
+        f = tempname() * "_height_ppi.nc"
+        try
+            Daisho.grid_radar_ppi(v, f, v.time_coverage_start, p)
+            g = Daisho.read_gridded_ppi(f, p)
+
+            @testset "HEIGHT field is gridded and physical" begin
+                @test haskey(g.fields, "HEIGHT")
+                H = Daisho.mask_sentinels(g.fields["HEIGHT"], io)
+                dbz = g.fields["DBZ"]
+                # Valid exactly where DBZ is a real measurement.
+                @test all(isfinite(H[i]) for i in eachindex(dbz)
+                          if !Daisho._dp_invalid(dbz[i], io))
+                # Increases with horizontal range and tracks beam_height.
+                X = g.X; Y = g.Y
+                pts = sort([(sqrt(X[i]^2 + Y[j]^2), H[i, j])
+                            for i in eachindex(X), j in eachindex(Y) if isfinite(H[i, j])])
+                @test pts[1][2] < pts[end][2]
+                rmax, hmax = pts[end]
+                @test isapprox(hmax, Daisho.beam_height(rmax, 10.0, 50.0); rtol = 0.1)
+            end
+
+            @testset "profile-via-height equals field source with same T" begin
+                # T field = profile sampled at the gridded HEIGHT (sentinels kept).
+                H = g.fields["HEIGHT"]
+                tfield = similar(H, Float32)
+                for i in eachindex(H)
+                    tfield[i] = Daisho._dp_invalid(H[i], io) ? Float32(io.fill_value) :
+                                Float32(temperature_celsius(prof, H[i]))
+                end
+                base = Dict{String,Any}(k => g.fields[k]
+                    for k in ("DBZ", "ZDR", "KDP", "RHOHV", "HEIGHT"))
+                dp_field = Daisho.EchoProductsParameters(enabled = true, band = "S",
+                    use_temp = true, temp_source = :field, temp_field = "T_FROM_H")
+                out_prof = apply_echo_products(base, dp; io = io)
+                out_field = apply_echo_products(merge(base, Dict("T_FROM_H" => tfield)),
+                                                dp_field; io = io)
+                @test out_prof["HID_CSU"] == out_field["HID_CSU"]
+            end
+
+            @testset "temperature actually changes the PPI classification" begin
+                # Controlled, realistic inputs spanning warm-to-cold heights so the
+                # temperature term clearly matters (synthetic_volume DBZ is not
+                # physical). HEIGHT 200 m → 8000 m maps to ~+19 °C → −30 °C.
+                n = 6
+                base = Dict{String,Any}(
+                    "DBZ"    => fill(30.0f0, n),
+                    "ZDR"    => fill(0.3f0, n),
+                    "KDP"    => fill(0.2f0, n),
+                    "RHOHV"  => fill(0.98f0, n),
+                    "HEIGHT" => Float32.(collect(range(200.0, 8000.0; length = n))))
+                dp_noT = Daisho.EchoProductsParameters(enabled = true, band = "S",
+                    use_temp = true, temp_source = :profile, height_field = "",
+                    temperature = prof)  # no height field, 2-D ⇒ temperature inactive
+                out_T = apply_echo_products(base, dp; io = io)
+                out_noT = apply_echo_products(base, dp_noT; io = io, heights = nothing)
+                @test out_T["HID_CSU"] != out_noT["HID_CSU"]
+            end
+
+            @testset "standalone add_echo_products! reproduces inline (height field)" begin
+                # Grid again without echo, then append via the standalone path.
+                p_off = Daisho.DaishoParameters(moments, Daisho.QCParameters(),
+                    Daisho.GriddingParameters(), Daisho.GridParameters(cartesian = sc),
+                    io, Daisho.SynthesisParameters(),
+                    Daisho.EchoProductsParameters(enabled = false), Set([:grid, :gridding, :echo]))
+                f2 = tempname() * "_height_standalone.nc"
+                try
+                    Daisho.grid_radar_ppi(v, f2, v.time_coverage_start, p_off)
+                    add_echo_products!(f2, p)
+                    NCDataset(f) do a
+                        NCDataset(f2) do b
+                            @test isequal(Array(a["HID_CSU"].var), Array(b["HID_CSU"].var))
+                        end
+                    end
+                finally
+                    isfile(f2) && rm(f2)
+                end
+            end
+        finally
+            isfile(f) && rm(f)
+        end
+    end
 end

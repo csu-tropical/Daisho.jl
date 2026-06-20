@@ -106,7 +106,9 @@ Produce the per-cell temperature array (°C, shaped like the reflectivity grid) 
 the FHC, or `nothing` when temperature is not used. Dispatches on `dp.temp_source`:
 
   * `:profile`  — sample the `dp.temperature` T(z) profile at each cell's height
-    (needs `heights`); the legacy behavior.
+    (needs `heights`). `heights` may be the grid z-axis (3-D) or a gridded beam-
+    height field (`dp.height_field`, enabling 2-D PPI/RHI); sentinel/non-finite
+    heights yield `NaN` so the FHC skips the temperature term there.
   * `:field`    — use the gridded `dp.temp_field` directly (it is already per-cell
     and may be 3-D), converting K→°C when `dp.temp_field_units == "K"`. Sentinel /
     non-finite cells become `NaN` so `csu_fhc_summer` skips the temperature term
@@ -119,7 +121,10 @@ function _echo_temperature_field(dp::EchoProductsParameters, fields::AbstractDic
 
     if dp.temp_source === :profile
         (dp.temperature === nothing || heights === nothing) && return nothing
-        return map(h -> temperature_celsius(dp.temperature, h), heights)
+        # heights may be a gridded beam-height field carrying sentinels; sample the
+        # profile only at valid heights and emit NaN elsewhere.
+        return map(h -> _dp_invalid(h, io) ? NaN : temperature_celsius(dp.temperature, h),
+                   heights)
 
     elseif dp.temp_source === :field
         haskey(fields, dp.temp_field) || throw(ArgumentError(
@@ -173,8 +178,14 @@ function apply_echo_products(fields::AbstractDict, dp::EchoProductsParameters;
     fv = io.fill_value
     ud = io.undetect
 
+    # Prefer a gridded beam-height field for the profile source when configured and
+    # present (enables temperature on 2-D grids); otherwise use the grid z-axis
+    # heights passed in.
+    heights_use = (!isempty(dp.height_field) && haskey(fields, dp.height_field)) ?
+        fields[dp.height_field] : heights
+
     # Resolve the per-cell temperature array from the configured source.
-    T_arr = _echo_temperature_field(dp, fields, heights, io)
+    T_arr = _echo_temperature_field(dp, fields, heights_use, io)
     use_temp = T_arr !== nothing
 
     out = Dict{String,Array{Float32}}()
@@ -319,6 +330,9 @@ function add_echo_products!(file::AbstractString, p::DaishoParameters)
                 "add_echo_products!: temp_source=:field but temperature variable " *
                 "\"$(dp.temp_field)\" not present in $file."))
         end
+        # Gridded beam-height field for the profile source on 2-D grids. Lenient:
+        # if absent, fall back to the z-axis heights (or no temperature on 2-D).
+        height_all = isempty(dp.height_field) ? nothing : readvar(dp.height_field)
 
         # Per-time-slice indexer into a (spatial..., time) array.
         slice(::Nothing, t) = nothing
@@ -343,6 +357,7 @@ function add_echo_products!(file::AbstractString, p::DaishoParameters)
             rho_all !== nothing && (fields[dp.rhohv_field] = slice(rho_all, t))
             ldr_all !== nothing && (fields[dp.ldr_field] = slice(ldr_all, t))
             temp_all !== nothing && (fields[dp.temp_field] = slice(temp_all, t))
+            height_all !== nothing && (fields[dp.height_field] = slice(height_all, t))
 
             prods = apply_echo_products(fields, dp; io = io, heights = heights)
             for (name, arr) in prods

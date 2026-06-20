@@ -911,6 +911,18 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     return acc
 end
 
+# Column index (in `acc.fields`) of the optional `:beam_height` field, or 0 when
+# none is configured. That field's per-gate value is the beam height from gate
+# geometry (`beams[:,4]` / `GateContribution.beam_z`) rather than a sweep moment,
+# so 2-D grids (no Z axis) can still carry a per-cell height. interp_of forces it
+# to :weighted, so accumulation and finalize treat it as an arithmetic mean.
+function _height_field_index(acc, p::DaishoParameters)
+    hname = field_with_tag_or(p, :beam_height)
+    isempty(hname) && return 0
+    idx = findfirst(==(hname), acc.fields)
+    return idx === nothing ? 0 : idx
+end
+
 """
     accumulate_cell!(acc::ScalarGridAccumulator, cell, sweep, scanned_gates,
                      contribs, keys, p) -> acc
@@ -928,6 +940,7 @@ function accumulate_cell!(acc::ScalarGridAccumulator, cell::CartesianCell,
                           p::DaishoParameters)
     k, j, i = cell.k, cell.j, cell.i
     n_fields = length(acc.fields)
+    height_idx = _height_field_index(acc, p)
 
     # coverage=1: any in-range (vertically-filtered) gate that was scanned.
     any_scanned = false
@@ -952,8 +965,12 @@ function accumulate_cell!(acc::ScalarGridAccumulator, cell::CartesianCell,
         total_weight = c.w
         @inbounds for m in 1:n_fields
             fname = acc.fields[m]
-            v = _gate_value(sweep, fname, c.ray, c.gate)
-            ismissing(v) && continue
+            if m == height_idx
+                v = c.beam_z                 # beam height (m), from gate geometry
+            else
+                v = _gate_value(sweep, fname, c.ray, c.gate)
+                ismissing(v) && continue
+            end
             mode = acc.grid_type[fname]
             acc.coverage[m, k, j, i] = Int8(2)
             if mode === :linear
@@ -997,6 +1014,7 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     nz = length(g.z_axis)
     nr = length(g.x_axis)   # range bins stored in x_axis for the RHI shape
     n_fields = length(accum.fields)
+    height_idx = _height_field_index(accum, p)
 
     rincr = nr >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
@@ -1093,8 +1111,12 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
                 @inbounds for m in 1:n_fields
                     fname = accum.fields[m]
-                    v = _gate_value(sweep, fname, ray, gate_in)
-                    ismissing(v) && continue
+                    if m == height_idx
+                        v = beams[g_flat, 4]      # beam height from gate geometry
+                    else
+                        v = _gate_value(sweep, fname, ray, gate_in)
+                        ismissing(v) && continue
+                    end
                     mode = accum.grid_type[fname]
                     accum.coverage[m, k_z, i_r] = Int8(2)
                     if mode === :linear
@@ -1140,6 +1162,7 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     nx = length(g.x_axis)
     ny = length(g.y_axis)
     n_fields = length(accum.fields)
+    height_idx = _height_field_index(accum, p)
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
@@ -1215,8 +1238,12 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
 
             @inbounds for m in 1:n_fields
                 fname = accum.fields[m]
-                v = _gate_value(sweep, fname, ray, gate_in)
-                ismissing(v) && continue
+                if m == height_idx
+                    v = beams[g_flat, 4]          # beam height from gate geometry
+                else
+                    v = _gate_value(sweep, fname, ray, gate_in)
+                    ismissing(v) && continue
+                end
                 mode = accum.grid_type[fname]
                 accum.coverage[m, j_y, i_x] = Int8(2)
                 if mode === :linear
@@ -1261,6 +1288,7 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
     nx = length(g.x_axis)
     ny = length(g.y_axis)
     n_fields = length(accum.fields)
+    height_idx = _height_field_index(accum, p)
 
     xincr = nx >= 2 ? (g.x_axis[2] - g.x_axis[1]) : 0.0
     horizontal_roi  = xincr * gd.horizontal_roi_factor
@@ -1336,8 +1364,12 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
         # returns weighted_sum unchanged.
         @inbounds for m in 1:n_fields
             fname = accum.fields[m]
-            v = _gate_value(sweep, fname, ray, gate_in)
-            ismissing(v) && continue
+            if m == height_idx
+                v = beams[best_flat, 4]       # beam height of the column-max gate
+            else
+                v = _gate_value(sweep, fname, ray, gate_in)
+                ismissing(v) && continue
+            end
             # Overwrite only when this sweep's best > prior; merge_accumulators!
             # for :nearest already picks the higher weight_total, so use the
             # composite value itself as the "weight" so cross-sweep merges
@@ -1381,6 +1413,7 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
 
     nz = length(g.z_axis)
     n_fields = length(accum.fields)
+    height_idx = _height_field_index(accum, p)
     n_gate_total = size(beams, 1)
 
     zincr = nz >= 2 ? (g.z_axis[2] - g.z_axis[1]) : 0.0
@@ -1452,8 +1485,12 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
 
             @inbounds for m in 1:n_fields
                 fname = accum.fields[m]
-                v = _gate_value(sweep, fname, ray, gate_in)
-                ismissing(v) && continue
+                if m == height_idx
+                    v = beams[g_flat, 4]          # beam height from gate geometry
+                else
+                    v = _gate_value(sweep, fname, ray, gate_in)
+                    ismissing(v) && continue
+                end
                 mode = accum.grid_type[fname]
                 accum.coverage[m, k_z] = Int8(2)
                 if mode === :linear
