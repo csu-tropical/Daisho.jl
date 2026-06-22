@@ -1498,7 +1498,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
     xdim = size(radar_grid,4)
     ydim = size(radar_grid,3)
     zdim = size(radar_grid,2)
-    ds.dim["time"] = 1
+    ds.dim["time"] = Inf   # unlimited (record) dimension, so files can be concatenated
     ds.dim["X"] = xdim
     ds.dim["Y"] = ydim
     ds.dim["Z"] = zdim
@@ -1573,16 +1573,17 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
     ))
 
     # Using start time for now, but eventually need to use some reference time
-    nctime[:] = datetime2unix.(index_time)
-    ncstarttime[:] = datetime2unix.(start_time)
-    ncstoptime[:] = datetime2unix.(stop_time)
+    # time-dimensioned variables use explicit index 1 to grow the unlimited dim
+    nctime[1] = datetime2unix(index_time)
+    ncstarttime[1] = datetime2unix(start_time)
+    ncstoptime[1] = datetime2unix(stop_time)
     ncz[:] = gridpoints[:,1,1,1]
     ncy[:] = gridpoints[1,:,1,2]
     ncx[:] = gridpoints[1,1,:,3]
-    nclat[:] = latlon_grid[:,:,1]'
-    nclon[:] = latlon_grid[:,:,2]'
+    nclat[:,:,1] = latlon_grid[:,:,1]'
+    nclon[:,:,1] = latlon_grid[:,:,2]'
     ncgrid_mapping[:] = -32768.0
-    ncheading[:] = mean_heading
+    ncheading[1] = mean_heading
 
     # Define variables
     perm = (1, 4, 3, 2)
@@ -1598,7 +1599,7 @@ function write_gridded_radar_volume(file, index_time, start_time, stop_time, gri
         end
         var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("X", "Y", "Z", "time"), attrib = var_attrib)
-        ncvar[:] = ncgrid[moment_dict[key],:,:,:]
+        ncvar[:,:,:,1] = ncgrid[moment_dict[key],:,:,:]
     end
 
     close(ds)
@@ -1641,7 +1642,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     #numswps = length(swpstart)
     rdim = size(radar_grid,3)
     zdim = size(radar_grid,2)
-    ds.dim["time"] = 1
+    ds.dim["time"] = Inf   # unlimited (record) dimension, so files can be concatenated
     ds.dim["R"] = rdim
     ds.dim["Z"] = zdim
 
@@ -1709,14 +1710,15 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
     ))
 
     # Using start time for now, but eventually need to use some reference time
-    nctime[:] = datetime2unix.(index_time)
-    ncstarttime[:] = datetime2unix.(start_time)
-    ncstoptime[:] = datetime2unix.(stop_time)
-    ncazimuth[:] = azimuth
+    # time-dimensioned variables use explicit index 1 to grow the unlimited dim
+    nctime[1] = datetime2unix(index_time)
+    ncstarttime[1] = datetime2unix(start_time)
+    ncstoptime[1] = datetime2unix(stop_time)
+    ncazimuth[1] = azimuth
     ncz[:] = gridpoints[:,1,1]
     ncr[:] = gridpoints[1,:,2]
-    nclat[:] = latlon_grid[:,1]'
-    nclon[:] = latlon_grid[:,2]'
+    nclat[:,1] = latlon_grid[:,1]
+    nclon[:,1] = latlon_grid[:,2]
     ncgrid_mapping[:] = -32768.0
 
     # Define variables
@@ -1734,7 +1736,7 @@ function write_gridded_radar_rhi(file, index_time, radar_volume, gridpoints, rad
         end
         var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("R", "Z", "time"), attrib = var_attrib)
-        ncvar[:] = ncgrid[moment_dict[key],:,:]
+        ncvar[:,:,1] = ncgrid[moment_dict[key],:,:]
     end
 
     close(ds)
@@ -1779,7 +1781,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     #numswps = length(swpstart)
     xdim = size(radar_grid,3)
     ydim = size(radar_grid,2)
-    ds.dim["time"] = 1
+    ds.dim["time"] = Inf   # unlimited (record) dimension, so files can be concatenated
     ds.dim["X"] = xdim
     ds.dim["Y"] = ydim
 
@@ -1846,15 +1848,16 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     ))
 
     # Using start time for now, but eventually need to use some reference time
-    nctime[:] = datetime2unix.(index_time)
-    ncstarttime[:] = datetime2unix.(start_time)
-    ncstoptime[:] = datetime2unix.(stop_time)
+    # time-dimensioned variables use explicit index 1 to grow the unlimited dim
+    nctime[1] = datetime2unix(index_time)
+    ncstarttime[1] = datetime2unix(start_time)
+    ncstoptime[1] = datetime2unix(stop_time)
     ncy[:] = gridpoints[:,1,1]
     ncx[:] = gridpoints[1,:,2]
-    nclat[:] = latlon_grid[:,:,1]'
-    nclon[:] = latlon_grid[:,:,2]'
+    nclat[:,:,1] = latlon_grid[:,:,1]'
+    nclon[:,:,1] = latlon_grid[:,:,2]'
     ncgrid_mapping[:] = -32768.0
-    ncheading[:] = mean_heading
+    ncheading[1] = mean_heading
 
     # Define variables
     perm = (1, 3, 2)
@@ -1871,7 +1874,7 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         end
         var_attrib = _with_io_sentinels(var_attrib, fill_value, undetect)
         ncvar = defVar(ds, key, Float32, ("X", "Y", "time"), attrib = var_attrib)
-        ncvar[:] = ncgrid[moment_dict[key],:,:]
+        ncvar[:,:,1] = ncgrid[moment_dict[key],:,:]
     end
 
     close(ds)
@@ -1910,7 +1913,7 @@ function write_gridded_radar_column(file, index_time, start_time, stop_time, gri
     # Could concatenate multiple volumes here
     #numswps = length(swpstart)
     zdim = size(radar_grid,2)
-    ds.dim["time"] = 1 # To make this unlimited use 'Inf' here, but then all the time related variables are missing for some reason
+    ds.dim["time"] = Inf   # unlimited (record) dimension, so files can be concatenated
     ds.dim["Z"] = zdim
 
     # Declare variables
@@ -1966,12 +1969,13 @@ function write_gridded_radar_column(file, index_time, start_time, stop_time, gri
     ))
 
     # Using start time for now, but eventually need to use some reference time
-    nctime[:] = datetime2unix.(index_time)
-    ncstarttime[:] = datetime2unix.(start_time)
-    ncstoptime[:] = datetime2unix.(stop_time)
+    # time-dimensioned variables use explicit index 1 to grow the unlimited dim
+    nctime[1] = datetime2unix(index_time)
+    ncstarttime[1] = datetime2unix(start_time)
+    ncstoptime[1] = datetime2unix(stop_time)
     ncz[:] = gridpoints[:]
-    nclat[:] = latlon_grid[1]'
-    nclon[:] = latlon_grid[2]'
+    nclat[1] = latlon_grid[1]
+    nclon[1] = latlon_grid[2]
     ncgrid_mapping[:] = -32768.0
 
     # Loop through the moments

@@ -73,6 +73,51 @@
         end
     end
 
+    @testset "time is written as an unlimited (record) dimension" begin
+        # All gridded writers must emit `time` as a record dimension so files can
+        # be concatenated (e.g. with `ncrcat`) without `ncks --mk_rec_dmn time`.
+        for (suffix, writer) in (
+                ("_vol.nc", Daisho.grid_radar_volume),
+                ("_ppi.nc", Daisho.grid_radar_ppi),
+                ("_rhi.nc", Daisho.grid_radar_rhi))
+            outfile = tempname() * suffix
+            try
+                writer(v, outfile, v.time_coverage_start, p)
+                NCDataset(outfile, "r") do ds
+                    @test "time" in NCDatasets.unlimited(ds.dim)
+                    @test ds.dim["time"] == 1
+                    # NCDatasets CF-decodes the time variable back to DateTime.
+                    @test ds["time"][:] == [v.time_coverage_start]
+                end
+            finally
+                isfile(outfile) && rm(outfile)
+            end
+        end
+    end
+
+    @testset "record dimension concatenates a second time slice" begin
+        outfile = tempname() * "_concat.nc"
+        try
+            Daisho.grid_radar_volume(v, outfile, v.time_coverage_start, p)
+            t1 = v.time_coverage_start
+            t2 = t1 + Second(600)
+            # Append a second analysis time by growing the unlimited dim.
+            NCDataset(outfile, "a") do ds
+                ds["time"][2] = t2
+                ds["DBZ"][:, :, :, 2] = ds["DBZ"][:, :, :, 1]
+            end
+            NCDataset(outfile, "r") do ds
+                @test ds.dim["time"] == 2
+                @test ds["time"][:] == [t1, t2]
+                @test size(ds["DBZ"]) == (length(ds["X"]), length(ds["Y"]), length(ds["Z"]), 2)
+                # isequal: CF-decoded fill cells are `missing`, which `==` won't compare.
+                @test isequal(ds["DBZ"][:, :, :, 2], ds["DBZ"][:, :, :, 1])
+            end
+        finally
+            isfile(outfile) && rm(outfile)
+        end
+    end
+
     @testset "mask_sentinels maps both sentinels to NaN, keeps the rest" begin
         io = Daisho.IOParameters()
         a = Float32[io.fill_value, io.undetect, 5.0f0, -3.0f0]

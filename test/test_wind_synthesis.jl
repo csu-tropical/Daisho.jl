@@ -834,6 +834,7 @@ end
                 @test ds.dim["Y"] == ny
                 @test ds.dim["Z"] == nz
                 @test ds.dim["time"] == 1
+                @test "time" in NCDatasets.unlimited(ds.dim)   # record dim for concatenation
                 for vn in ("U", "V", "USTD", "VSTD", "DET", "NGATES", "QFLAG",
                            "X", "Y", "Z", "time", "latitude", "longitude", "grid_mapping")
                     @test haskey(ds, vn)
@@ -884,6 +885,7 @@ end
             ds = NCDataset(file, "r")
             try
                 @test ds.dim["X"] == nx && ds.dim["Y"] == ny && ds.dim["Z"] == nz
+                @test "time" in NCDatasets.unlimited(ds.dim)   # record dim for concatenation
                 # Shared coords + wind vars + every configured scalar field.
                 for vn in ("U", "V", "USTD", "VSTD", "DET", "NGATES", "QFLAG",
                            "X", "Y", "Z", "time", "latitude", "longitude", "grid_mapping")

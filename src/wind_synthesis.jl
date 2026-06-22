@@ -584,22 +584,23 @@ function write_wind_synthesis(file::AbstractString, out::SynthesisOutput,
     rm(file, force = true)
     ds = NCDataset(file, "c", attrib = _global_attrib_dict(p.grid.metadata))
     try
-        ds.dim["time"] = 1
+        ds.dim["time"] = Inf   # unlimited (record) dimension, so files can be concatenated
         ds.dim["X"] = nx
         ds.dim["Y"] = ny
         ds.dim["Z"] = nz
 
+        # time-dimensioned variables use explicit index 1 to grow the unlimited dim
         defVar(ds, "time", Float64, ("time",); attrib = OrderedDict(
             "standard_name" => "time", "long_name" => "Data time",
-            "units" => "seconds since 1970-01-01T00:00:00Z", "axis" => "T"))[:] =
+            "units" => "seconds since 1970-01-01T00:00:00Z", "axis" => "T"))[1] =
             datetime2unix(index_time)
         defVar(ds, "start_time", Float64, ("time",); attrib = OrderedDict(
             "standard_name" => "start_time", "long_name" => "Data start time",
-            "units" => "seconds since 1970-01-01T00:00:00Z"))[:] =
+            "units" => "seconds since 1970-01-01T00:00:00Z"))[1] =
             datetime2unix(start_time)
         defVar(ds, "stop_time", Float64, ("time",); attrib = OrderedDict(
             "standard_name" => "stop_time", "long_name" => "Data stop time",
-            "units" => "seconds since 1970-01-01T00:00:00Z"))[:] =
+            "units" => "seconds since 1970-01-01T00:00:00Z"))[1] =
             datetime2unix(stop_time)
 
         defVar(ds, "X", Float32, ("X",); attrib = OrderedDict(
