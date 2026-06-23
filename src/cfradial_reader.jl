@@ -153,11 +153,19 @@ end
 function _readstring_per_sweep(ds, name, n_sweeps::Int)
     haskey(ds, name) || return nothing
     v = ds[name]
-    raw = v[:]
-    if raw isa AbstractMatrix
+    # NOTE: index with the variable's actual rank. `v[:]` linearizes a 2-D
+    # char variable (string_length, sweep) into a flat Vector{Char}, which
+    # matches neither branch below and would silently drop the values.
+    if ndims(v) == 2
+        raw = v[:, :]                      # (string_length, n_sweeps) Matrix{Char}
         return [_to_string(raw[:, i]) for i in 1:size(raw, 2)]
-    elseif raw isa AbstractVector{<:AbstractString}
+    end
+    raw = v[:]
+    if raw isa AbstractVector{<:AbstractString}
         return [_to_string(raw[i]) for i in 1:length(raw)]
+    elseif raw isa AbstractVector{<:AbstractChar}
+        # Single sweep stored as a 1-D char string.
+        return [_to_string(raw)]
     end
     return nothing
 end
