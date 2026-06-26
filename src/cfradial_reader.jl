@@ -595,7 +595,7 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
 
     range_raw = _readvar(grp, "range")
     range_raw === nothing && throw(ArgumentError("v2 sweep group missing `range` variable"))
-    range_vec = collect(Float64, range_raw)
+    range_vec = _to_f64vec(range_raw)
 
     range_meters_to_first_gate = nothing
     range_meters_between_gates = nothing
@@ -672,7 +672,7 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
 
     # Frequency may be on this group or absent.
     freq_raw = _readvar(grp, "frequency")
-    frequency = freq_raw === nothing ? Float64[] : collect(Float64, freq_raw)
+    frequency = freq_raw === nothing ? Float64[] : _to_f64vec(freq_raw)
 
     # Optional georefs_applied as ray-level var (LROSE quirk #8).
     georefs_applied_ray = _to_bool_vec(_readvar(grp, "georefs_applied"))
@@ -983,7 +983,7 @@ function _read_cfradial1(ds, file)
 
     # Range axis
     range_var = ds["range"]
-    range_vec = collect(Float64, range_var[:])
+    range_vec = _to_f64vec(range_var[:])
     range_meters_to_first_gate = nothing
     range_meters_between_gates = nothing
     range_spacing_is_constant = true
@@ -1002,7 +1002,7 @@ function _read_cfradial1(ds, file)
 
     # Frequency (instrument-level scalar/vector)
     freq_raw = _readvar(ds, "frequency")
-    frequency = freq_raw === nothing ? Float64[] : collect(Float64, freq_raw)
+    frequency = freq_raw === nothing ? Float64[] : _to_f64vec(freq_raw)
 
     # Identify field variables: 2-D vars over (time, range) or (range, time).
     n_total_rays = length(time_vec)
@@ -1055,9 +1055,9 @@ function _read_cfradial1(ds, file)
         georef_i = nothing
         if length(lat_arr) == n_total_rays
             kw = Dict{Symbol,Any}()
-            kw[:latitude] = collect(Float64, lat_arr[idx])
-            kw[:longitude] = collect(Float64, lon_arr[idx])
-            kw[:altitude] = collect(Float64, alt_arr[idx])
+            kw[:latitude] = _to_f64vec(lat_arr[idx])
+            kw[:longitude] = _to_f64vec(lon_arr[idx])
+            kw[:altitude] = _to_f64vec(alt_arr[idx])
             for fld in (:heading, :roll, :pitch, :drift, :rotation, :tilt,
                         :eastward_velocity, :northward_velocity, :vertical_velocity,
                         :eastward_wind, :northward_wind, :vertical_wind,

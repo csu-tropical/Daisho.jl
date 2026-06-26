@@ -112,6 +112,63 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         rm(tmp)
     end
 
+    @testset "range/frequency with _FillValue read without error" begin
+        # Regression for GitHub issue #3: some writers attach a `_FillValue`
+        # attribute to `range` (and `frequency`), so NCDatasets returns the
+        # values as `Vector{Union{Missing,Float32}}`. The reader previously did
+        # `collect(Float64, ...)` on these, which throws
+        # `Cannot convert Missing to Float64` even when no element is actually
+        # filled. Routing through `_to_f64vec` (missing → NaN) fixes it.
+        tmp = tempname() * ".nc"
+        NCDatasets.NCDataset(tmp, "c") do ds
+            ds.attrib["Conventions"] = "CF/Radial-1.4"
+            ds.attrib["instrument_name"] = "TINY"
+            ds.attrib["site_name"] = "TINY"
+            ds.attrib["time_coverage_start"] = "2024-01-01T00:00:00Z"
+            ds.attrib["time_coverage_end"] = "2024-01-01T00:01:00Z"
+            ds.attrib["title"] = "tiny"
+            ds.attrib["institution"] = ""
+            ds.attrib["source"] = ""
+            ds.attrib["history"] = ""
+            ds.attrib["references"] = ""
+            ds.attrib["comment"] = ""
+            ds.attrib["scan_name"] = ""
+            ds.attrib["platform_is_mobile"] = "false"
+            ds.attrib["ray_times_increase"] = "true"
+            NCDatasets.defDim(ds, "time", 3)
+            NCDatasets.defDim(ds, "range", 4)
+            NCDatasets.defDim(ds, "sweep", 1)
+            NCDatasets.defDim(ds, "frequency", 1)
+            NCDatasets.defVar(ds, "time", Float64[0.0, 1.0, 2.0], ("time",);
+                attrib = DataStructures.OrderedDict("units" => "seconds since 2024-01-01T00:00:00Z"))
+            # `range` carries a _FillValue attribute even though every gate is valid.
+            NCDatasets.defVar(ds, "range", Float32[400.0, 500.0, 600.0, 700.0], ("range",);
+                attrib = DataStructures.OrderedDict("_FillValue" => Float32(-9999)))
+            # `frequency` is genuinely filled (missing) here, exercising NaN mapping.
+            fvar = NCDatasets.defVar(ds, "frequency", Float32, ("frequency",);
+                attrib = DataStructures.OrderedDict("_FillValue" => Float32(-9999)))
+            fvar[:] = [missing]
+            NCDatasets.defVar(ds, "azimuth", Float32[0.0, 120.0, 240.0], ("time",))
+            NCDatasets.defVar(ds, "elevation", Float32[1.0, 1.0, 1.0], ("time",))
+            NCDatasets.defVar(ds, "latitude", 16.0, ())
+            NCDatasets.defVar(ds, "longitude", -24.0, ())
+            NCDatasets.defVar(ds, "altitude", 50.0, ())
+            NCDatasets.defVar(ds, "sweep_start_ray_index", Int32[0], ("sweep",))
+            NCDatasets.defVar(ds, "sweep_end_ray_index", Int32[2], ("sweep",))
+            NCDatasets.defVar(ds, "fixed_angle", Float32[1.0], ("sweep",))
+            data = randn(Float32, 4, 3)
+            NCDatasets.defVar(ds, "DBZ", data, ("range", "time");
+                attrib = DataStructures.OrderedDict("_FillValue" => Float32(-32768),
+                                                   "units" => "dBZ"))
+        end
+        v = read_cfradial(tmp)                       # previously threw
+        @test length(v.sweeps) == 1
+        @test v.sweeps[1].range == [400.0, 500.0, 600.0, 700.0]  # clean despite _FillValue attr
+        @test isnan(v.sweeps[1].frequency[1])        # genuine fill → NaN
+        @test haskey(v.sweeps[1].fields, "DBZ")
+        rm(tmp)
+    end
+
     @testset "packed Int16 field is unpacked exactly once" begin
         # Regression: a field stored as scaled Int16 (scale_factor) must be
         # decoded to physical units exactly once. The reader reads the RAW
