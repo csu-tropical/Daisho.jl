@@ -4,10 +4,11 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
     "cfrad2.20240903_150007.042_to_20240903_150444.596_SEAPOL_PICCOLO_CIRC_SUR.nc")
 
 @testset "CfRadial reader" begin
-    if !isfile(FIXTURE_V1) || !isfile(FIXTURE_V2)
-        @info "Skipping fixture-dependent reader tests (fixtures not present)"
-        return
-    end
+    # The real-fixture tests below need the large gitignored .nc files. They skip
+    # VISIBLY when those are absent (e.g. in CI). Crucially, the synthetic
+    # in-memory testsets further down ALWAYS run, so the reader's core paths stay
+    # covered in CI without shipping 100+ MB of radar data.
+    if isfile(FIXTURE_V1) && isfile(FIXTURE_V2)
 
     @testset "v1 fixture read" begin
         v = read_cfradial(FIXTURE_V1)
@@ -65,6 +66,10 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         d2 = v2.sweeps[1].fields["DBZ"].data
         @test size(d1) == size(d2)
     end
+
+    else
+        @info "Skipping real-fixture reader tests (large .nc fixtures not present); synthetic tests still run"
+    end  # end fixture-gated block
 
     @testset "lenient handling of missing optional vars" begin
         # Synthetic in-memory NetCDF file lacking optional vars.
@@ -240,6 +245,101 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
             NCDatasets.defVar(ds, "altitude", 50.0, ())
         end
         @test_throws ArgumentError read_cfradial(tmp)
+        rm(tmp)
+    end
+
+    @testset "synthetic CfRadial 1.4 full read" begin
+        # Build a fuller in-memory v1 file (no large fixtures) to exercise the
+        # v1 code path: _read_cfradial1, _read_radar_calibration_v1, and
+        # _read_georeference_correction_v1. 2 sweeps × 4 rays, 5 gates, 2 fields.
+        tmp = tempname() * ".nc"
+        build_synthetic_cfradial_v1(tmp; n_sweeps = 2, rays_per_sweep = 4,
+                                    n_gates = 5, field_names = ["DBZ", "VEL"])
+        v = read_cfradial(tmp)
+
+        # Globals / scalars
+        @test v.version == "CF-Radial-1.4"
+        @test v.instrument_name == "SYNV1"
+        @test v.site_name == "SYNSITE"
+        @test v.scan_name == "SYNSCAN"
+        @test v.scan_id == 7
+        @test v.platform_is_mobile == true
+        @test v.simulated_data == true
+        @test v.volume_number == 42
+        @test v.platform_type == "vehicle"
+        @test v.instrument_type == "radar"
+        @test v.primary_axis == "axis_z"
+        @test v.status_str == "<status>ok</status>"
+        @test v.altitude_agl == 30.0
+        @test v.latitude ≈ 16.886 atol = 1e-4
+        @test v.longitude ≈ -24.988 atol = 1e-4
+        @test v.altitude ≈ 50.0 atol = 1e-6
+        @test v.time_coverage_start == DateTime(2024, 8, 27, 21, 40, 0)
+        @test v.time_coverage_end == DateTime(2024, 8, 27, 21, 40, 8)
+        @test haskey(v.extra_attrs, "non_spec_attr")   # non-spec attr absorbed
+
+        # Sweeps
+        @test length(v.sweeps) == 2
+        s1 = v.sweeps[1]
+        s2 = v.sweeps[2]
+        @test s1.sweep_number == 0
+        @test s2.sweep_number == 1
+        @test s1.sweep_mode == "azimuth_surveillance"   # 2-D char per-sweep read
+        @test s1.follow_mode == "none"
+        @test s1.prt_mode == "fixed"
+        @test s1.polarization_mode == "horizontal"
+        @test s1.rays_are_indexed == true
+        @test s1.fixed_angle ≈ 1.5 atol = 1e-4
+        @test s2.fixed_angle ≈ 2.5 atol = 1e-4
+        @test length(s1.time) == 4 && length(s2.time) == 4
+        @test length(s1.range) == 5
+        @test s1.range_meters_to_first_gate ≈ 400.0 atol = 1e-4
+        @test s1.range_meters_between_gates ≈ 100.0 atol = 1e-4
+        @test s1.range_spacing_is_constant == true
+        @test length(s1.azimuth) == 4
+        @test s1.nyquist_velocity !== nothing && all(≈(25.0), s1.nyquist_velocity)
+        @test s1.pulse_width !== nothing
+        @test s1.n_samples !== nothing && all(==(64), s1.n_samples)
+        @test s1.ray_angle_resolution ≈ 1.0 atol = 1e-6
+        @test s1.target_scan_rate ≈ 10.0 atol = 1e-6
+        @test length(s1.frequency) == 1
+        @test s1.frequency[1] ≈ 5.6e9 rtol = 1e-6
+
+        # Fields present, correct gate/ray counts, fill/sentinel semantics
+        @test sort(collect(keys(s1.fields))) == ["DBZ", "VEL"]
+        @test size(s1.fields["DBZ"].data) == (4, 5)   # (rays, gates)
+        @test size(s1.fields["VEL"].data) == (4, 5)
+        dbz1 = s1.fields["DBZ"].data
+        @test isnan(dbz1[1, 1])             # -32768 → true-missing (NaN)
+        @test dbz1[1, 2] ≈ -9999.0 atol = 1e-3  # -9999 clear-air stays finite
+        @test count(isnan, vec(dbz1)) == 1
+
+        # Per-sweep georeference sub-group (mobile layout)
+        @test s1.georeference !== nothing
+        @test length(s1.georeference.latitude) == 4
+        @test all(≈(90.0), s1.georeference.heading)
+
+        # Radar calibration parsed (_read_radar_calibration_v1)
+        @test v.radar_calibration !== nothing
+        @test length(v.radar_calibration.entries) == 2
+        e1 = v.radar_calibration.entries[1]
+        @test e1.xmit_power_h ≈ 70.0 atol = 1e-4
+        @test e1.noise_hc ≈ -75.0 atol = 1e-4
+        @test e1.receiver_gain_hc ≈ 40.0 atol = 1e-4
+        @test e1.base_1km_hc ≈ -30.0 atol = 1e-4   # LROSE base_dbz_1km_hc → base_1km_hc
+        @test e1.time == DateTime(2024, 8, 27, 21, 40, 0)
+        @test v.radar_calibration.entries[2].xmit_power_h ≈ 70.5 atol = 1e-4
+
+        # Radar parameters parsed
+        @test v.radar_parameters !== nothing
+        @test v.radar_parameters.beam_width_h ≈ 1.0 atol = 1e-6
+
+        # Georeference correction parsed (_read_georeference_correction_v1)
+        @test v.georeference_correction !== nothing
+        @test v.georeference_correction.azimuth_correction ≈ 0.5 atol = 1e-4
+        @test v.georeference_correction.elevation_correction ≈ -0.25 atol = 1e-4
+        @test v.georeference_correction.roll_correction ≈ 0.1 atol = 1e-4
+
         rm(tmp)
     end
 end

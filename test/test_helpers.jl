@@ -282,3 +282,210 @@ function synthetic_volume(; n_sweeps::Int=2, n_rays::Int=20, n_gates::Int=10,
         sweeps = sweeps,
     )
 end
+
+"""
+    build_synthetic_cfradial_v1(path; n_sweeps=2, rays_per_sweep=4, n_gates=5,
+                                field_names=["DBZ", "VEL"]) -> path
+
+Write a *fuller* synthetic CfRadial **1.4** NetCDF file (flat top-level layout)
+to `path`, in-memory and self-contained, with no large fixtures required. It is
+deliberately exhaustive so reader tests exercise the v1 code path
+(`_read_cfradial1`, `_read_radar_calibration_v1`,
+`_read_georeference_correction_v1`) without the gitignored real fixtures.
+
+The file contains:
+
+  * global attrs (Conventions/version/title/… plus a non-spec attr that must
+    land in `extra_attrs`),
+  * per-ray `latitude`/`longitude`/`altitude` (mobile layout → per-sweep
+    `Georeference` sub-groups are built), `altitude_agl`,
+  * `time` (seconds-since with a `units` attr), `range` (with
+    `meters_to_center_of_first_gate` / `meters_between_gates` /
+    `spacing_is_constant` attrs), `azimuth`, `elevation`,
+  * `sweep_start_ray_index` / `sweep_end_ray_index` / `fixed_angle` /
+    `sweep_number` and per-sweep **2-D char** mode strings (`sweep_mode`,
+    `follow_mode`, `prt_mode`, `polarization_mode`, `rays_are_indexed`),
+    `ray_angle_res`, `target_scan_rate`,
+  * optional per-ray vars (`pulse_width`, `prt`, `prt_ratio`,
+    `nyquist_velocity`, `unambiguous_range`, `n_samples`,
+    `antenna_transition`, `scan_rate`, `r_calib_index`, `rx_range_resolution`),
+  * scalar string vars (`volume_number`, `platform_type`, `instrument_type`,
+    `primary_axis`, `status_str`) and `frequency`,
+  * radar-parameter vars (`radar_antenna_gain_h/v`, `radar_beam_width_h/v`,
+    `radar_rx_bandwidth`),
+  * a radar-calibration table (`r_calib_*` over an `r_calib` dim of length 2,
+    including `r_calib_time` and the LROSE-style `r_calib_base_dbz_1km_hc`),
+  * volume-level georeference-correction scalars (`*_correction`),
+  * `field_names` fields over `(range, time)`. The first field embeds a
+    `-32768` fill (→ NaN, true-missing) and a `-9999` value (clear-air; stays
+    finite) so the fill/sentinel distinction is exercised.
+"""
+function build_synthetic_cfradial_v1(path;
+        n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
+        field_names = ["DBZ", "VEL"])
+
+    n_rays = n_sweeps * rays_per_sweep
+    slen = 32
+
+    ds = NCDatasets.NCDataset(path, "c", attrib = DataStructures.OrderedDict(
+        "Conventions"         => "CF/Radial",
+        "Sub_conventions"     => "CF-Radial instrument_parameters radar_parameters radar_calibration",
+        "version"             => "CF-Radial-1.4",
+        "title"               => "Synthetic v1 test volume",
+        "institution"         => "Test",
+        "source"              => "Synthetic",
+        "history"             => "Created for testing",
+        "references"          => "None",
+        "comment"             => "Full v1 synthetic file",
+        "instrument_name"     => "SYNV1",
+        "site_name"           => "SYNSITE",
+        "scan_name"           => "SYNSCAN",
+        "scan_id"             => Int32(7),
+        "platform_is_mobile"  => "true",
+        "ray_times_increase"  => "true",
+        "simulated_data"      => "true",
+        "time_coverage_start" => "2024-08-27T21:40:00Z",
+        "time_coverage_end"   => "2024-08-27T21:40:08Z",
+        "non_spec_attr"       => "absorbed-into-extra_attrs",
+    ))
+
+    # Dimensions
+    ds.dim["time"]      = n_rays
+    ds.dim["range"]     = n_gates
+    ds.dim["sweep"]     = n_sweeps
+    ds.dim["r_calib"]   = 2
+    ds.dim["frequency"] = 1
+    ds.dim["string_length"] = slen
+
+    # Pad a string to `slen` chars with NUL (the CF char-array convention;
+    # `rpad` rejects '\0' because it has zero textwidth, so do it by hand).
+    _nulpad = s -> begin
+        c = collect(Char, s)
+        append!(c, fill('\0', slen - length(c)))
+        c
+    end
+    # Helper: write a per-sweep mode string as a 2-D char (string_length, sweep).
+    _defmode = function (name, strings)
+        v = defVar(ds, name, Char, ("string_length", "sweep"))
+        for j in 1:n_sweeps
+            v[:, j] = _nulpad(strings[j])
+        end
+        return v
+    end
+    # Helper: write a 1-D scalar string as a char vector (string_length,).
+    _defscalarstr = function (name, s)
+        v = defVar(ds, name, Char, ("string_length",))
+        v[:] = _nulpad(s)
+        return v
+    end
+
+    # Time (seconds since base, with units attr)
+    nctime = defVar(ds, "time", Float64, ("time",), attrib = DataStructures.OrderedDict(
+        "standard_name" => "time",
+        "units"         => "seconds since 2024-08-27T21:40:00Z",
+        "calendar"      => "gregorian",
+    ))
+    nctime[:] = Float64.(0:n_rays-1)
+
+    # Range with gate-geometry attrs
+    range_data = Float32.(collect(range(400.0, step = 100.0, length = n_gates)))
+    ncrange = defVar(ds, "range", Float32, ("range",), attrib = DataStructures.OrderedDict(
+        "meters_to_center_of_first_gate" => Float32(400.0),
+        "meters_between_gates"           => Float32(100.0),
+        "spacing_is_constant"            => "true",
+    ))
+    ncrange[:] = range_data
+
+    # Per-ray geometry
+    az = Float32.(collect(range(0.0, step = 360.0 / n_rays, length = n_rays)))
+    defVar(ds, "azimuth", Float32, ("time",))[:] = az
+    defVar(ds, "elevation", Float32, ("time",))[:] = fill(Float32(1.5), n_rays)
+
+    # Per-ray platform position (mobile → builds Georeference sub-groups)
+    defVar(ds, "latitude", Float64, ("time",))[:]  = fill(16.886, n_rays)
+    defVar(ds, "longitude", Float64, ("time",))[:] = fill(-24.988, n_rays)
+    defVar(ds, "altitude", Float64, ("time",))[:]  = fill(50.0, n_rays)
+    defVar(ds, "altitude_agl", Float64, ())[:]     = 30.0
+    defVar(ds, "heading", Float32, ("time",))[:]   = fill(Float32(90.0), n_rays)
+    defVar(ds, "roll", Float32, ("time",))[:]      = zeros(Float32, n_rays)
+    defVar(ds, "pitch", Float32, ("time",))[:]     = zeros(Float32, n_rays)
+
+    # Optional per-ray instrument vars
+    defVar(ds, "pulse_width", Float32, ("time",))[:]        = fill(Float32(1.0e-6), n_rays)
+    defVar(ds, "prt", Float32, ("time",))[:]                = fill(Float32(1.0e-3), n_rays)
+    defVar(ds, "prt_ratio", Float32, ("time",))[:]          = fill(Float32(1.0), n_rays)
+    defVar(ds, "nyquist_velocity", Float32, ("time",))[:]   = fill(Float32(25.0), n_rays)
+    defVar(ds, "unambiguous_range", Float32, ("time",))[:]  = fill(Float32(150000.0), n_rays)
+    defVar(ds, "n_samples", Int32, ("time",))[:]            = fill(Int32(64), n_rays)
+    defVar(ds, "antenna_transition", Int8, ("time",))[:]    = zeros(Int8, n_rays)
+    defVar(ds, "scan_rate", Float32, ("time",))[:]          = fill(Float32(10.0), n_rays)
+    defVar(ds, "rx_range_resolution", Float32, ("time",))[:] = fill(Float32(100.0), n_rays)
+    defVar(ds, "r_calib_index", Int32, ("time",))[:]        = fill(Int32(0), n_rays)
+
+    # Sweep boundaries / per-sweep scalars
+    defVar(ds, "sweep_start_ray_index", Int32, ("sweep",))[:] =
+        Int32.([(i - 1) * rays_per_sweep for i in 1:n_sweeps])
+    defVar(ds, "sweep_end_ray_index", Int32, ("sweep",))[:] =
+        Int32.([i * rays_per_sweep - 1 for i in 1:n_sweeps])
+    defVar(ds, "fixed_angle", Float32, ("sweep",))[:] =
+        Float32.([0.5 + i for i in 1:n_sweeps])
+    defVar(ds, "sweep_number", Int32, ("sweep",))[:] = Int32.(0:n_sweeps-1)
+    defVar(ds, "ray_angle_res", Float32, ("sweep",))[:] = fill(Float32(1.0), n_sweeps)
+    defVar(ds, "target_scan_rate", Float32, ("sweep",))[:] = fill(Float32(10.0), n_sweeps)
+    _defmode("sweep_mode", fill("azimuth_surveillance", n_sweeps))
+    _defmode("follow_mode", fill("none", n_sweeps))
+    _defmode("prt_mode", fill("fixed", n_sweeps))
+    _defmode("polarization_mode", fill("horizontal", n_sweeps))
+    _defmode("rays_are_indexed", fill("true", n_sweeps))
+
+    # Scalar string / metadata vars
+    defVar(ds, "volume_number", Int32, ())[:] = 42
+    _defscalarstr("platform_type", "vehicle")
+    _defscalarstr("instrument_type", "radar")
+    _defscalarstr("primary_axis", "axis_z")
+    _defscalarstr("status_str", "<status>ok</status>")
+    defVar(ds, "frequency", Float32, ("frequency",))[:] = [Float32(5.6e9)]
+
+    # Radar parameter vars
+    defVar(ds, "radar_antenna_gain_h", Float32, ())[:] = 45.0
+    defVar(ds, "radar_antenna_gain_v", Float32, ())[:] = 45.0
+    defVar(ds, "radar_beam_width_h", Float32, ())[:]   = 1.0
+    defVar(ds, "radar_beam_width_v", Float32, ())[:]   = 1.0
+    defVar(ds, "radar_rx_bandwidth", Float32, ())[:]   = 1.0e6
+
+    # Radar calibration table (r_calib dim = 2)
+    defVar(ds, "r_calib_pulse_width", Float32, ("r_calib",))[:]   = Float32[1.0e-6, 2.0e-6]
+    defVar(ds, "r_calib_xmit_power_h", Float32, ("r_calib",))[:]  = Float32[70.0, 70.5]
+    defVar(ds, "r_calib_noise_hc", Float32, ("r_calib",))[:]      = Float32[-75.0, -74.5]
+    defVar(ds, "r_calib_receiver_gain_hc", Float32, ("r_calib",))[:] = Float32[40.0, 40.2]
+    defVar(ds, "r_calib_zdr_correction", Float32, ("r_calib",))[:] = Float32[0.1, 0.2]
+    # LROSE-style name that canonicalizes to base_1km_hc
+    defVar(ds, "r_calib_base_dbz_1km_hc", Float32, ("r_calib",))[:] = Float32[-30.0, -29.0]
+    rct = defVar(ds, "r_calib_time", String, ("r_calib",))
+    rct[:] = ["2024-08-27T21:40:00Z", "2024-08-27T21:40:04Z"]
+
+    # Volume-level georeference correction scalars
+    defVar(ds, "azimuth_correction", Float32, ())[:]   = 0.5
+    defVar(ds, "elevation_correction", Float32, ())[:] = -0.25
+    defVar(ds, "range_correction", Float32, ())[:]     = 0.0
+    defVar(ds, "roll_correction", Float32, ())[:]      = 0.1
+
+    # Field variables over (range, time). First field embeds fill/sentinels.
+    for (fi, name) in enumerate(field_names)
+        attrib = DataStructures.OrderedDict{String,Any}(
+            "_FillValue" => Float32(-32768),
+            "long_name"  => name,
+            "units"      => name == "DBZ" ? "dBZ" : name == "VEL" ? "m/s" : "",
+        )
+        v = defVar(ds, name, Float32, ("range", "time"), attrib = attrib)
+        data = Float32.(reshape(1:(n_gates * n_rays), n_gates, n_rays)) .+ Float32(fi * 0.5)
+        if fi == 1
+            data[1, 1] = -32768.0f0   # true-missing → NaN
+            data[2, 1] = -9999.0f0    # clear-air/undetect → stays finite
+        end
+        v[:, :] = data
+    end
+
+    close(ds)
+    return path
+end
