@@ -28,3 +28,13 @@ Daisho.n_rays
 Daisho.field_names
 Daisho.has_field
 ```
+
+## Legacy `radar` Compatibility
+
+Helpers to convert between the CfRadial 2.1 [`Volume`](@ref Daisho.Volume) type
+and the legacy `radar` struct.
+
+```@docs
+Daisho.as_volume
+Daisho.as_legacy_radar
+```

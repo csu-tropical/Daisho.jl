@@ -1,4 +1,5 @@
 using Documenter
+using Documenter.Remotes: GitHub
 using Daisho
 
 makedocs(
@@ -6,8 +7,10 @@ makedocs(
     modules = [Daisho],
     format = Documenter.HTML(
         prettyurls = get(ENV, "CI", nothing) == "true",
-        canonical = "https://mmbell.github.io/Daisho.jl",
+        canonical = "https://csu-tropical.github.io/Daisho.jl",
+        edit_link = "main",
     ),
+    repo = GitHub("csu-tropical", "Daisho.jl"),
     pages = [
         "Home" => "index.md",
         "Guide" => [
@@ -16,6 +19,7 @@ makedocs(
             "guide/gridding.md",
             "guide/spectral_gridding.md",
             "guide/wind_synthesis.md",
+            "guide/echo_products.md",
             "guide/srtm.md",
         ],
         "Theory" => [
@@ -31,10 +35,11 @@ makedocs(
             "api/gridding.md",
             "api/spectral_gridding.md",
             "api/wind_synthesis.md",
+            "api/echo_products.md",
             "api/srtm.md",
         ],
     ],
-    checkdocs = :none,
+    checkdocs = :exports,
 )
 
 deploydocs(

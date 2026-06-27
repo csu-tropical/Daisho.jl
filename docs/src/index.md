@@ -15,8 +15,11 @@
 
 ```julia
 using Pkg
-Pkg.add(url="https://github.com/csu-tropical/Daisho.jl")
+Pkg.add("Daisho")
 ```
+
+For development work, clone the repository and `pkg> dev /path/to/Daisho.jl` to
+track local changes.
 
 ## Quick Start
 
