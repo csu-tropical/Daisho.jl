@@ -8,3 +8,6 @@ agent_files/
 # Real CfRadial test fixtures are not committed; see test/fixtures/README.md.
 test/fixtures/*.nc
 docs/build/
+
+# Julia coverage artifacts
+*.cov
