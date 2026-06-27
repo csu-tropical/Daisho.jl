@@ -24,13 +24,42 @@
 # calc_blended_rain_tropical). The R-Z coefficients are band-independent.
 # ---------------------------------------------------------------------------
 
-# R(Z) = (10^(dBZ/10) / a)^(1/b)
+"""
+    RAIN_RZ_ALL
+
+`(a, b)` coefficients for the band-independent R(Z) relation
+`R = (10^(dBZ/10) / a)^(1/b)` for all/unspecified precipitation. Pass the `a`/`b`
+fields to [`calc_rain_zr`](@ref). See also [`RAIN_RZ_CONV`](@ref) and
+[`RAIN_RZ_STRAT`](@ref).
+"""
 const RAIN_RZ_ALL   = (a = 216.0, b = 1.39)   # all/unspecified
+
+"""
+    RAIN_RZ_CONV
+
+`(a, b)` coefficients for the R(Z) relation tuned for convective precipitation.
+See [`RAIN_RZ_ALL`](@ref).
+"""
 const RAIN_RZ_CONV  = (a = 126.0, b = 1.39)   # convective
+
+"""
+    RAIN_RZ_STRAT
+
+`(a, b)` coefficients for the R(Z) relation tuned for stratiform precipitation.
+See [`RAIN_RZ_ALL`](@ref).
+"""
 const RAIN_RZ_STRAT = (a = 291.0, b = 1.55)   # stratiform
 
-# Per-band (a, b, c) for R(Kdp), R(Kdp,Zdr), R(Z,Zdr). The `c` exponents are the
-# Thompson values divided by 10 (so the algorithm form is 10^(c·Zdr)).
+"""
+    RAIN_BAND_COEFFS
+
+Per-band `(a, b, c)` coefficients for the polarimetric rain relations
+`R(Kdp)`, `R(Kdp, Zdr)`, and `R(Z, Zdr)`, keyed by radar band (`"S"`, `"C"`,
+`"X"`). The `c` exponents are the Thompson values divided by 10 (the algorithm
+form is `10^(c·Zdr)`). Used by [`calc_blended_rain_tropical`](@ref) and the
+band-aware methods of [`calc_rain_kdp`](@ref), [`calc_rain_kdp_zdr`](@ref), and
+[`calc_rain_z_zdr`](@ref).
+"""
 const RAIN_BAND_COEFFS = Dict(
     "S" => (kdp = (a = 59.5202, b = 0.7451),
             kdp_zdr = (a = 96.5726, b = 0.9315, c = -2.1140 / 10),

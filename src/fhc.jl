@@ -27,15 +27,39 @@
 #     is finite this is identical to the Python global weighting, so reference
 #     fixtures match exactly.
 
-# Summer (warm-season) hydrometeor classes, in argmax order (class = index).
+"""
+    FHC_SUMMER_CLASSES
+
+Summer (warm-season) hydrometeor classes recognized by the fuzzy-logic
+classifier, in argmax order so that the integer class label returned by
+[`csu_fhc_summer`](@ref) indexes directly into this tuple (class `i` ==
+`FHC_SUMMER_CLASSES[i]`). The ten classes are drizzle, rain, ice crystals,
+aggregates, wet snow, vertical ice, low-density graupel, high-density graupel,
+hail, and big drops. A class label of `0` denotes an unclassified (masked) gate.
+"""
 const FHC_SUMMER_CLASSES = ("Drizzle", "Rain", "Ice Crystals", "Aggregates",
     "Wet Snow", "Vertical Ice", "Low-Density Graupel", "High-Density Graupel",
     "Hail", "Big Drops")
+
+"""
+    FHC_N_TYPES
+
+Number of hydrometeor classes in [`FHC_SUMMER_CLASSES`](@ref) (10). This is the
+leading dimension of the per-class score array produced during classification.
+"""
 const FHC_N_TYPES = length(FHC_SUMMER_CLASSES)
 
-# Default relative weights (matches CSU_RadarTools DEFAULT_WEIGHTS). In the hybrid
-# method only the polarimetric weights (DR, KD, RH, LD) enter the weighted sum;
-# DZ and T act as pure multipliers, so their weights are unused there.
+"""
+    DEFAULT_FHC_WEIGHTS
+
+Default relative weights for the fuzzy hydrometeor classification variables
+(matches CSU_RadarTools `DEFAULT_WEIGHTS`): reflectivity `DZ`, differential
+reflectivity `DR`, specific differential phase `KD`, copolar correlation `RH`,
+linear depolarization ratio `LD`, and temperature `T`. In the `:hybrid` method
+only the polarimetric weights (`DR`, `KD`, `RH`, `LD`) enter the weighted sum;
+`DZ` and `T` act as pure multipliers, so their weights are unused there. Pass a
+`NamedTuple` with the same keys to [`csu_fhc_summer`](@ref) to override.
+"""
 const DEFAULT_FHC_WEIGHTS = (DZ = 1.5, DR = 0.8, KD = 1.0, RH = 0.8, LD = 0.5, T = 0.4)
 
 # Polarimetric variable keys participating in the hybrid weighted sum.
