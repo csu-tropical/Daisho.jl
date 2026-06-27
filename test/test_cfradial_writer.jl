@@ -69,6 +69,31 @@ end
         rm(tmp)
     end
 
+    @testset "synthetic v1 round-trip preserves optional groups" begin
+        # Read a fully-populated synthetic v1 file (radar calibration,
+        # georeference correction, frequency, radar parameters, per-ray optional
+        # vars, extra attrs) into a Volume and write it back out. Writing a Volume
+        # that carries these optionals exercises the optional-field write paths
+        # (calibration / georeference_correction groups, frequency dimension, the
+        # per-ray optional variables) that the minimal synthetic volume skips —
+        # paths otherwise only hit by the gitignored real fixtures.
+        src = tempname() * ".nc"
+        build_synthetic_cfradial_v1(src)
+        v = read_cfradial(src)
+        @test v.radar_calibration !== nothing        # source is rich
+        tmp = tempname() * ".nc"
+        write_cfradial(v, tmp)
+        @test isfile(tmp)
+        rt = read_cfradial(tmp)
+        @test length(rt.sweeps) == length(v.sweeps)
+        @test rt.radar_calibration !== nothing       # calibration survived the round-trip
+        @test !isempty(rt.radar_calibration.entries)
+        for fname in keys(v.sweeps[1].fields)
+            @test haskey(rt.sweeps[1].fields, fname)
+        end
+        rm(src); rm(tmp)
+    end
+
     @testset "real-fixture v2 round-trip" begin
         if !isfile(FIXTURE_V2)
             @info "Skipping v2 round-trip (fixture absent)"
