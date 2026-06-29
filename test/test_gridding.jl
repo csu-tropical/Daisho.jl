@@ -280,6 +280,37 @@
         end
     end
 
+    @testset "legacy grid_radar_volume drives the 2-D grid_volume kernel" begin
+        # The Volume drivers above route through the accumulator. The legacy
+        # moment_dict-based grid_radar_volume entry point exercises the
+        # grid_volume accumulation kernel directly (same physics as the 3-D
+        # accumulator). Grid a synthetic legacy radar onto a small Cartesian grid
+        # positioned to overlap the gates so the inner accumulation actually runs.
+        vol = make_synthetic_radar(n_rays = 24, n_gates = 16, n_moments = 3)
+        # moment_dict must contain both the valid_key ("DBZ") and missing_key
+        # ("SQI") that grid_radar_volume gates on by default.
+        moment_dict = make_moment_dict(["DBZ", "VEL", "SQI"])
+        grid_type_dict = make_grid_type_dict(3)
+        outfile = tempname() * "_legacy.nc"
+        try
+            Daisho.grid_radar_volume(vol, moment_dict, grid_type_dict, outfile,
+                vol.time[1],
+                -2000.0, 1000.0, 5,   # xmin, xincr, xdim
+                -2000.0, 1000.0, 5,   # ymin, yincr, ydim
+                0.0, 500.0, 4,        # zmin, zincr, zdim
+                0.1)                  # power_threshold (>0; 0 makes the beam cutoff infinite)
+            @test isfile(outfile)
+            ds = NCDataset(outfile, "r")
+            try
+                @test haskey(ds, "DBZ")
+            finally
+                close(ds)
+            end
+        finally
+            isfile(outfile) && rm(outfile)
+        end
+    end
+
     @testset "User TOML metadata propagates to NetCDF global attrs" begin
         # Each writer must source CF global attributes (Issue #1) from
         # `p.grid.metadata`, not hard-coded SEA-POL strings. We override a
