@@ -489,3 +489,194 @@ function build_synthetic_cfradial_v1(path;
     close(ds)
     return path
 end
+
+"""
+    build_synthetic_cfradial_v2(path; n_sweeps=2, rays_per_sweep=4, n_gates=5,
+                                field_names=["DBZ", "VEL"]) -> path
+
+Write a *fuller* synthetic CfRadial **2.1** NetCDF file (NetCDF4 GROUP layout,
+one group per sweep) to `path`, in-memory and self-contained, with no large
+fixtures required. It is the v2 analog of `build_synthetic_cfradial_v1` and is
+deliberately exhaustive so reader tests exercise the v2 code path
+(`_read_cfradial2`, `_read_sweep_v2`, `_read_radar_parameters`,
+`_read_radar_monitoring`, `_read_calibration`, `_read_georeference_correction`)
+without the gitignored real fixtures.
+
+The file contains:
+
+  * global attrs (Conventions=`Cf/Radial-2.1`/version/title/… plus a non-spec
+    attr that must land in `extra_attrs`),
+  * scalar root vars (`latitude`/`longitude`/`altitude`/`altitude_agl`,
+    `volume_number`, `platform_type`, `instrument_type`, `primary_axis`,
+    `status_str`) and `time_coverage_start`/`_end`,
+  * `sweep_group_name` / `sweep_fixed_angle` over a `sweep` dim,
+  * root sub-groups `radar_parameters`, `radar_calibration` (`calib` dim = 2,
+    incl. `time`), and `georeference_correction`,
+  * one NetCDF GROUP per sweep, each with `time` (seconds-since, with `units`)
+    and `range` dims/vars, `azimuth`/`elevation`, per-sweep `sweep_number` /
+    `sweep_mode` / `sweep_fixed_angle` / `follow_mode` / `prt_mode` /
+    `polarization_mode` / `rays_are_indexed` / `ray_angle_resolution` /
+    `target_scan_rate`, per-sweep `start_range` / `ray_gate_spacing` (gate
+    geometry), per-sweep `frequency`, optional per-ray `nyquist_velocity` /
+    `pulse_width`,
+  * a per-sweep `georeference` sub-group (lat/lon/alt/heading + `georefs_applied`)
+    and a `radar_monitoring` sub-group (`measured_transmit_power_h`, `zdr_offset`),
+  * `field_names` fields over `(time, range)`, each carrying a non-spec field
+    attribute that must land in the field metadata `extra_attrs`. The first
+    field on the first sweep embeds a `-32768` fill (→ NaN, true-missing) and a
+    `-9999` value (clear-air; stays finite) so the fill/sentinel distinction is
+    exercised.
+
+The per-sweep `georeference` and `radar_monitoring` sub-groups are both surfaced
+on read into `SweepGroup.georeference` / `SweepGroup.radar_monitoring`.
+"""
+function build_synthetic_cfradial_v2(path;
+        n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
+        field_names = ["DBZ", "VEL"])
+
+    sweep_names = [string("sweep_", lpad(i, 4, '0')) for i in 1:n_sweeps]
+
+    ds = NCDatasets.NCDataset(path, "c", format = :netcdf4,
+        attrib = DataStructures.OrderedDict(
+            "Conventions"         => "Cf/Radial-2.1",
+            "version"             => "2.1",
+            "title"               => "Synthetic v2 test volume",
+            "institution"         => "Test",
+            "source"              => "Synthetic",
+            "history"             => "Created for testing",
+            "references"          => "None",
+            "comment"             => "Full v2 synthetic file",
+            "instrument_name"     => "SYNV2",
+            "site_name"           => "SYNSITE2",
+            "scan_name"           => "SYNSCAN2",
+            "scan_id"             => Int32(9),
+            "platform_is_mobile"  => "false",
+            "ray_times_increase"  => "true",
+            "simulated_data"      => "true",
+            "non_spec_attr"       => "absorbed-into-extra_attrs",
+        ))
+
+    # Scalar root vars (0-dim).
+    NCDatasets.defVar(ds, "time_coverage_start", "2024-09-03T15:00:00Z", ())
+    NCDatasets.defVar(ds, "time_coverage_end", "2024-09-03T15:00:08Z", ())
+    NCDatasets.defVar(ds, "latitude", 16.886, ())
+    NCDatasets.defVar(ds, "longitude", -24.988, ())
+    NCDatasets.defVar(ds, "altitude", 50.0, ())
+    NCDatasets.defVar(ds, "altitude_agl", 30.0, ())
+    NCDatasets.defVar(ds, "volume_number", Int32(42), ())
+    NCDatasets.defVar(ds, "platform_type", "fixed", ())
+    NCDatasets.defVar(ds, "instrument_type", "radar", ())
+    NCDatasets.defVar(ds, "primary_axis", "axis_z", ())
+    NCDatasets.defVar(ds, "status_str", "<status>ok</status>", ())
+
+    # Sweep index vars.
+    ds.dim["sweep"] = n_sweeps
+    NCDatasets.defVar(ds, "sweep_group_name", sweep_names, ("sweep",))
+    NCDatasets.defVar(ds, "sweep_fixed_angle",
+        Float32.([0.5 + i for i in 1:n_sweeps]), ("sweep",))
+
+    # Root sub-group: radar_parameters.
+    rp = NCDatasets.defGroup(ds, "radar_parameters")
+    NCDatasets.defVar(rp, "radar_antenna_gain_h", Float32(45.0), ())
+    NCDatasets.defVar(rp, "radar_antenna_gain_v", Float32(45.0), ())
+    NCDatasets.defVar(rp, "radar_beam_width_h", Float32(1.0), ())
+    NCDatasets.defVar(rp, "radar_beam_width_v", Float32(1.0), ())
+    NCDatasets.defVar(rp, "radar_rx_bandwidth", Float32(1.0e6), ())
+
+    # Root sub-group: radar_calibration (calib dim = 2, with time).
+    rc = NCDatasets.defGroup(ds, "radar_calibration")
+    rc.dim["calib"] = 2
+    NCDatasets.defVar(rc, "pulse_width", Float32[1.0e-6, 2.0e-6], ("calib",))
+    NCDatasets.defVar(rc, "xmit_power_h", Float32[70.0, 70.5], ("calib",))
+    NCDatasets.defVar(rc, "noise_hc", Float32[-75.0, -74.5], ("calib",))
+    NCDatasets.defVar(rc, "receiver_gain_hc", Float32[40.0, 40.2], ("calib",))
+    NCDatasets.defVar(rc, "zdr_correction", Float32[0.1, 0.2], ("calib",))
+    NCDatasets.defVar(rc, "time",
+        ["2024-09-03T15:00:00Z", "2024-09-03T15:00:04Z"], ("calib",))
+
+    # Root sub-group: georeference_correction (volume-level scalars).
+    gc = NCDatasets.defGroup(ds, "georeference_correction")
+    NCDatasets.defVar(gc, "azimuth_correction", 0.5, ())
+    NCDatasets.defVar(gc, "elevation_correction", -0.25, ())
+    NCDatasets.defVar(gc, "roll_correction", 0.1, ())
+
+    range_data = Float32.(collect(range(400.0, step = 100.0, length = n_gates)))
+
+    for (si, gname) in enumerate(sweep_names)
+        grp = NCDatasets.defGroup(ds, gname)
+        grp.dim["time"] = rays_per_sweep
+        grp.dim["range"] = n_gates
+        grp.dim["frequency"] = 1
+
+        NCDatasets.defVar(grp, "sweep_number", Int32(si - 1), ())
+        NCDatasets.defVar(grp, "sweep_mode", "azimuth_surveillance", ())
+        NCDatasets.defVar(grp, "sweep_fixed_angle", Float32(0.5 + si), ())
+        NCDatasets.defVar(grp, "follow_mode", "none", ())
+        NCDatasets.defVar(grp, "prt_mode", "fixed", ())
+        NCDatasets.defVar(grp, "polarization_mode", "horizontal", ())
+        NCDatasets.defVar(grp, "rays_are_indexed", "true", ())
+        NCDatasets.defVar(grp, "ray_angle_resolution", Float32(1.0), ())
+        NCDatasets.defVar(grp, "target_scan_rate", Float32(10.0), ())
+        NCDatasets.defVar(grp, "frequency", Float32[5.6e9], ("frequency",))
+
+        NCDatasets.defVar(grp, "time", Float64.(0:rays_per_sweep-1), ("time",),
+            attrib = DataStructures.OrderedDict(
+                "standard_name" => "time",
+                "units"         => "seconds since 2024-09-03T15:00:00Z",
+                "calendar"      => "gregorian",
+            ))
+        NCDatasets.defVar(grp, "range", range_data, ("range",))
+        # Gate geometry via per-sweep scalars (start_range / ray_gate_spacing).
+        NCDatasets.defVar(grp, "start_range", Float32(400.0), ())
+        NCDatasets.defVar(grp, "ray_gate_spacing", Float32(100.0), ())
+
+        NCDatasets.defVar(grp, "azimuth",
+            Float32.(collect(range(0.0, step = 90.0, length = rays_per_sweep))),
+            ("time",))
+        NCDatasets.defVar(grp, "elevation",
+            fill(Float32(0.5 + si), rays_per_sweep), ("time",))
+        NCDatasets.defVar(grp, "nyquist_velocity",
+            fill(Float32(25.0), rays_per_sweep), ("time",))
+        NCDatasets.defVar(grp, "pulse_width",
+            fill(Float32(1.0e-6), rays_per_sweep), ("time",))
+
+        # Per-sweep georeference sub-group.
+        geo = NCDatasets.defGroup(grp, "georeference")
+        geo.dim["time"] = rays_per_sweep
+        NCDatasets.defVar(geo, "latitude", fill(16.886, rays_per_sweep), ("time",))
+        NCDatasets.defVar(geo, "longitude", fill(-24.988, rays_per_sweep), ("time",))
+        NCDatasets.defVar(geo, "altitude", fill(50.0, rays_per_sweep), ("time",))
+        NCDatasets.defVar(geo, "heading", fill(Float32(90.0), rays_per_sweep), ("time",))
+        NCDatasets.defVar(geo, "georefs_applied",
+            ones(Int8, rays_per_sweep), ("time",))
+
+        # Per-sweep radar_monitoring sub-group.
+        mon = NCDatasets.defGroup(grp, "radar_monitoring")
+        mon.dim["time"] = rays_per_sweep
+        NCDatasets.defVar(mon, "measured_transmit_power_h",
+            fill(Float32(70.0), rays_per_sweep), ("time",))
+        NCDatasets.defVar(mon, "zdr_offset",
+            fill(Float32(0.1), rays_per_sweep), ("time",))
+
+        # Field vars over (time, range). First field on sweep 1 embeds sentinels.
+        for (fi, name) in enumerate(field_names)
+            attrib = DataStructures.OrderedDict{String,Any}(
+                "_FillValue"        => Float32(-32768),
+                "long_name"         => name,
+                "units"             => name == "DBZ" ? "dBZ" : name == "VEL" ? "m/s" : "",
+                "custom_field_attr" => "keepme",   # non-spec → field extra_attrs
+            )
+            v = NCDatasets.defVar(grp, name, Float32, ("time", "range"), attrib = attrib)
+            data = Float32.(reshape(1:(rays_per_sweep * n_gates),
+                                    rays_per_sweep, n_gates)) .+ Float32(fi * 0.5)
+            if fi == 1 && si == 1
+                data[1, 1] = -32768.0f0   # true-missing → NaN
+                data[1, 2] = -9999.0f0    # clear-air/undetect → stays finite
+            end
+            v[:, :] = data
+        end
+    end
+
+    close(ds)
+    return path
+end

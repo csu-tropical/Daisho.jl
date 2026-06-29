@@ -679,7 +679,7 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
 
     # Sub-groups
     georef = nothing
-    if haskey(grp, :group) && haskey(grp.group, "georeference")
+    if haskey(grp.group, "georeference")
         georef = _read_georeference(grp.group["georeference"])
     elseif georefs_applied_ray !== nothing
         # Synthesize a stub with only georefs_applied if no georef group.

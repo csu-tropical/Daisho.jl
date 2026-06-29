@@ -342,4 +342,115 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
 
         rm(tmp)
     end
+
+    @testset "synthetic CfRadial 2.1 full read" begin
+        # Build a fuller in-memory v2 file (NetCDF4 groups, no large fixtures) to
+        # exercise the v2 code path: _read_cfradial2, _read_sweep_v2,
+        # _read_radar_parameters, _read_radar_monitoring, _read_calibration, and
+        # _read_georeference_correction. 2 sweeps × 4 rays, 5 gates, 2 fields.
+        tmp = tempname() * ".nc"
+        build_synthetic_cfradial_v2(tmp; n_sweeps = 2, rays_per_sweep = 4,
+                                    n_gates = 5, field_names = ["DBZ", "VEL"])
+        v = read_cfradial(tmp)
+
+        # Globals / scalars
+        @test v.version == "2.1"
+        @test v.instrument_name == "SYNV2"
+        @test v.site_name == "SYNSITE2"
+        @test v.scan_name == "SYNSCAN2"
+        @test v.scan_id == 9
+        @test v.platform_is_mobile == false
+        @test v.simulated_data == true
+        @test v.volume_number == 42
+        @test v.platform_type == "fixed"
+        @test v.instrument_type == "radar"
+        @test v.primary_axis == "axis_z"
+        @test v.status_str == "<status>ok</status>"
+        @test v.altitude_agl == 30.0
+        @test v.latitude ≈ 16.886 atol = 1e-4
+        @test v.longitude ≈ -24.988 atol = 1e-4
+        @test v.altitude ≈ 50.0 atol = 1e-6
+        @test v.time_coverage_start == DateTime(2024, 9, 3, 15, 0, 0)
+        @test v.time_coverage_end == DateTime(2024, 9, 3, 15, 0, 8)
+        @test haskey(v.extra_attrs, "non_spec_attr")   # non-spec attr absorbed
+
+        # Sweeps (one NetCDF group per sweep)
+        @test length(v.sweeps) == 2
+        s1 = v.sweeps[1]
+        s2 = v.sweeps[2]
+        @test s1.sweep_number == 0
+        @test s2.sweep_number == 1
+        @test s1.sweep_mode == "azimuth_surveillance"
+        @test s1.follow_mode == "none"
+        @test s1.prt_mode == "fixed"
+        @test s1.polarization_mode == "horizontal"
+        @test s1.rays_are_indexed == true
+        @test s1.fixed_angle ≈ 1.5 atol = 1e-4
+        @test s2.fixed_angle ≈ 2.5 atol = 1e-4
+        @test length(s1.time) == 4 && length(s2.time) == 4
+        @test length(s1.range) == 5
+        # Gate geometry from per-sweep start_range / ray_gate_spacing
+        @test s1.range_meters_to_first_gate ≈ 400.0 atol = 1e-4
+        @test s1.range_meters_between_gates ≈ 100.0 atol = 1e-4
+        @test length(s1.azimuth) == 4
+        @test s1.nyquist_velocity !== nothing && all(≈(25.0), s1.nyquist_velocity)
+        @test s1.pulse_width !== nothing
+        @test s1.ray_angle_resolution ≈ 1.0 atol = 1e-6
+        @test s1.target_scan_rate ≈ 10.0 atol = 1e-6
+        # Per-sweep frequency
+        @test length(s1.frequency) == 1
+        @test s1.frequency[1] ≈ 5.6e9 rtol = 1e-6
+
+        # Fields present, correct gate/ray counts, fill/sentinel semantics
+        @test sort(collect(keys(s1.fields))) == ["DBZ", "VEL"]
+        @test size(s1.fields["DBZ"].data) == (4, 5)   # (rays, gates)
+        @test size(s1.fields["VEL"].data) == (4, 5)
+        dbz1 = s1.fields["DBZ"].data
+        @test isnan(dbz1[1, 1])             # -32768 → true-missing (NaN)
+        @test dbz1[1, 2] ≈ -9999.0 atol = 1e-3  # -9999 clear-air stays finite
+        @test count(isnan, vec(dbz1)) == 1
+        # Non-spec field attribute lands in field metadata extra_attrs
+        @test haskey(s1.fields["DBZ"].metadata.extra_attrs, "custom_field_attr")
+
+        # Per-sweep radar_monitoring sub-group parsed (_read_radar_monitoring)
+        @test s1.radar_monitoring !== nothing
+        @test s1.radar_monitoring.measured_transmit_power_h !== nothing
+        @test all(≈(70.0), s1.radar_monitoring.measured_transmit_power_h)
+        @test s1.radar_monitoring.zdr_offset !== nothing
+        @test all(≈(0.1), s1.radar_monitoring.zdr_offset)
+
+        # Per-sweep georeference sub-group parsed (_read_georeference). Regression
+        # guard: the reader previously dropped v2 georeference because the
+        # `haskey(grp, :group)` guard in `_read_sweep_v2` never matched (it looked
+        # for a variable literally named `:group`). Now surfaced.
+        @test s1.georeference !== nothing
+        @test length(s1.georeference.latitude) == 4
+        @test all(≈(90.0), s1.georeference.heading)
+
+        # Radar calibration parsed (_read_calibration, calib dim = 2, with time)
+        @test v.radar_calibration !== nothing
+        @test length(v.radar_calibration.entries) == 2
+        e1 = v.radar_calibration.entries[1]
+        @test e1.pulse_width ≈ 1.0e-6 atol = 1e-9
+        @test e1.xmit_power_h ≈ 70.0 atol = 1e-4
+        @test e1.noise_hc ≈ -75.0 atol = 1e-4
+        @test e1.receiver_gain_hc ≈ 40.0 atol = 1e-4
+        @test e1.zdr_correction ≈ 0.1 atol = 1e-4
+        @test e1.time == DateTime(2024, 9, 3, 15, 0, 0)
+        @test v.radar_calibration.entries[2].xmit_power_h ≈ 70.5 atol = 1e-4
+
+        # Radar parameters parsed (_read_radar_parameters)
+        @test v.radar_parameters !== nothing
+        @test v.radar_parameters.antenna_gain_h ≈ 45.0 atol = 1e-6
+        @test v.radar_parameters.beam_width_h ≈ 1.0 atol = 1e-6
+        @test v.radar_parameters.receiver_bandwidth ≈ 1.0e6 atol = 1e-1
+
+        # Georeference correction parsed (_read_georeference_correction)
+        @test v.georeference_correction !== nothing
+        @test v.georeference_correction.azimuth_correction ≈ 0.5 atol = 1e-4
+        @test v.georeference_correction.elevation_correction ≈ -0.25 atol = 1e-4
+        @test v.georeference_correction.roll_correction ≈ 0.1 atol = 1e-4
+
+        rm(tmp)
+    end
 end

@@ -94,6 +94,78 @@ end
         rm(src); rm(tmp)
     end
 
+    @testset "synthetic v2 round-trip" begin
+        # Read a fully-populated synthetic v2 file into a Volume, augment each
+        # sweep with a georeference carrying `georefs_applied` (set explicitly so
+        # the test is robust to the source), and write it back
+        # with `write_extras=true`. This exercises writer paths the minimal
+        # synthetic volume skips and that are otherwise only hit by the gitignored
+        # real fixtures: volume-level `extra_attrs`, per-field metadata
+        # `extra_attrs`, the `radar_monitoring` group, and `georefs_applied`.
+        src = tempname() * ".nc"
+        build_synthetic_cfradial_v2(src; n_sweeps = 2, rays_per_sweep = 4,
+                                    n_gates = 5, field_names = ["DBZ", "VEL"])
+        v = read_cfradial(src)
+
+        # Source Volume is rich: volume-level + per-field extras and monitoring.
+        @test haskey(v.extra_attrs, "non_spec_attr")
+        @test haskey(v.sweeps[1].fields["DBZ"].metadata.extra_attrs, "custom_field_attr")
+        @test v.sweeps[1].radar_monitoring !== nothing
+
+        # Inject a georeference (with georefs_applied) into every sweep so the
+        # writer's georeference/georefs_applied path runs on write.
+        newsweeps = SweepGroup[]
+        for s in v.sweeps
+            n = length(s.time)
+            geo = Georeference(
+                latitude = fill(v.latitude, n),
+                longitude = fill(v.longitude, n),
+                altitude = fill(v.altitude, n),
+                heading = fill(90.0, n),
+                georefs_applied = fill(true, n),
+            )
+            kw = Dict(f => getfield(s, f) for f in fieldnames(SweepGroup))
+            kw[:georeference] = geo
+            push!(newsweeps, SweepGroup(; kw...))
+        end
+        vkw = Dict(f => getfield(v, f) for f in fieldnames(Volume))
+        vkw[:sweeps] = newsweeps
+        vw = Volume(; vkw...)
+
+        tmp = tempname() * ".nc"
+        write_cfradial(vw, tmp; write_extras = true)
+        @test isfile(tmp)
+
+        # Round-trip read: georeference, monitoring, and extras all survive.
+        rt = read_cfradial(tmp)
+        @test length(rt.sweeps) == length(vw.sweeps)
+        @test haskey(rt.extra_attrs, "non_spec_attr")                       # volume extra_attrs written
+        @test haskey(rt.sweeps[1].fields["DBZ"].metadata.extra_attrs,
+                     "custom_field_attr")                                   # per-field extra_attrs written
+        @test rt.sweeps[1].radar_monitoring !== nothing                     # radar_monitoring group written
+        @test all(≈(70.0), rt.sweeps[1].radar_monitoring.measured_transmit_power_h)
+        @test rt.sweeps[1].georeference !== nothing                         # georeference survived (v2 reader fix)
+        @test length(rt.sweeps[1].georeference.latitude) == length(rt.sweeps[1].time)
+        # Fill/sentinel semantics preserved across the round-trip
+        dbz = rt.sweeps[1].fields["DBZ"].data
+        @test isnan(dbz[1, 1])
+        @test dbz[1, 2] ≈ -9999.0 atol = 1e-3
+        for fname in keys(vw.sweeps[1].fields)
+            @test haskey(rt.sweeps[1].fields, fname)
+        end
+
+        # Also inspect the raw NetCDF to confirm the writer emitted the
+        # georeference sub-group + georefs_applied.
+        NCDatasets.NCDataset(tmp, "r") do nc
+            g1 = nc.group["sweep_0001"]
+            @test haskey(g1.group, "georeference")
+            @test haskey(g1.group["georeference"], "georefs_applied")
+            @test haskey(g1.group, "radar_monitoring")
+        end
+
+        rm(src); rm(tmp)
+    end
+
     @testset "real-fixture v2 round-trip" begin
         if !isfile(FIXTURE_V2)
             @info "Skipping v2 round-trip (fixture absent)"
