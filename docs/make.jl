@@ -20,6 +20,7 @@ makedocs(
             "guide/spectral_gridding.md",
             "guide/wind_synthesis.md",
             "guide/echo_products.md",
+            "guide/hybrid_scan.md",
             "guide/srtm.md",
         ],
         "Theory" => [
@@ -36,6 +37,7 @@ makedocs(
             "api/spectral_gridding.md",
             "api/wind_synthesis.md",
             "api/echo_products.md",
+            "api/hybrid_scan.md",
             "api/srtm.md",
         ],
     ],

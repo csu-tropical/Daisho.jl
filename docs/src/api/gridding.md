@@ -54,6 +54,7 @@ Daisho.write_gridded_radar_volume
 Daisho.write_gridded_radar_rhi
 Daisho.write_gridded_radar_ppi
 Daisho.write_gridded_radar_column
+Daisho.write_gridded_fields_2d
 Daisho.read_gridded_radar
 Daisho.read_gridded_ppi
 Daisho.read_gridded_rhi
