@@ -613,6 +613,68 @@ Base.@kwdef struct EchoProductsParameters
 end
 
 """
+    HybridScanParameters
+
+Configuration for the hybrid-scan product, loaded from the optional
+`[hybrid_scan]` block. A hybrid scan collapses a set of same-time gridded PPI
+tilts into one near-surface 2-D field set: it starts from a base (lowest) tilt
+and, wherever that tilt has no measurement, looks upward through the higher tilts
+and takes the first one whose beam is still below `beam_height_maximum` at that
+cell. See [`apply_hybrid_scan`](@ref) and [`build_hybrid_scan`](@ref).
+
+It runs *after* the `[echo]` products, since the fields it usually carries
+(blended rain rate, hydrometeor ID) are echo outputs.
+
+# Fields
+- `enabled::Bool`: master switch; when `false` the drivers skip the product.
+- `fields::Vector{String}`: which gridded fields to carry through the selection.
+  Empty (the default) means *every* field present in the tilt files, which keeps
+  the output a drop-in gridded PPI that the existing readers and plotters accept.
+- `select_field::String`: the field whose validity decides the selection at each
+  cell — the hybrid-scan analogue of the `define_detection` tag.
+- `base_angle::Union{Float64,Nothing}`: preferred base tilt in degrees. When the
+  configured angle is not among the available tilts (or is `nothing`), the lowest
+  available tilt is used instead.
+- `base_angle_tolerance::Float64`: how close (degrees) an available tilt must be
+  to `base_angle` to count as it.
+- `beam_height_maximum::Float64`: inclusion limit in metres. A tilt above the base
+  may only supply a cell where its beam height there is at or below this. The base
+  tilt itself is never height-limited — it is the best available look by definition.
+- `radar_altitude::Float64`: antenna height in metres, used by the geometric
+  beam-height fallback.
+- `require_detection::Bool`: what counts as a tilt having *answered* a cell, applied
+  identically at the base tilt and at the tilts above it. `false` (default): any
+  non-`fill_value` reading answers, so a tilt reporting `undetect` has observed clear
+  air and ends the search — the product is the lowest measurement of any kind. `true`:
+  only a real detection answers, so the search climbs past clear air looking for echo,
+  reproducing the original PICCOLO script.
+- `height_field::String`: name of a gridded beam-height field (e.g. one tagged
+  `beam_height`). When set and present in a tilt, it supplies that tilt's per-cell
+  heights in preference to the geometric fallback.
+- `elevation_output::String`: output variable recording which tilt supplied each
+  cell. Empty suppresses it.
+- `height_output::String`: output variable recording the selected beam height.
+  Empty (default) suppresses it.
+- `angle_pattern::String`: fallback regular expression, with one capture group, for
+  recovering a tilt angle from a gridded PPI *filename* when the file predates the
+  `fixed_angle` variable Daisho now writes. Empty (default) means attribute only.
+"""
+Base.@kwdef struct HybridScanParameters
+    enabled::Bool                        = false
+    fields::Vector{String}               = String[]
+    select_field::String                 = "DBZ"
+    base_angle::Union{Float64,Nothing}   = nothing
+    base_angle_tolerance::Float64        = 0.05
+    beam_height_maximum::Float64         = 1000.0
+    radar_altitude::Float64              = 0.0
+    require_detection::Bool              = false
+    height_field::String                 = ""
+    elevation_output::String             = "elevation_angle"
+    height_output::String                = ""
+    angle_pattern::String                = ""
+end
+
+"""
     DaishoParameters
 
 Top-level immutable runtime configuration loaded from a TOML file. Construct
@@ -655,6 +717,7 @@ struct DaishoParameters
     io::IOParameters
     synthesis::SynthesisParameters
     echo::EchoProductsParameters
+    hybrid_scan::HybridScanParameters
     provided::Set{Symbol}
 end
 
@@ -665,7 +728,7 @@ DaishoParameters(moments::MomentParameters, qc::QCParameters,
                  gridding::GriddingParameters, grid::GridParameters,
                  io::IOParameters, provided::Set{Symbol}) =
     DaishoParameters(moments, qc, gridding, grid, io, SynthesisParameters(),
-                     EchoProductsParameters(), provided)
+                     EchoProductsParameters(), HybridScanParameters(), provided)
 
 # Back-compat convenience for callers built before the `[echo]` block existed
 # (seven positional args ending …, synthesis, provided). Inject a default
@@ -675,7 +738,16 @@ DaishoParameters(moments::MomentParameters, qc::QCParameters,
                  io::IOParameters, synthesis::SynthesisParameters,
                  provided::Set{Symbol}) =
     DaishoParameters(moments, qc, gridding, grid, io, synthesis,
-                     EchoProductsParameters(), provided)
+                     EchoProductsParameters(), HybridScanParameters(), provided)
+
+# Back-compat convenience for callers built before the `[hybrid_scan]` block
+# existed (eight positional args ending …, echo, provided).
+DaishoParameters(moments::MomentParameters, qc::QCParameters,
+                 gridding::GriddingParameters, grid::GridParameters,
+                 io::IOParameters, synthesis::SynthesisParameters,
+                 echo::EchoProductsParameters, provided::Set{Symbol}) =
+    DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo,
+                     HybridScanParameters(), provided)
 
 # ── Loader ───────────────────────────────────────────────────────────────────
 
@@ -703,7 +775,7 @@ DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 # numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
     provided = Set{Symbol}()
-    for s in (:qc, :gridding, :grid, :synthesis, :echo)
+    for s in (:qc, :gridding, :grid, :synthesis, :echo, :hybrid_scan)
         haskey(d, string(s)) && push!(provided, s)
     end
 
@@ -714,7 +786,8 @@ function DaishoParameters(d::AbstractDict)
     io        = _io_from_dict(_section(d, "io"))
     synthesis = haskey(d, "synthesis") ? _synthesis_from_dict(d["synthesis"])                   : SynthesisParameters()
     echo      = haskey(d, "echo")      ? _echo_from_dict(d["echo"])                             : EchoProductsParameters()
-    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, provided)
+    hybrid    = haskey(d, "hybrid_scan") ? _hybrid_scan_from_dict(d["hybrid_scan"])             : HybridScanParameters()
+    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, hybrid, provided)
 end
 
 """
@@ -1078,6 +1151,55 @@ function _echo_from_dict(d::AbstractDict)
         end
     end
     return dp
+end
+
+# Build HybridScanParameters from the optional `[hybrid_scan]` block. Every key
+# defaults when absent; unknown keys raise to catch typos, matching the rest of
+# the loader.
+function _hybrid_scan_from_dict(d::AbstractDict)
+    allowed_fields = (:enabled, :fields, :select_field, :base_angle,
+        :base_angle_tolerance, :beam_height_maximum, :radar_altitude,
+        :require_detection, :height_field, :elevation_output, :height_output,
+        :angle_pattern)
+    unknown = setdiff(Set(Symbol.(keys(d))), Set(allowed_fields))
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[hybrid_scan]`. " *
+        "Allowed keys: $(join(allowed_fields, ", "))"))
+
+    kw = Dict{Symbol,Any}()
+    for f in allowed_fields
+        sk = String(f)
+        haskey(d, sk) || continue
+        kw[f] = f === :fields ? String.(d[sk]) : _coerce_field(HybridScanParameters, f, d[sk])
+    end
+
+    hp = HybridScanParameters(; kw...)
+
+    isempty(hp.select_field) && throw(ArgumentError(
+        "`[hybrid_scan]` select_field must name the field whose validity drives " *
+        "the tilt selection (e.g. \"DBZ\"); it cannot be empty."))
+    hp.beam_height_maximum > 0.0 || throw(ArgumentError(
+        "`[hybrid_scan]` beam_height_maximum = $(hp.beam_height_maximum) must be " *
+        "positive (metres above the radar)."))
+    hp.base_angle_tolerance >= 0.0 || throw(ArgumentError(
+        "`[hybrid_scan]` base_angle_tolerance = $(hp.base_angle_tolerance) must be " *
+        "non-negative (degrees)."))
+    if !isempty(hp.angle_pattern)
+        try
+            Regex(hp.angle_pattern)
+        catch e
+            throw(ArgumentError(
+                "`[hybrid_scan]` angle_pattern is not a valid regular expression: " *
+                sprint(showerror, e)))
+        end
+    end
+    if !isempty(hp.fields) && !(hp.select_field in hp.fields)
+        throw(ArgumentError(
+            "`[hybrid_scan]` select_field \"$(hp.select_field)\" must be one of " *
+            "the carried `fields` ($(join(hp.fields, ", "))), otherwise the " *
+            "selected cells would not appear in the output."))
+    end
+    return hp
 end
 
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;

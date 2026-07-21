@@ -321,3 +321,40 @@ T  = 0.4
 [echo.temperature]
 heights      = [0.0,  1000.0, 3000.0, 5000.0, 10000.0, 15000.0]
 temperatures = [25.0, 18.0,    5.0,   -8.0,   -40.0,   -70.0]
+
+# Hybrid scan: collapse a set of same-time gridded PPI tilts into one near-surface
+# 2-D product. Starts from the base (lowest) tilt and, wherever that tilt has no
+# measurement, looks upward through the higher tilts, taking the first whose beam
+# is still at or below beam_height_maximum at that cell. Runs AFTER [echo], since
+# the fields it usually carries (rain rate, HID) are echo outputs.
+[hybrid_scan]
+enabled              = false        # master switch
+# Fields carried through the selection. Empty = every field present in the tilts,
+# which keeps the output a drop-in gridded PPI for the readers and plotters.
+fields               = []
+select_field         = "DBZ"        # field whose validity decides the selection
+# Preferred base tilt in degrees. Comment out (or set no value) to always use the
+# lowest tilt available in the set; when the configured angle is absent from a
+# given set, the lowest available tilt is used instead.
+base_angle           = 0.5
+base_angle_tolerance = 0.05         # degrees; how close a tilt must be to count as base_angle
+beam_height_maximum  = 1000.0       # metres; a tilt above the base may only fill cells at or below this
+radar_altitude       = 0.0          # metres; antenna height for the geometric beam-height fallback
+# What counts as a tilt having ANSWERED a cell -- applied the same way at the base tilt
+# and at the tilts above it, so the search always stops at the lowest tilt with an answer.
+#   false: any non-fill_value reading answers, so a tilt reporting undetect has observed
+#          clear air and ends the search (the lowest measurement of any kind).
+#   true:  only a real detection answers, so the search climbs past clear air looking
+#          for echo (the lowest rain).
+require_detection    = false
+# Gridded beam-height field (e.g. a field tagged beam_height). When set and present
+# it supplies per-tilt heights in preference to the geometric fallback.
+height_field         = ""
+# Output variable names ("" suppresses):
+elevation_output     = "elevation_angle"   # which tilt supplied each cell
+height_output        = ""                  # beam height of the selected tilt
+# Fallback regex (one capture group) recovering the tilt angle from a gridded PPI
+# filename, for archives written before Daisho stored `fixed_angle` in the file.
+# Empty = read the file's fixed_angle only. Example for gridded_ppi_..._0.5.nc:
+# angle_pattern      = "_([0-9]+\\.[0-9]+)\\.nc$"
+angle_pattern        = ""
