@@ -541,10 +541,23 @@ function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, 
         radar_volume, moment_dict, grid_type_dict, h_roi, power_threshold, missing_key, valid_key;
         beam_width = radar_volume.beam_width)
 
+    # The legacy `radar` struct has no per-sweep fixed angle; a PPI is a single tilt,
+    # so the mean ray elevation is the sweep angle.
     write_gridded_radar_ppi(output_file, index_time, radar_volume,
         gridpoints, radar_grid, latlon_grid, moment_dict,
-        reference_latitude, reference_longitude, heading, metadata)
+        reference_latitude, reference_longitude, heading, metadata;
+        fixed_angle = _mean_elevation(radar_volume))
 
+end
+
+# Mean ray elevation of a legacy `radar` volume, or `nothing` when unavailable.
+function _mean_elevation(radar_volume)
+    hasproperty(radar_volume, :elevation) || return nothing
+    els = radar_volume.elevation
+    (els === nothing || isempty(els)) && return nothing
+    finite = filter(isfinite, Float64.(els))
+    isempty(finite) && return nothing
+    return sum(finite) / length(finite)
 end
 
 """
@@ -1763,8 +1776,15 @@ Also used for writing composite grids. Any pre-existing file at the output path 
 - `reference_longitude::AbstractFloat`: Longitude of the projection origin (degrees).
 - `mean_heading::AbstractFloat`: Mean platform heading in degrees.
 - `metadata::MetadataParameters`: CF-1.12 global attributes. The PPI writer also injects `scan_name` from `radar_volume`. Defaults to `MetadataParameters()`.
+
+# Keywords
+- `fixed_angle`: the sweep's fixed elevation angle in degrees, written as both a global
+  attribute and a scalar `fixed_angle` variable. Pass `nothing` (the default) when the
+  angle is not meaningful — a composite spans every elevation, and so does a multi-sweep
+  PPI grid. Downstream products that select by tilt (see [`build_hybrid_scan`](@ref))
+  read this back, so a single-sweep PPI grid should always set it.
 """
-function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0)
+function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, radar_grid, latlon_grid, moment_dict, reference_latitude::AbstractFloat, reference_longitude::AbstractFloat, mean_heading::AbstractFloat, metadata::MetadataParameters=MetadataParameters(); fill_value::Real=-32768.0, undetect::Real=-9999.0, fixed_angle::Union{Real,Nothing}=nothing)
 
     # Delete any pre-existing file
     rm(file, force=true)
@@ -1773,8 +1793,9 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     stop_time = radar_volume.time[end]
     scan_name = radar_volume.scan_name
 
-    ds = NCDataset(file, "c",
-        attrib = _global_attrib_dict(metadata; extra=["scan_name" => scan_name]))
+    extra = Pair{String,Any}["scan_name" => scan_name]
+    fixed_angle === nothing || push!(extra, "fixed_angle" => Float32(fixed_angle))
+    ds = NCDataset(file, "c", attrib = _global_attrib_dict(metadata; extra=extra))
 
     # Dimensions
     # Could concatenate multiple volumes here
@@ -1847,6 +1868,17 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
         "units"                     => "degrees",
     ))
 
+    # Scalar sweep geometry, so a single-sweep PPI grid is self-describing about the
+    # tilt it came from (the global attribute above carries the same value).
+    if fixed_angle !== nothing
+        ncfixed = defVar(ds, "fixed_angle", Float32, (), attrib = OrderedDict(
+            "standard_name"         => "fixed_angle",
+            "long_name"             => "fixed_angle_for_sweep",
+            "units"                 => "degrees",
+        ))
+        ncfixed[:] = Float32(fixed_angle)
+    end
+
     # Using start time for now, but eventually need to use some reference time
     # time-dimensioned variables use explicit index 1 to grow the unlimited dim
     nctime[1] = datetime2unix(index_time)
@@ -1878,6 +1910,100 @@ function write_gridded_radar_ppi(file, index_time, radar_volume, gridpoints, rad
     end
 
     close(ds)
+end
+
+# Coordinate scaffolding shared by every 2-D X/Y gridded product, as
+# (variable name, dimension names). Copied verbatim from a template file by
+# `write_gridded_fields_2d`. `fixed_angle` is deliberately absent: a derived
+# product spans more than one sweep and must not claim a single tilt.
+const _GRID2D_SCAFFOLD = (
+    ("time",         ("time",)),
+    ("start_time",   ("time",)),
+    ("stop_time",    ("time",)),
+    ("X",            ("X",)),
+    ("Y",            ("Y",)),
+    ("latitude",     ("X", "Y", "time")),
+    ("longitude",    ("X", "Y", "time")),
+    ("grid_mapping", ()),
+    ("heading",      ("time",)),
+)
+
+"""
+    write_gridded_fields_2d(output_file, template_file, fields, metadata=MetadataParameters();
+                            index_time=nothing, fill_value=-32768.0, undetect=-9999.0,
+                            extra_attrib=Pair{String,Any}[])
+
+Write a derived 2-D X/Y product to a CF-1.12 NetCDF file, taking its coordinate
+scaffolding — `X`, `Y`, `latitude`, `longitude`, `time`, `start_time`, `stop_time`,
+`grid_mapping` and `heading` — verbatim from an existing gridded PPI/composite file
+`template_file`, and writing each entry of `fields` (name → `(xdim, ydim)` array) as
+an `(X, Y, time)` `Float32` variable.
+
+Variable attributes come from `variable_attrib_dict` (falling back to `"UNKNOWN"`)
+with the `[io]` sentinels applied, exactly as the gridding writers do. The result is
+layout-identical to a gridded PPI, so [`read_gridded_ppi`](@ref) and the plotting
+steps consume it unchanged.
+
+`index_time` overrides the template's `time` value; `nothing` keeps the template's.
+Any pre-existing `output_file` is deleted first.
+
+Used by [`build_hybrid_scan`](@ref); reusable by any future post-gridding 2-D product.
+"""
+function write_gridded_fields_2d(output_file::AbstractString, template_file::AbstractString,
+        fields::AbstractDict, metadata::MetadataParameters=MetadataParameters();
+        index_time=nothing, fill_value::Real=-32768.0, undetect::Real=-9999.0,
+        extra_attrib=Pair{String,Any}[])
+
+    rm(output_file, force=true)
+
+    NCDataset(template_file) do src
+        for name in ("X", "Y")
+            haskey(src.dim, name) || throw(ArgumentError(
+                "write_gridded_fields_2d: template $template_file has no `$name` " *
+                "dimension; it must be a 2-D gridded PPI/composite file."))
+        end
+        xdim = src.dim["X"]
+        ydim = src.dim["Y"]
+        for (name, arr) in fields
+            size(arr) == (xdim, ydim) || throw(ArgumentError(
+                "write_gridded_fields_2d: field \"$name\" is $(size(arr)) but the " *
+                "template grid is ($xdim, $ydim)."))
+        end
+
+        ds = NCDataset(output_file, "c",
+            attrib = _global_attrib_dict(metadata; extra=extra_attrib))
+        try
+            ds.dim["time"] = Inf   # unlimited, so outputs stay concatenable
+            ds.dim["X"] = xdim
+            ds.dim["Y"] = ydim
+
+            for (name, dims) in _GRID2D_SCAFFOLD
+                haskey(src, name) || continue
+                sv = src[name].var
+                v = defVar(ds, name, eltype(sv), dims;
+                           attrib = OrderedDict(src[name].attrib))
+                if isempty(dims)
+                    v[:] = sv[]
+                else
+                    raw = Array(sv)
+                    v[ntuple(k -> 1:size(raw, k), ndims(raw))...] = raw
+                end
+            end
+            index_time === nothing || (ds["time"][1] = datetime2unix(index_time))
+
+            for name in sort!(collect(keys(fields)))
+                attrib = haskey(variable_attrib_dict, name) ?
+                    merge(common_attrib, variable_attrib_dict[name]) :
+                    merge(common_attrib, variable_attrib_dict["UNKNOWN"])
+                attrib = _with_io_sentinels(attrib, fill_value, undetect)
+                v = defVar(ds, name, Float32, ("X", "Y", "time"), attrib = attrib)
+                v[:, :, 1] = Float32.(fields[name])
+            end
+        finally
+            close(ds)
+        end
+    end
+    return output_file
 end
 
 """
@@ -2496,10 +2622,14 @@ function grid_radar_ppi(volume::Volume, output_file::AbstractString,
     radar_grid = finalize_grid(accum)
     latlon_grid = _compute_latlon_grid(spec)
     gridpoints = _gridpoints_ppi_array(spec)
+    # A PPI grid built from exactly one sweep can name its tilt; a multi-sweep PPI
+    # spans several and must not claim one.
+    fixed_angle = length(volume.sweeps) == 1 ? volume.sweeps[1].fixed_angle : nothing
     write_gridded_radar_ppi(output_file, index_time, _writer_radar_stub(volume),
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
-        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
+        p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect,
+        fixed_angle=fixed_angle)
     _maybe_add_echo_products(output_file, p)
     return accum
 end

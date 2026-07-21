@@ -146,6 +146,19 @@ height_attrib = OrderedDict(
     "units"                     => "m",
 )
 
+# Hybrid-scan outputs: which tilt supplied each cell, and how high that beam was.
+elevation_angle_attrib = OrderedDict(
+    "standard_name"             => "elevation_angle",
+    "long_name"                 => "Elevation angle of the selected sweep",
+    "units"                     => "degrees",
+)
+
+hybrid_height_attrib = OrderedDict(
+    "standard_name"             => "height",
+    "long_name"                 => "Beam height of the selected sweep",
+    "units"                     => "m",
+)
+
 # Level 1 variables
 dbz_l1_attrib = OrderedDict(
         "standard_name"             => "DBZ_L1",
@@ -224,5 +237,7 @@ variable_attrib_dict["PID_FOR_QC"] = pid_qc_attrib
 variable_attrib_dict["HID_CSU"] = hid_attrib
 variable_attrib_dict["TEMP_FOR_PID"] = temp_for_pid_attrib
 variable_attrib_dict["HEIGHT"] = height_attrib
+variable_attrib_dict["elevation_angle"] = elevation_angle_attrib
+variable_attrib_dict["HYBRID_HEIGHT"] = hybrid_height_attrib
 variable_attrib_dict["UNKNOWN"] = unknown_attrib
 
