@@ -34,4 +34,5 @@ include("test_helpers.jl")
     include("test_fhc.jl")
     include("test_rainrate.jl")
     include("test_echo_products.jl")
+    include("test_hybrid_scan.jl")
 end

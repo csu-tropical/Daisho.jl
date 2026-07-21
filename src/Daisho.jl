@@ -29,6 +29,7 @@ include("gridding.jl")
 include("fhc.jl")
 include("rainrate.jl")
 include("echo_products.jl")
+include("hybrid_scan.jl")
 include("springsteel_adapter.jl")
 
 # Runtime parameter system exports
@@ -74,5 +75,8 @@ export calc_rain_zr, calc_rain_kdp, calc_rain_kdp_zdr, calc_rain_z_zdr
 export TemperatureProfile, read_temperature_profile, temperature_celsius
 export EchoProductsParameters
 export apply_echo_products, add_echo_products!, echo_output_names
+export HybridScanParameters
+export apply_hybrid_scan, build_hybrid_scan, hybrid_scan_output_names
+export hybrid_beam_heights, hybrid_scan_tilt_angle
 
 end # module Daisho
