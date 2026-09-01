@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Echo products on 1-D column (QVP) grids
+
+`grid_radar_column` now runs the `[echo]` products (hydrometeor ID, rain rate)
+like every other geometry — both the `Volume`/accumulator and the legacy `radar`
+overloads previously wrote the column grid and silently skipped the echo hook, so
+a quasi-vertical profile came out with no rain rate and no error.
+
+`add_echo_products!` correspondingly accepts the 1-D column layout (a `Z`
+dimension with no `X`/`Y`/`R`), alongside the existing `X,Y,Z`, `R,Z` and `X,Y`
+layouts. Because a column's only axis is its z-axis, `temp_source = "profile"`
+samples the `[echo.temperature]` profile directly with no `height_field` needed.
+
 ### Fields-API gridded readers
 
 `read_gridded_rhi` / `read_gridded_ppi` / `read_gridded_radar` gain a

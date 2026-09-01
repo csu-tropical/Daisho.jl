@@ -18,8 +18,8 @@ part of `[fields]`; the gridded readers know to surface them via
 
 **1. Inline, as part of gridding (recommended).** Add an `[echo]` block with
 `enabled = true` and grid as usual — the products are appended to the output
-NetCDF automatically for every geometry (volume, lat/lon, PPI, RHI) and for the
-accumulator path:
+NetCDF automatically for every geometry (volume, lat/lon, PPI, RHI, 1-D column /
+QVP) and for the accumulator path:
 
 ```julia
 p = DaishoParameters("mygrid.toml")          # [echo] enabled = true
@@ -29,9 +29,9 @@ grid_radar_volume(volume, "out.nc", volume.time_coverage_start, p)
 ```
 
 **2. Standalone, reprocessing existing grids.** Append products in place to one
-or more already-written Daisho grids (single- or multi-time; volume / PPI / RHI)
-with [`add_echo_products!`](@ref Daisho.add_echo_products!) — no regridding
-required:
+or more already-written Daisho grids (single- or multi-time; volume / PPI / RHI /
+column) with [`add_echo_products!`](@ref Daisho.add_echo_products!) — no
+regridding required:
 
 ```julia
 p = DaishoParameters("mygrid.toml")
@@ -104,9 +104,10 @@ temperatures = [25.0, 18.0,    5.0,   -8.0,   -40.0,   -70.0]
 ```
 
 - **`"profile"`** samples the `[echo.temperature]` `T(z)` profile at each cell's
-  height. On a 3-D grid the grid z-axis is used directly. On a **2-D PPI/RHI**
-  grid (no Z axis), set `height_field` to a gridded beam-height field (e.g.
-  `"HEIGHT"`) so the profile can be sampled per cell. See
+  height. On a 3-D grid — and on a **1-D column/QVP** grid, whose only axis *is*
+  the z-axis — the grid z-axis is used directly, so no extra configuration is
+  needed. On a **2-D PPI/RHI** grid (no Z axis), set `height_field` to a gridded
+  beam-height field (e.g. `"HEIGHT"`) so the profile can be sampled per cell. See
   [`TemperatureProfile`](@ref Daisho.TemperatureProfile) and
   [`read_temperature_profile`](@ref Daisho.read_temperature_profile).
 - **`"field"`** uses a gridded temperature field directly (per cell, may be 3-D),

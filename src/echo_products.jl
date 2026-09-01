@@ -272,9 +272,9 @@ end
 
 Compute the echo products (per `p.echo`) for an already-written Daisho
 gridded NetCDF `file` and append them as new variables in place. Supports 3-D
-volume (`X,Y,Z`), 2-D PPI/composite (`X,Y`) and 2-D RHI (`R,Z`) layouts, and
-loops over the `time` dimension for concatenated multi-time files. Returns the
-names of the variables written.
+volume (`X,Y,Z`), 2-D PPI/composite (`X,Y`), 2-D RHI (`R,Z`) and 1-D column/QVP
+(`Z`) layouts, and loops over the `time` dimension for concatenated multi-time
+files. Returns the names of the variables written.
 
 The standalone counterpart to the in-grid hook: useful for reprocessing archived
 grids or applying updated coefficients without regridding.
@@ -301,9 +301,15 @@ function add_echo_products!(file::AbstractString, p::DaishoParameters)
             spatial = ("X", "Y")
             z_axis = nothing
             zdim_local = 0
+        elseif has("Z")
+            # 1-D vertical column (QVP): a single profile over the Z axis. Checked
+            # last so it cannot shadow the X/Y/Z or R/Z layouts above.
+            spatial = ("Z",)
+            z_axis = Float64.(ds["Z"][:])
+            zdim_local = 1
         else
             throw(ArgumentError("add_echo_products!: unrecognized grid layout " *
-                "(dims: $(join(collect(dimnames), ", "))); expected X/Y/Z, R/Z, or X/Y."))
+                "(dims: $(join(collect(dimnames), ", "))); expected X/Y/Z, R/Z, X/Y, or Z."))
         end
         ntime = has("time") ? ds.dim["time"] : 1
         spatial_dims = Tuple(ds.dim[d] for d in spatial)

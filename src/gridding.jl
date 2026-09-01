@@ -2544,6 +2544,7 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
         g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk,
         p.grid.metadata)
+    _maybe_add_echo_products(output_file, p)
 end
 
 # ── Volume-aware overloads (accumulator path) ────────────────────────────────
@@ -2668,6 +2669,7 @@ function grid_radar_column(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
         fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _maybe_add_echo_products(output_file, p)
     return accum
 end
 

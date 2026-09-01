@@ -139,6 +139,91 @@ end
         end
     end
 
+    @testset "1-D column (QVP) grid" begin
+        io = IOParameters()
+        nz = 4
+        z_axis = [500.0, 1000.0, 1500.0, 2000.0]
+        dbz = fill(40.0f0, nz)
+        dbz[1] = Float32(io.fill_value)   # true missing
+        dbz[2] = Float32(io.undetect)     # clear air
+        fields = Dict{String,Any}(
+            "DBZ" => dbz,
+            "ZDR" => fill(1.0f0, nz),
+            "KDP" => fill(1.5f0, nz),
+            "RHOHV" => fill(0.98f0, nz))
+        dp = Daisho.EchoProductsParameters(enabled = true, band = "S",
+            rain_components = ["RATE_Z", "RATE_KDP"], use_temp = true,
+            temperature = TemperatureProfile([0.0, 5000.0], [20.0, -20.0]))
+        # A 1-D column's height array is just its z-axis.
+        heights = Daisho._heights_array((nz,), z_axis, 1)
+        @test heights == z_axis
+
+        out = apply_echo_products(fields, dp; io = io, heights = heights)
+        for name in ("HID_CSU", "RATE_CSU_BLENDED", "RATE_Z", "RATE_KDP")
+            @test haskey(out, name)
+            @test size(out[name]) == (nz,)
+            @test eltype(out[name]) == Float32
+            @test out[name][1] == Float32(io.fill_value)   # missing stays missing
+            @test out[name][2] == Float32(io.undetect)     # clear air stays undetect
+        end
+        @test 1 <= out["HID_CSU"][3] <= FHC_N_TYPES
+        @test isfinite(out["RATE_CSU_BLENDED"][3]) && out["RATE_CSU_BLENDED"][3] >= 0
+
+        # End-to-end through the column driver: regression for the driver that
+        # wrote the grid but silently skipped the echo hook.
+        v = synthetic_volume(n_sweeps = 2, n_rays = 24, n_gates = 6,
+                             fields = ["DBZ", "ZDR", "KDP", "RHOHV", "SQI"])
+        p_on = _echo_test_params(enabled = true)
+        p_off = _echo_test_params(enabled = false)
+        zdim = p_on.grid.column.zdim
+        f_inline = tempname() * "_col_inline.nc"
+        f_standalone = tempname() * "_col_standalone.nc"
+        try
+            Daisho.grid_radar_column(v, f_inline, v.time_coverage_start, p_on)
+            NCDataset(f_inline) do ds
+                for name in echo_output_names(p_on.echo)
+                    @test haskey(ds, name)
+                    @test NCDatasets.dimnames(ds[name]) == ("Z", "time")
+                    @test size(ds[name]) == (zdim, 1)
+                end
+                @test ds["RATE_CSU_BLENDED"].attrib["units"] == "mm/hr"
+            end
+
+            # Appending standalone onto an echo-free column grid reproduces it.
+            Daisho.grid_radar_column(v, f_standalone, v.time_coverage_start, p_off)
+            NCDataset(f_standalone) do ds
+                @test !haskey(ds, "RATE_CSU_BLENDED")
+            end
+            written = add_echo_products!(f_standalone, p_on)
+            @test "HID_CSU" in written && "RATE_CSU_BLENDED" in written
+            NCDataset(f_inline) do a
+                NCDataset(f_standalone) do b
+                    for name in echo_output_names(p_on.echo)
+                        @test isequal(Array(a[name].var), Array(b[name].var))
+                    end
+                end
+            end
+        finally
+            isfile(f_inline) && rm(f_inline)
+            isfile(f_standalone) && rm(f_standalone)
+        end
+    end
+
+    @testset "unrecognized grid layout still errors" begin
+        f = tempname() * "_badlayout.nc"
+        try
+            NCDataset(f, "c") do ds
+                ds.dim["X"] = 3
+                defVar(ds, "X", Float32, ("X",))[:] = [0.0, 1000.0, 2000.0]
+                defVar(ds, "DBZ", Float32, ("X",))[:] = fill(30.0f0, 3)
+            end
+            p = _echo_test_params(enabled = true)
+            @test_throws ArgumentError add_echo_products!(f, p)
+        finally
+            isfile(f) && rm(f)
+        end
+    end
+
     @testset "multi-time concatenated file (loops over time)" begin
         io = IOParameters()
         nx, ny, nz, nt = 4, 3, 2, 2
