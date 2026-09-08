@@ -198,6 +198,11 @@ end
 _f64_or(x, default) = (x === nothing || ismissing(x)) ? default : Float64(x)
 _f64_or_nothing(x) = (x === nothing || ismissing(x)) ? nothing : Float64(x)
 _int_or(x, default::Int=0) = (x === nothing || ismissing(x)) ? default : Int(x)
+# The string forms matter as much as the numeric ones: `_to_string(missing)`
+# quietly yields the literal "missing" rather than falling back to the default.
+_str_or(x, default::AbstractString) =
+    (x === nothing || ismissing(x)) ? String(default) : _to_string(x)
+_str_or_nothing(x) = (x === nothing || ismissing(x)) ? nothing : _to_string(x)
 
 function _to_bool_vec(x)
     x === nothing && return nothing
@@ -495,19 +500,19 @@ function _read_cfradial2(ds, file)
     time_end = _parse_iso8601(tce)
 
     volume_number = _readscalar(ds, "volume_number")
-    volume_number_v = volume_number === nothing ? 0 : Int(volume_number)
+    volume_number_v = _int_or(volume_number, 0)
     platform_type = _readscalar(ds, "platform_type")
-    platform_type_v = platform_type === nothing ? "fixed" : _to_string(platform_type)
+    platform_type_v = _str_or(platform_type, "fixed")
     instrument_type = _readscalar(ds, "instrument_type")
-    instrument_type_v = instrument_type === nothing ? "radar" : _to_string(instrument_type)
+    instrument_type_v = _str_or(instrument_type, "radar")
     primary_axis = _readscalar(ds, "primary_axis")
-    primary_axis_v = primary_axis === nothing ? "axis_z" : _to_string(primary_axis)
+    primary_axis_v = _str_or(primary_axis, "axis_z")
 
     status_str = _readscalar(ds, "status_str")
     if status_str === nothing
         status_str = _readscalar(ds, "status_xml")
     end
-    status_str_v = status_str === nothing ? nothing : _to_string(status_str)
+    status_str_v = _str_or_nothing(status_str)
 
     # Sweep group names + fixed angles
     sweep_group_name = _readvar(ds, "sweep_group_name")
@@ -580,18 +585,14 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
     haskey(grp.dim, "range") || throw(ArgumentError("v2 sweep group missing `range` dim"))
 
     sweep_number_raw = _readscalar(grp, "sweep_number")
-    sweep_number = sweep_number_raw === nothing ? default_sweep_number : Int(sweep_number_raw)
-    sweep_mode = _to_string(_readscalar(grp, "sweep_mode") === nothing ?
-                            "azimuth_surveillance" : _readscalar(grp, "sweep_mode"))
+    sweep_number = _int_or(sweep_number_raw, default_sweep_number)
+    sweep_mode = _str_or(_readscalar(grp, "sweep_mode"), "azimuth_surveillance")
     fixed_local = _readscalar(grp, "sweep_fixed_angle")
-    fixed_v = fixed_local === nothing ? fixed_angle : _f64_or(fixed_local, fixed_angle)
+    fixed_v = _f64_or(fixed_local, fixed_angle)
 
-    follow_mode = _to_string(_readscalar(grp, "follow_mode") === nothing ?
-                             "none" : _readscalar(grp, "follow_mode"))
-    prt_mode = _to_string(_readscalar(grp, "prt_mode") === nothing ?
-                          "fixed" : _readscalar(grp, "prt_mode"))
-    polarization_mode = _to_string(_readscalar(grp, "polarization_mode") === nothing ?
-                                   "horizontal" : _readscalar(grp, "polarization_mode"))
+    follow_mode = _str_or(_readscalar(grp, "follow_mode"), "none")
+    prt_mode = _str_or(_readscalar(grp, "prt_mode"), "fixed")
+    polarization_mode = _str_or(_readscalar(grp, "polarization_mode"), "horizontal")
 
     range_raw = _readvar(grp, "range")
     range_raw === nothing && throw(ArgumentError("v2 sweep group missing `range` variable"))
@@ -668,7 +669,7 @@ function _read_sweep_v2(grp, volume_start::DateTime, fixed_angle::Float64, defau
     ray_angle_resolution_raw = _readscalar(grp, "ray_angle_resolution")
     ray_angle_resolution = _f64_or_nothing(ray_angle_resolution_raw)
     qc_procedures_raw = _readscalar(grp, "qc_procedures")
-    qc_procedures = qc_procedures_raw === nothing ? nothing : _to_string(qc_procedures_raw)
+    qc_procedures = _str_or_nothing(qc_procedures_raw)
 
     # Frequency may be on this group or absent.
     freq_raw = _readvar(grp, "frequency")
@@ -930,19 +931,19 @@ function _read_cfradial1(ds, file)
     time_end = _parse_iso8601(tce)
 
     volume_number = _readscalar(ds, "volume_number")
-    volume_number_v = volume_number === nothing ? 0 : Int(volume_number)
+    volume_number_v = _int_or(volume_number, 0)
     platform_type = _readscalar(ds, "platform_type")
-    platform_type_v = platform_type === nothing ? "fixed" : _to_string(platform_type)
+    platform_type_v = _str_or(platform_type, "fixed")
     instrument_type = _readscalar(ds, "instrument_type")
-    instrument_type_v = instrument_type === nothing ? "radar" : _to_string(instrument_type)
+    instrument_type_v = _str_or(instrument_type, "radar")
     primary_axis = _readscalar(ds, "primary_axis")
-    primary_axis_v = primary_axis === nothing ? "axis_z" : _to_string(primary_axis)
+    primary_axis_v = _str_or(primary_axis, "axis_z")
 
     status_str = _readscalar(ds, "status_str")
     if status_str === nothing
         status_str = _readscalar(ds, "status_xml")
     end
-    status_str_v = status_str === nothing ? nothing : _to_string(status_str)
+    status_str_v = _str_or_nothing(status_str)
 
     # Time array
     time_raw = ds["time"]

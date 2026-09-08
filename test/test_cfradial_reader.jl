@@ -343,6 +343,47 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         rm(tmp)
     end
 
+    @testset "missing-valued volume_number reads without error" begin
+        # Regression: LROSE aircraft files (e.g. NOAA P-3 tail radar) write
+        # `volume_number` with a `_FillValue` and never set it, so NCDatasets
+        # returns `missing`. The reader did `Int(volume_number)` guarded only
+        # against `nothing`, which threw `MethodError: no method matching
+        # Int64(::Missing)`. Routing through `_int_or` (missing → default) fixes
+        # it. Both the v1 and v2 root readers had the same defect.
+        for (label, builder) in (("v1", build_synthetic_cfradial_v1),
+                                 ("v2", build_synthetic_cfradial_v2))
+            tmp = tempname() * ".nc"
+            try
+                builder(tmp; n_sweeps = 1, rays_per_sweep = 4, n_gates = 5,
+                        field_names = ["DBZ"], fill_volume_number = true)
+                v = read_cfradial(tmp)              # previously threw
+                @test v.volume_number == 0          # documented default
+                # Everything else still parses normally.
+                @test length(v.sweeps) == 1
+                @test haskey(v.sweeps[1].fields, "DBZ")
+                @test v.instrument_type == "radar"
+                @test v.primary_axis == "axis_z"
+            finally
+                isfile(tmp) && rm(tmp)
+            end
+        end
+    end
+
+    @testset "scalar coercion helpers treat missing as absent" begin
+        # The wrappers the readers rely on. `_to_string(missing)` silently yields
+        # the literal "missing", so the string forms matter as much as `_int_or`.
+        @test Daisho._int_or(missing, 7) == 7
+        @test Daisho._int_or(nothing, 7) == 7
+        @test Daisho._int_or(Int32(3), 7) == 3
+        @test Daisho._f64_or(missing, 1.5) == 1.5
+        @test Daisho._f64_or_nothing(missing) === nothing
+        @test Daisho._str_or(missing, "fixed") == "fixed"
+        @test Daisho._str_or(nothing, "fixed") == "fixed"
+        @test Daisho._str_or("ship", "fixed") == "ship"
+        @test Daisho._str_or_nothing(missing) === nothing
+        @test Daisho._str_or_nothing("<status>ok</status>") == "<status>ok</status>"
+    end
+
     @testset "synthetic CfRadial 2.1 full read" begin
         # Build a fuller in-memory v2 file (NetCDF4 groups, no large fixtures) to
         # exercise the v2 code path: _read_cfradial2, _read_sweep_v2,

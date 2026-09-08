@@ -310,7 +310,9 @@ The file contains:
     `nyquist_velocity`, `unambiguous_range`, `n_samples`,
     `antenna_transition`, `scan_rate`, `r_calib_index`, `rx_range_resolution`),
   * scalar string vars (`volume_number`, `platform_type`, `instrument_type`,
-    `primary_axis`, `status_str`) and `frequency`,
+    `primary_axis`, `status_str`) and `frequency`. `fill_volume_number = true`
+    instead leaves `volume_number` unwritten under a `_FillValue`, so it reads
+    back as `missing`,
   * radar-parameter vars (`radar_antenna_gain_h/v`, `radar_beam_width_h/v`,
     `radar_rx_bandwidth`),
   * a radar-calibration table (`r_calib_*` over an `r_calib` dim of length 2,
@@ -322,7 +324,7 @@ The file contains:
 """
 function build_synthetic_cfradial_v1(path;
         n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
-        field_names = ["DBZ", "VEL"])
+        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false)
 
     n_rays = n_sweeps * rays_per_sweep
     slen = 32
@@ -439,7 +441,14 @@ function build_synthetic_cfradial_v1(path;
     _defmode("rays_are_indexed", fill("true", n_sweeps))
 
     # Scalar string / metadata vars
-    defVar(ds, "volume_number", Int32, ())[:] = 42
+    if fill_volume_number
+        # Present but unwritten with a _FillValue: NCDatasets reads it back as
+        # `missing`, the way real LROSE aircraft files encode "no volume number".
+        defVar(ds, "volume_number", Int32, ();
+            attrib = DataStructures.OrderedDict("_FillValue" => Int32(-9999)))
+    else
+        defVar(ds, "volume_number", Int32, ())[:] = 42
+    end
     _defscalarstr("platform_type", "vehicle")
     _defscalarstr("instrument_type", "radar")
     _defscalarstr("primary_axis", "axis_z")
@@ -532,7 +541,7 @@ on read into `SweepGroup.georeference` / `SweepGroup.radar_monitoring`.
 """
 function build_synthetic_cfradial_v2(path;
         n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
-        field_names = ["DBZ", "VEL"])
+        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false)
 
     sweep_names = [string("sweep_", lpad(i, 4, '0')) for i in 1:n_sweeps]
 
@@ -563,7 +572,14 @@ function build_synthetic_cfradial_v2(path;
     NCDatasets.defVar(ds, "longitude", -24.988, ())
     NCDatasets.defVar(ds, "altitude", 50.0, ())
     NCDatasets.defVar(ds, "altitude_agl", 30.0, ())
-    NCDatasets.defVar(ds, "volume_number", Int32(42), ())
+    if fill_volume_number
+        # See the v1 builder: present but unwritten under a _FillValue reads as
+        # `missing`, matching real CfRadial2 aircraft files.
+        NCDatasets.defVar(ds, "volume_number", Int32, ();
+            attrib = DataStructures.OrderedDict("_FillValue" => Int32(-9999)))
+    else
+        NCDatasets.defVar(ds, "volume_number", Int32(42), ())
+    end
     NCDatasets.defVar(ds, "platform_type", "fixed", ())
     NCDatasets.defVar(ds, "instrument_type", "radar", ())
     NCDatasets.defVar(ds, "primary_axis", "axis_z", ())
