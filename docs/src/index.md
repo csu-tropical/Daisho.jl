@@ -4,12 +4,15 @@
 
 ## Features
 
-- **CfRadial I/O**: Read and write CfRadial NetCDF radar data files
-- **Quality Control**: Threshold-based QC, despeckling, platform motion removal, terrain masking
-- **Gridding**: Beam-aware interpolation onto 3D Cartesian, lat/lon, RHI, PPI, composite, and column grids
-- **Moving Platform Support**: Full support for airborne and ship-based radars with platform motion correction
-- **SRTM Integration**: Digital elevation model integration for terrain-aware quality control
-- **Coordinate Transforms**: Transverse Mercator projections and approximate inverse projections
+- **CfRadial I/O**: Read and write CfRadial NetCDF radar volumes, auto-detecting CfRadial 1.4 vs 2.1 (see the [Radar I/O](guide/radar_io.md) guide)
+- **Quality Control**: Threshold-based QC, despeckling, platform motion removal, and SRTM terrain masking (see the [Quality Control](guide/quality_control.md) guide)
+- **Beam-aware gridding**: Interpolation onto 3-D Cartesian, lat/lon, RHI, PPI, composite, and column grids, with edge-referenced radius-of-influence for moving (airborne / ship-based) platforms (see the [Gridding](guide/gridding.md) guide)
+- **Spectral gridding**: Grid directly onto [Springsteel.jl](https://github.com/csu-tropical/Springsteel.jl) semi-spectral grids for downstream variational analysis (see the [Spectral Gridding](guide/spectral_gridding.md) guide)
+- **Echo products**: Post-gridding hydrometeor identification (FHC) and rain-rate retrievals under a configurable `[echo]` namespace (see the [Echo Products](guide/echo_products.md) guide)
+- **Hybrid scan**: A near-surface product built from the lowest unblocked elevation at each grid column (see the [Hybrid Scan](guide/hybrid_scan.md) guide)
+- **Multi-Doppler wind synthesis**: Stage-1 (u, v) variational synthesis (in development; see the [Wind Synthesis](guide/wind_synthesis.md) guide)
+- **SRTM terrain**: Digital elevation model integration for terrain-aware quality control (see the [SRTM](guide/srtm.md) guide)
+- **TOML-driven configuration**: The entire read → QC → grid pipeline is driven by a single, strictly-validated [`DaishoParameters`](@ref) TOML file
 
 ## Installation
 
@@ -98,4 +101,8 @@ workflow for building rolling grids across flight legs.
 - [Radar I/O](guide/radar_io.md): Reading and writing CfRadial data
 - [Quality Control](guide/quality_control.md): QC workflow and functions
 - [Gridding](guide/gridding.md): Gridding algorithms and options
+- [Spectral Gridding](guide/spectral_gridding.md): Gridding onto Springsteel semi-spectral grids
+- [Wind Synthesis](guide/wind_synthesis.md): Multi-Doppler stage-1 (u, v) variational synthesis
+- [Echo Products](guide/echo_products.md): FHC and rain-rate retrievals under `[echo]`
+- [Hybrid Scan](guide/hybrid_scan.md): Near-surface product from the lowest unblocked elevation
 - [SRTM](guide/srtm.md): Terrain data integration
