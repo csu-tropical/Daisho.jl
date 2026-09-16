@@ -2,7 +2,7 @@ __precompile__()
 module Daisho
 
 using Dates, Statistics
-using NetCDF, HDF5, NCDatasets
+using NCDatasets
 using DataStructures
 using NearestNeighbors, Distances
 using CoordRefSystems, Unitful

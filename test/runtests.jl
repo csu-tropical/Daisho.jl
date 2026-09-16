@@ -5,7 +5,6 @@ using NCDatasets
 using DataStructures
 using NearestNeighbors
 using CoordRefSystems
-using Unitful
 using Rasters
 using Springsteel
 
