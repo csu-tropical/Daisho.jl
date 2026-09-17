@@ -59,6 +59,8 @@ export GridSpec, SweepProvenance, ScalarGridAccumulator, GridAccumulator
 export save_accumulator, load_accumulator, merge_accumulators!
 export grid_sweep!, finalize_grid, build_grid_spec
 export grid_sweep_to_file, finalize_accumulator_file, combine_accumulator_files
+export grid_radar_rhi, grid_radar_ppi, grid_radar_column
+export grid_radar_composite, grid_radar_volume, grid_radar_latlon_volume
 
 # Multi-Doppler wind synthesis (stage 1)
 export WindGridAccumulator, wind_accumulator_dims, SynthesisOutput
