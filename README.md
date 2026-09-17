@@ -75,4 +75,4 @@ Full documentation lives at **[csu-tropical.github.io/Daisho.jl/dev/](https://cs
 
 ## Contributing
 
-Issues and pull requests are welcome. Daisho is in active pre-release development; multi-Doppler and variational analysis are the current focus, alongside deeper integration with the [Springsteel.jl](https://github.com/csu-tropical/Springsteel.jl) framework. Please open an issue to discuss substantial changes before submitting a PR.
+Issues and pull requests are welcome. Daisho is in active pre-release development; multi-Doppler and variational analysis are the current focus, alongside deeper integration with the [Springsteel.jl](https://github.com/csu-tropical/Springsteel.jl) framework. Parts of this code base were generated using Claude LLM generative AI.
