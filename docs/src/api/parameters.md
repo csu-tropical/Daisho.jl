@@ -22,4 +22,10 @@ Daisho.SpringsteelAxisConfig
 Daisho.SPRINGSTEEL_AXIS_BASES
 Daisho.MetadataParameters
 Daisho.IOParameters
+Daisho.VariationalParameters
+Daisho.BackgroundErrorEntry
+Daisho.RadialVelocityObsParameters
+Daisho.ScalarObsEntry
+Daisho.background_error_for
+Daisho.VARIATIONAL_ROLE_VOCAB
 ```

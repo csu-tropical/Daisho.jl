@@ -191,6 +191,62 @@ include_vertical_velocity = false
 # spectrum_width_error_factor = 1.0   # multiplier on the gate spectrum width
 # error_guard_min_m_s         = 1.0   # m/s; lower clamp (stability guard) on sigma
 
+# Incremental 3DVAR wind solver (variational stage), OPTIONAL. The block (and
+# its sub-tables) validates strictly whether or not it is enabled, so a config
+# exercises the whole schema before flipping the switch; absent entirely ⇒
+# defaults (disabled, [fields]-independent).
+[variational]
+enabled = false
+# State-vector variable names, in control-variable order: "U"/"V"/"W" or a
+# [fields] name (appended as a value-observed scalar state variable). Must
+# be non-empty, unique, and contain both "U" and "V".
+state = ["U", "V", "W"]
+background = "zero"                  # "zero" | "synthesis" (stage-1 (u,v) as background)
+background_error_inflation = 1.0     # multiplies sigma_b when background = "synthesis"
+                                      # (guards against double-counting stage-1 uncertainty)
+# Enforce anelastic mass continuity (div(u,v) + dw/dz + w*dlnrhobar/dz = 0) as
+# a pseudo-observation at every mish point. Requires "W" in state.
+mass_continuity = true
+mass_continuity_sigma_per_s = 1.0e-4 # sigma of the divergence residual (s^-1); 1/sigma^2 weight
+max_outer_iterations = 1             # outer Gauss-Newton loops; >1 only matters with nonlinear obs
+max_inner_iterations = 200           # inner conjugate-gradient iterations per outer loop
+inner_tolerance = 1.0e-4             # relative CG residual stopping tolerance, in (0, 1)
+outer_tolerance = 1.0e-3             # relative increment-norm stopping tolerance, in (0, 1)
+output_background = false            # write *_BACKGROUND fields
+output_increment  = false            # write *_INCREMENT fields
+output_mish       = false            # also write mish-lattice fields + stage-1/super-obs diagnostics
+filter_type = "gaussian"             # "gaussian" | "lanczos" (Lanczos has negative lobes near boundaries)
+
+# Per-state-variable background error: sigma (native units: m/s for winds)
+# and the mish-space filter length in METRES along each (i, j, k) axis (0 on
+# an axis disables filtering there). "default" applies to any state variable
+# without its own entry; every state variable must resolve one or the other.
+[variational.background_error]
+default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
+W       = { sigma = 2.0,  filter_length_m = [2000.0, 2000.0, 500.0] }
+# DBZ   = { sigma = 10.0, filter_length_m = [1000.0, 1000.0, 250.0] }
+
+# Radial-velocity super-observation parameters (from the stage-1 accumulator's
+# per-point normal system). Every key optional.
+[variational.radial_velocity]
+error_inflation = 1.0               # multiplies sigma^2_vr for the super-obs only
+horizontal_approximation = false    # drop the w*sin(el) term (samurai horizontal_radar_appx);
+                                     # allows [synthesis] include_vertical_velocity = false
+eigenvalue_guard_relative = 1.0e-10 # eigendirections below this fraction of lambda_max emit no obs
+
+# One [variational.scalar_obs.<name>] table is REQUIRED for every [fields]
+# name appearing in `state` above, e.g.:
+# [variational.scalar_obs.DBZ]
+# sigma = 5.0             # observation-error sigma, native field units
+# undetect_value = -10.0  # value substituted for an [io] undetect gate
+
+# Optional explicit role override (values from: wind_u, wind_v, wind_w,
+# reflectivity, scalar); without it, roles resolve automatically (U/V ->
+# wind_u/wind_v, W -> wind_w, a `reflectivity`-tagged field -> reflectivity,
+# any other [fields] name -> scalar):
+# [variational.roles]
+# W = "wind_w"
+
 # Shared Cartesian base geometry. The volume, composite, ppi, and column (QVP)
 # products all read this unless they have their own override section below.
 [grid.cartesian]
@@ -302,6 +358,10 @@ cells = 10
 [grid.springsteel.k.bc]
 min = "natural"
 max = "natural"
+# When [variational] is enabled, its state variables (U, V, W — not [fields]
+# entries) reuse this same per-field override table by name, e.g. w = 0 at
+# the surface (Dirichlet on the k-min side):
+# W = { min = "dirichlet" }
 
 # CF-1.12 global attributes copied into every gridded NetCDF output. Every
 # key below must be present in your config; the values shipped here are

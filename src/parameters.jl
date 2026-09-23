@@ -631,6 +631,181 @@ Base.@kwdef struct SynthesisParameters
 end
 
 """
+    VARIATIONAL_ROLE_VOCAB
+
+Role vocabulary for `[variational.roles]` overrides and (in a later phase)
+automatic state-variable role resolution: `"wind_u"`, `"wind_v"`, `"wind_w"`,
+`"reflectivity"`, `"scalar"`.
+"""
+const VARIATIONAL_ROLE_VOCAB = ("wind_u", "wind_v", "wind_w", "reflectivity", "scalar")
+
+"""
+    BackgroundErrorEntry
+
+One state variable's background-error specification for the variational
+control-variable filter chain `C = S∘D∘F` (`F` = mish-space filter, `D` =
+diagonal σ_b scaling, `S` = spline projection), loaded from
+`[variational.background_error]`.
+
+# Fields
+- `sigma::Float64`: background-error standard deviation σ_b for this state
+  variable (m/s for wind components; native units for a `[fields]`-derived
+  scalar state variable), applied as the diagonal scaling `D`. Must be
+  positive.
+- `filter_length_m::NTuple{3,Float64}`: mish-space filter length (metres)
+  along each `(i, j, k)` axis, applied by `F` before `D`. `0.0` on an axis
+  disables filtering on that axis; every entry must be finite and
+  non-negative.
+"""
+Base.@kwdef struct BackgroundErrorEntry
+    sigma::Float64
+    filter_length_m::NTuple{3,Float64}
+end
+
+"""
+    RadialVelocityObsParameters
+
+Radial-velocity super-observation parameters, loaded from the optional
+`[variational.radial_velocity]` sub-table (a present table narrows the
+defaults below; every key is optional).
+
+# Fields
+- `error_inflation::Float64`: multiplier on `σ²_vr` (the stage-1
+  `[synthesis] velocity_variance`) applied only to the super-observation
+  inverse variance; default `1.0`. Must be positive.
+- `horizontal_approximation::Bool`: drop the `w·sin(el)` term from the
+  super-obs geometry vector (samurai `horizontal_radar_appx`), so the
+  super-obs reduce to the dual-Doppler `(u, v)` approximation and
+  `[synthesis] include_vertical_velocity = false` is permitted; default
+  `false`.
+- `eigenvalue_guard_relative::Float64`: eigendirections of the per-point
+  stage-1 normal system below this fraction of its largest eigenvalue emit
+  no super-observation row; default `1.0e-10`. Must lie in `[0, 1)`.
+"""
+Base.@kwdef struct RadialVelocityObsParameters
+    error_inflation::Float64           = 1.0
+    horizontal_approximation::Bool     = false
+    eigenvalue_guard_relative::Float64 = 1.0e-10
+end
+
+"""
+    ScalarObsEntry
+
+One `[fields]`-derived scalar state variable's value-observation
+parameters, loaded from `[variational.scalar_obs.<name>]`. Required for
+every non-wind (`"U"`/`"V"`/`"W"`) entry in `[variational] state`.
+
+# Fields
+- `sigma::Float64`: observation-error standard deviation (native field
+  units) for treating the gridded mish value as a direct observation of the
+  scalar state variable. Must be positive.
+- `undetect_value::Float64`: value substituted for a gate at `[io] undetect`
+  (scanned, no detectable echo) before it enters the observation set, e.g.
+  a reflectivity floor. A true-missing (`[io] fill_value`) gate contributes
+  no observation.
+"""
+Base.@kwdef struct ScalarObsEntry
+    sigma::Float64
+    undetect_value::Float64
+end
+
+"""
+    VariationalParameters
+
+Configuration for the incremental 3DVAR wind solver, loaded from the
+optional `[variational]` block. The whole block (including its sub-tables)
+validates strictly whenever present, whether or not `enabled` is `true` —
+disabling the analysis does not relax the schema.
+
+# Fields
+- `enabled::Bool`: master switch; default `false`.
+- `state::Vector{String}`: state-vector variable names, in control-variable
+  order. Each entry is `"U"`, `"V"`, `"W"`, or a `[fields]` name (appended
+  as a value-observed scalar state variable). Must be non-empty, unique,
+  and contain both `"U"` and `"V"`. Default `["U", "V", "W"]`.
+- `background::String`: `"zero"` (background = 0 everywhere, with the
+  configured `background_error` σ — samurai-like) or `"synthesis"`
+  (stage-1 `(u, v)` as background, with a stage-1 σ-derived B for `U`/`V`;
+  `W` still comes from `background_error`). Default `"zero"`.
+- `background_error_inflation::Float64`: multiplies σ_b when
+  `background = "synthesis"`, guarding against double-counting the stage-1
+  uncertainty and the configured `background_error` σ. Must be positive.
+  Default `1.0`.
+- `mass_continuity::Bool`: enforce the anelastic mass-continuity pseudo-
+  observation at every mish point
+  (`∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz = 0`). Requires `"W"` in `state`.
+  Default `true`.
+- `mass_continuity_sigma_per_s::Float64`: standard deviation σ of the
+  anelastic divergence residual (s⁻¹); inverse variance is `1/σ²`. Must be
+  positive. Default `1.0e-4`.
+- `max_outer_iterations::Int`: outer Gauss–Newton iterations; only matters
+  with nonlinear observations. Must be `≥ 1`. Default `1`.
+- `max_inner_iterations::Int`: inner conjugate-gradient iterations per
+  outer loop. Must be `≥ 1`. Default `200`.
+- `inner_tolerance::Float64`: relative CG residual stopping tolerance; must
+  lie in `(0, 1)`. Default `1.0e-4`.
+- `outer_tolerance::Float64`: relative increment-norm stopping tolerance
+  between outer loops; must lie in `(0, 1)`. Default `1.0e-3`.
+- `output_background::Bool`: write the `*_BACKGROUND` fields. Default
+  `false`.
+- `output_increment::Bool`: write the `*_INCREMENT` fields. Default
+  `false`.
+- `output_mish::Bool`: also write mish-lattice fields and stage-1/super-obs
+  diagnostics. Default `false`.
+- `filter_type::String`: mish-space background-error filter kernel,
+  `"gaussian"` or `"lanczos"` (Gaussian has no negative lobes; Lanczos
+  does, documented in the theory guide). Default `"gaussian"`.
+- `background_error::Dict{String,BackgroundErrorEntry}`: per-variable
+  [`BackgroundErrorEntry`](@ref), keyed by state name or `"default"`.
+  Every state variable must resolve an entry (own or `"default"`) — see
+  [`background_error_for`](@ref). Default a single `"default"` entry
+  (`σ = 10.0`, `filter_length_m = (2000.0, 2000.0, 500.0)`).
+- `radial_velocity::RadialVelocityObsParameters`: super-observation
+  parameters ([`RadialVelocityObsParameters`](@ref)).
+- `scalar_obs::Dict{String,ScalarObsEntry}`: one [`ScalarObsEntry`](@ref)
+  per `[fields]` name appearing in `state`.
+- `roles::Dict{String,Symbol}`: optional explicit state-variable role
+  override (e.g. `W = "wind_w"`); keys must be in `state` and values drawn
+  from [`VARIATIONAL_ROLE_VOCAB`](@ref).
+"""
+Base.@kwdef struct VariationalParameters
+    enabled::Bool                          = false
+    state::Vector{String}                  = ["U", "V", "W"]
+    background::String                     = "zero"
+    background_error_inflation::Float64    = 1.0
+    mass_continuity::Bool                  = true
+    mass_continuity_sigma_per_s::Float64   = 1.0e-4
+    max_outer_iterations::Int              = 1
+    max_inner_iterations::Int              = 200
+    inner_tolerance::Float64               = 1.0e-4
+    outer_tolerance::Float64               = 1.0e-3
+    output_background::Bool                = false
+    output_increment::Bool                 = false
+    output_mish::Bool                      = false
+    filter_type::String                    = "gaussian"
+    background_error::Dict{String,BackgroundErrorEntry} =
+        Dict("default" => BackgroundErrorEntry(10.0, (2000.0, 2000.0, 500.0)))
+    radial_velocity::RadialVelocityObsParameters = RadialVelocityObsParameters()
+    scalar_obs::Dict{String,ScalarObsEntry} = Dict{String,ScalarObsEntry}()
+    roles::Dict{String,Symbol}              = Dict{String,Symbol}()
+end
+
+"""
+    background_error_for(vp::VariationalParameters, name::String) -> BackgroundErrorEntry
+
+Resolve the [`BackgroundErrorEntry`](@ref) for state variable `name`: its own
+`[variational.background_error.<name>]` entry if present, else the
+`"default"` entry, else an `ArgumentError`.
+"""
+function background_error_for(vp::VariationalParameters, name::String)
+    haskey(vp.background_error, name) && return vp.background_error[name]
+    haskey(vp.background_error, "default") && return vp.background_error["default"]
+    throw(ArgumentError(
+        "[variational.background_error]: no entry for `$(name)` and no " *
+        "`default` entry to fall back to."))
+end
+
+"""
     ReferenceStateParameters
 
 Hydrostatic reference-density profile ρ̄(z), loaded from the optional
@@ -840,10 +1015,12 @@ present block stays strict.
 - `echo::EchoProductsParameters`
 - `hybrid_scan::HybridScanParameters`
 - `reference_state::ReferenceStateParameters`
+- `variational::VariationalParameters`
 - `provided::Set{Symbol}`: which optional top-level sections (`:qc`,
   `:gridding`, `:grid`, `:synthesis`, `:echo`, `:hybrid_scan`,
-  `:reference_state`) were actually present in the loaded TOML. Absence is
-  tracked explicitly — it is *not* inferred from default values.
+  `:reference_state`, `:variational`) were actually present in the loaded
+  TOML. Absence is tracked explicitly — it is *not* inferred from default
+  values.
 
 # Examples
 ```julia
@@ -864,6 +1041,7 @@ struct DaishoParameters
     echo::EchoProductsParameters
     hybrid_scan::HybridScanParameters
     reference_state::ReferenceStateParameters
+    variational::VariationalParameters
     provided::Set{Symbol}
 end
 
@@ -906,6 +1084,18 @@ DaishoParameters(moments::MomentParameters, qc::QCParameters,
     DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo,
                      hybrid_scan, ReferenceStateParameters(), provided)
 
+# Back-compat convenience for callers built before the `[variational]` block
+# existed (ten positional args ending …, reference_state, provided). Inject a
+# default variational block.
+DaishoParameters(moments::MomentParameters, qc::QCParameters,
+                 gridding::GriddingParameters, grid::GridParameters,
+                 io::IOParameters, synthesis::SynthesisParameters,
+                 echo::EchoProductsParameters, hybrid_scan::HybridScanParameters,
+                 reference_state::ReferenceStateParameters,
+                 provided::Set{Symbol}) =
+    DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo,
+                     hybrid_scan, reference_state, VariationalParameters(), provided)
+
 # ── Loader ───────────────────────────────────────────────────────────────────
 
 """
@@ -932,7 +1122,7 @@ DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 # numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
     provided = Set{Symbol}()
-    for s in (:qc, :gridding, :grid, :synthesis, :echo, :hybrid_scan, :reference_state)
+    for s in (:qc, :gridding, :grid, :synthesis, :echo, :hybrid_scan, :reference_state, :variational)
         haskey(d, string(s)) && push!(provided, s)
     end
 
@@ -945,8 +1135,9 @@ function DaishoParameters(d::AbstractDict)
     echo      = haskey(d, "echo")      ? _echo_from_dict(d["echo"])                             : EchoProductsParameters()
     hybrid    = haskey(d, "hybrid_scan") ? _hybrid_scan_from_dict(d["hybrid_scan"])             : HybridScanParameters()
     reference_state = haskey(d, "reference_state") ? _reference_state_from_dict(d["reference_state"]) : ReferenceStateParameters()
+    variational = haskey(d, "variational") ? _variational_from_dict(d["variational"], moments) : VariationalParameters()
     return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, hybrid,
-                            reference_state, provided)
+                            reference_state, variational, provided)
 end
 
 """
@@ -1481,6 +1672,294 @@ function _reference_state_from_dict(d::AbstractDict)
         "`[reference_state]` density_scale_height_m must be positive (got " *
         "$(rp.density_scale_height_m))."))
     return rp
+end
+
+# Samurai configuration keys that have a Daisho counterpart under
+# `[variational]` (or one of its sub-tables); a migration diagnostic names the
+# Daisho key. Checked before strict parsing at every level the old flat key
+# could have appeared at (top-level, background_error, radial_velocity).
+const _SAMURAI_VARIATIONAL_KEYS = Dict(
+    "mc_weight"      => "`mass_continuity_sigma_per_s` in `[variational]`",
+    "bg_rhou_error"  => "a `U` entry in `[variational.background_error]`",
+    "bg_rhov_error"  => "a `V` entry in `[variational.background_error]`",
+    "bg_rhow_error"  => "a `W` entry in `[variational.background_error]`",
+    "i_filter_length" => "`filter_length_m` (metres, per axis, i first) in " *
+                         "`[variational.background_error.<name>]`",
+    "j_filter_length" => "`filter_length_m` (metres, per axis, j second) in " *
+                         "`[variational.background_error.<name>]`",
+    "k_filter_length" => "`filter_length_m` (metres, per axis, k third) in " *
+                         "`[variational.background_error.<name>]`",
+    "horizontal_radar_appx" => "`horizontal_approximation` in " *
+                               "`[variational.radial_velocity]`",
+    "num_iterations" => "`max_outer_iterations` in `[variational]`",
+)
+
+function _check_samurai_variational_keys(d::AbstractDict, section::String)
+    for k in keys(d)
+        ks = String(k)
+        if haskey(_SAMURAI_VARIATIONAL_KEYS, ks)
+            throw(ArgumentError(
+                "`[$section]` key `$ks` is a samurai configuration key. Its " *
+                "Daisho equivalent is $(_SAMURAI_VARIATIONAL_KEYS[ks]). " *
+                "Run `print_config(\"template.toml\")` for the documented template."))
+        end
+    end
+    return nothing
+end
+
+# Build BackgroundErrorEntry per key of `[variational.background_error]`.
+# Keys must be "default" or a name in `state`; each value is an inline table
+# `{ sigma = ..., filter_length_m = [i, j, k] }`.
+function _variational_background_error_from_dict(d::AbstractDict, state::Vector{String})
+    _check_samurai_variational_keys(d, "variational.background_error")
+    allowed_names = Set(vcat(["default"], state))
+    out = Dict{String,BackgroundErrorEntry}()
+    for (k, v) in d
+        ks = String(k)
+        ks in allowed_names || throw(ArgumentError(
+            "Unknown key `$(ks)` in section `[variational.background_error]`; " *
+            "it must be \"default\" or a name in `[variational] state`. " *
+            "Allowed: $(join(sort(collect(allowed_names)), ", "))"))
+        v isa AbstractDict || throw(ArgumentError(
+            "`[variational.background_error]` entry `$(ks)` must be an inline " *
+            "table with `sigma` and `filter_length_m` keys, got $(typeof(v))."))
+        entry_section = "variational.background_error.$(ks)"
+        _check_samurai_variational_keys(v, entry_section)
+        unknown = setdiff(Set(keys(v)), Set(["sigma", "filter_length_m"]))
+        isempty(unknown) || throw(ArgumentError(
+            "Unknown key(s) $(_fmt_keys(Symbol.(collect(unknown)))) in section " *
+            "`[$(entry_section)]`. Allowed keys: sigma, filter_length_m"))
+        haskey(v, "sigma") || throw(ArgumentError(
+            "Missing required key `sigma` in section `[$(entry_section)]`."))
+        haskey(v, "filter_length_m") || throw(ArgumentError(
+            "Missing required key `filter_length_m` in section `[$(entry_section)]`."))
+        sigma = Float64(v["sigma"])
+        sigma > 0.0 || throw(ArgumentError(
+            "`[$(entry_section)]` sigma must be positive (got $(sigma))."))
+        fl = v["filter_length_m"]
+        (fl isa AbstractArray && length(fl) == 3) || throw(ArgumentError(
+            "`[$(entry_section)]` filter_length_m must be an array of exactly " *
+            "3 numbers [i, j, k] in metres, got $(repr(fl))."))
+        fld = Float64.(fl)
+        all(x -> isfinite(x) && x >= 0.0, fld) || throw(ArgumentError(
+            "`[$(entry_section)]` filter_length_m entries must be finite and " *
+            "non-negative (metres; 0 disables filtering on that axis), got " *
+            "$(fld)."))
+        out[ks] = BackgroundErrorEntry(sigma, (fld[1], fld[2], fld[3]))
+    end
+    return out
+end
+
+# Build RadialVelocityObsParameters from the optional
+# `[variational.radial_velocity]` sub-table; every key defaults when absent.
+function _variational_radial_velocity_from_dict(d::AbstractDict)
+    _check_samurai_variational_keys(d, "variational.radial_velocity")
+    allowed = (:error_inflation, :horizontal_approximation, :eigenvalue_guard_relative)
+    unknown = setdiff(Set(Symbol.(keys(d))), Set(allowed))
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section " *
+        "`[variational.radial_velocity]`. Allowed keys: $(join(allowed, ", "))"))
+    kw = Dict{Symbol,Any}()
+    for f in allowed
+        sk = String(f)
+        haskey(d, sk) || continue
+        kw[f] = _coerce_field(RadialVelocityObsParameters, f, d[sk])
+    end
+    rv = RadialVelocityObsParameters(; kw...)
+    rv.error_inflation > 0.0 || throw(ArgumentError(
+        "`[variational.radial_velocity]` error_inflation must be positive " *
+        "(got $(rv.error_inflation))."))
+    (isfinite(rv.eigenvalue_guard_relative) && 0.0 <= rv.eigenvalue_guard_relative < 1.0) ||
+        throw(ArgumentError(
+            "`[variational.radial_velocity]` eigenvalue_guard_relative must " *
+            "lie in [0, 1) (got $(rv.eigenvalue_guard_relative))."))
+    return rv
+end
+
+# Build ScalarObsEntry per key of `[variational.scalar_obs]`. Keys must be
+# `[fields]` names that appear in `state` (the non-wind entries); every such
+# name must have an entry (checked by the caller).
+function _variational_scalar_obs_from_dict(d::AbstractDict, scalar_state::Vector{String})
+    _check_samurai_variational_keys(d, "variational.scalar_obs")
+    allowed_names = Set(scalar_state)
+    out = Dict{String,ScalarObsEntry}()
+    for (k, v) in d
+        ks = String(k)
+        ks in allowed_names || throw(ArgumentError(
+            "Unknown key `$(ks)` in section `[variational.scalar_obs]`; it " *
+            "must be a `[fields]` name in `[variational] state`. " *
+            "Allowed: $(join(sort(collect(allowed_names)), ", "))"))
+        v isa AbstractDict || throw(ArgumentError(
+            "`[variational.scalar_obs]` entry `$(ks)` must be an inline table " *
+            "with `sigma` and `undetect_value` keys, got $(typeof(v))."))
+        entry_section = "variational.scalar_obs.$(ks)"
+        unknown = setdiff(Set(keys(v)), Set(["sigma", "undetect_value"]))
+        isempty(unknown) || throw(ArgumentError(
+            "Unknown key(s) $(_fmt_keys(Symbol.(collect(unknown)))) in section " *
+            "`[$(entry_section)]`. Allowed keys: sigma, undetect_value"))
+        haskey(v, "sigma") || throw(ArgumentError(
+            "Missing required key `sigma` in section `[$(entry_section)]`."))
+        haskey(v, "undetect_value") || throw(ArgumentError(
+            "Missing required key `undetect_value` in section `[$(entry_section)]`."))
+        sigma = Float64(v["sigma"])
+        sigma > 0.0 || throw(ArgumentError(
+            "`[$(entry_section)]` sigma must be positive (got $(sigma))."))
+        out[ks] = ScalarObsEntry(sigma, Float64(v["undetect_value"]))
+    end
+    return out
+end
+
+# Build the `[variational.roles]` override Dict{String,Symbol}. Keys must be
+# in `state`; values must be strings drawn from VARIATIONAL_ROLE_VOCAB.
+function _variational_roles_from_dict(d::AbstractDict, state::Vector{String})
+    _check_samurai_variational_keys(d, "variational.roles")
+    allowed_names = Set(state)
+    out = Dict{String,Symbol}()
+    for (k, v) in d
+        ks = String(k)
+        ks in allowed_names || throw(ArgumentError(
+            "Unknown key `$(ks)` in section `[variational.roles]`; it must be " *
+            "one of `[variational] state` ($(join(state, ", ")))."))
+        v isa AbstractString || throw(ArgumentError(
+            "`[variational.roles]` `$(ks)` must be a string role name, got " *
+            "$(typeof(v))."))
+        role_str = String(v)
+        role_str in VARIATIONAL_ROLE_VOCAB || throw(ArgumentError(
+            "`[variational.roles]` `$(ks)` = \"$(role_str)\" is not a valid " *
+            "role. Allowed: $(join(VARIATIONAL_ROLE_VOCAB, ", "))."))
+        out[ks] = Symbol(role_str)
+    end
+    return out
+end
+
+# Build VariationalParameters from the optional `[variational]` block. Strict:
+# unknown keys raise in every (sub-)table; every cross-field constraint in
+# plan §4/§0 is enforced here (`state` composition, `background_error`
+# resolution, `scalar_obs` coverage, `roles` domain, tolerances/iterations).
+# `moments` is needed to validate `[fields]`-derived `state` entries.
+function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
+    _check_samurai_variational_keys(d, "variational")
+
+    scalar_fields = (:enabled, :state, :background, :background_error_inflation,
+        :mass_continuity, :mass_continuity_sigma_per_s, :max_outer_iterations,
+        :max_inner_iterations, :inner_tolerance, :outer_tolerance,
+        :output_background, :output_increment, :output_mish, :filter_type)
+    subtables = (:background_error, :radial_velocity, :scalar_obs, :roles)
+    allowed = Set((scalar_fields..., subtables...))
+    unknown = setdiff(Set(Symbol.(keys(d))), allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[variational]`. " *
+        "Allowed keys: $(join((scalar_fields..., subtables...), ", "))"))
+    for t in subtables
+        sk = String(t)
+        haskey(d, sk) && !(d[sk] isa AbstractDict) && throw(ArgumentError(
+            "`[variational]` `$(sk)` must be a sub-table `[variational.$(sk)]`, " *
+            "got $(typeof(d[sk]))."))
+    end
+
+    kw = Dict{Symbol,Any}()
+    for f in scalar_fields
+        sk = String(f)
+        haskey(d, sk) || continue
+        if f === :state
+            kw[f] = String.(d[sk])
+        else
+            kw[f] = _coerce_field(VariationalParameters, f, d[sk])
+        end
+    end
+
+    state = get(kw, :state, VariationalParameters().state)
+    isempty(state) && throw(ArgumentError(
+        "`[variational]` `state` must be non-empty."))
+    length(state) == length(Set(state)) || throw(ArgumentError(
+        "`[variational]` `state` entries must be unique (got $(state))."))
+    "U" in state || throw(ArgumentError(
+        "`[variational]` `state` must contain \"U\"."))
+    "V" in state || throw(ArgumentError(
+        "`[variational]` `state` must contain \"V\"."))
+    field_names = Set(fs.name for fs in moments.fields)
+    for name in state
+        name in ("U", "V", "W") && continue
+        name in field_names && continue
+        throw(ArgumentError(
+            "`[variational]` state entry `$(name)` is not \"U\", \"V\", \"W\", " *
+            "or a configured `[fields]` name. Fields: " *
+            "$(join(sort(collect(field_names)), ", "))"))
+    end
+
+    mc = get(kw, :mass_continuity, VariationalParameters().mass_continuity)
+    mc isa Bool || throw(ArgumentError(
+        "`[variational]` mass_continuity must be a boolean (true/false), got " *
+        "$(repr(mc))."))
+    mc && !("W" in state) && throw(ArgumentError(
+        "`[variational]` mass_continuity = true requires \"W\" in `state`."))
+
+    background = get(kw, :background, VariationalParameters().background)
+    background in ("zero", "synthesis") || throw(ArgumentError(
+        "`[variational]` background = \"$(background)\" is not valid; allowed: " *
+        "\"zero\", \"synthesis\"."))
+
+    filter_type = get(kw, :filter_type, VariationalParameters().filter_type)
+    filter_type in ("gaussian", "lanczos") || throw(ArgumentError(
+        "`[variational]` filter_type = \"$(filter_type)\" is not valid; " *
+        "allowed: \"gaussian\", \"lanczos\"."))
+
+    bei = get(kw, :background_error_inflation, VariationalParameters().background_error_inflation)
+    (isfinite(bei) && bei > 0.0) || throw(ArgumentError(
+        "`[variational]` background_error_inflation must be positive (got " *
+        "$(bei))."))
+
+    mcs = get(kw, :mass_continuity_sigma_per_s, VariationalParameters().mass_continuity_sigma_per_s)
+    (isfinite(mcs) && mcs > 0.0) || throw(ArgumentError(
+        "`[variational]` mass_continuity_sigma_per_s must be positive (got " *
+        "$(mcs))."))
+
+    max_outer = get(kw, :max_outer_iterations, VariationalParameters().max_outer_iterations)
+    max_outer >= 1 || throw(ArgumentError(
+        "`[variational]` max_outer_iterations must be ≥ 1 (got $(max_outer))."))
+    max_inner = get(kw, :max_inner_iterations, VariationalParameters().max_inner_iterations)
+    max_inner >= 1 || throw(ArgumentError(
+        "`[variational]` max_inner_iterations must be ≥ 1 (got $(max_inner))."))
+
+    inner_tol = get(kw, :inner_tolerance, VariationalParameters().inner_tolerance)
+    (isfinite(inner_tol) && 0.0 < inner_tol < 1.0) || throw(ArgumentError(
+        "`[variational]` inner_tolerance must lie in (0, 1) (got $(inner_tol))."))
+    outer_tol = get(kw, :outer_tolerance, VariationalParameters().outer_tolerance)
+    (isfinite(outer_tol) && 0.0 < outer_tol < 1.0) || throw(ArgumentError(
+        "`[variational]` outer_tolerance must lie in (0, 1) (got $(outer_tol))."))
+
+    if haskey(d, "background_error")
+        kw[:background_error] = _variational_background_error_from_dict(d["background_error"], state)
+    end
+    background_error = get(kw, :background_error, VariationalParameters().background_error)
+    for name in state
+        haskey(background_error, name) || haskey(background_error, "default") ||
+            throw(ArgumentError(
+                "`[variational]` state variable `$(name)` has no " *
+                "`[variational.background_error]` entry and there is no " *
+                "`default` entry to fall back to."))
+    end
+
+    if haskey(d, "radial_velocity")
+        kw[:radial_velocity] = _variational_radial_velocity_from_dict(d["radial_velocity"])
+    end
+
+    scalar_state = [n for n in state if !(n in ("U", "V", "W"))]
+    if haskey(d, "scalar_obs")
+        kw[:scalar_obs] = _variational_scalar_obs_from_dict(d["scalar_obs"], scalar_state)
+    end
+    scalar_obs = get(kw, :scalar_obs, VariationalParameters().scalar_obs)
+    for name in scalar_state
+        haskey(scalar_obs, name) || throw(ArgumentError(
+            "`[variational]` state entry `$(name)` (a `[fields]` name) needs a " *
+            "`[variational.scalar_obs.$(name)]` entry."))
+    end
+
+    if haskey(d, "roles")
+        kw[:roles] = _variational_roles_from_dict(d["roles"], state)
+    end
+
+    return VariationalParameters(; kw...)
 end
 
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;

@@ -857,12 +857,15 @@ clear error for them.
 """
 function create_radar_grid(p::DaishoParameters)
     s = require_section(p, :grid, :springsteel; for_op="create_radar_grid")
-    return create_radar_grid(s, field_index_dict(p))
+    vars = field_index_dict(p)
+    return create_radar_grid(s, vars;
+        allowed = Set(keys(vars)) ∪ Set(p.variational.state))
 end
 
-function create_radar_grid(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
+function create_radar_grid(cfg::SpringsteelGridConfig, vars::Dict{String,Int};
+        allowed::AbstractSet{String} = Set(keys(vars)))
     bases = SPRINGSTEEL_AXIS_BASES[cfg.geometry]
-    _validate_bc_fields(cfg, vars)
+    _validate_bc_fields(cfg, vars; allowed = allowed)
     kw = Dict{Symbol,Any}(
         :geometry   => cfg.geometry,
         :vars       => Dict{String,Int}(vars),
@@ -903,18 +906,24 @@ function create_radar_grid(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
     return _with_regular_out(sgrid, iout, jout, kout)
 end
 
-# Per-field BC override keys must name configured fields (typo guard). The
-# TOML parser cannot check this — it runs before the field list is fixed — so
-# it happens here, at grid-construction time.
-function _validate_bc_fields(cfg::SpringsteelGridConfig, vars::Dict{String,Int})
+# Per-field BC override keys must name configured fields, or (when the
+# variational stage is enabled) one of its state variables (U/V/W are not
+# `[fields]` entries, but their per-variable k-axis BCs live in this same
+# table). The TOML parser cannot check this — it runs before the field list
+# (and `[variational] state`) is fixed — so it happens here, at
+# grid-construction time. `allowed` defaults to `keys(vars)` for callers that
+# have no state variables to admit (e.g. the state grid itself, or direct
+# `create_radar_grid(cfg, vars)` calls outside `DaishoParameters`).
+function _validate_bc_fields(cfg::SpringsteelGridConfig, vars::Dict{String,Int};
+        allowed::AbstractSet{String} = Set(keys(vars)))
     for (axis, name) in ((cfg.i, "i"), (cfg.j, "j"), (cfg.k, "k"))
         for (sidedict, side) in ((axis.bc_min, "min"), (axis.bc_max, "max"))
             for key in keys(sidedict)
                 key == "default" && continue
-                haskey(vars, key) || throw(ArgumentError(
+                key in allowed || throw(ArgumentError(
                     "[grid.springsteel.$(name).bc]: per-field override " *
                     "`$(key)` ($(side) side) does not match any configured " *
-                    "field. Fields: $(join(sort(collect(keys(vars))), ", "))"))
+                    "field. Fields: $(join(sort(collect(allowed)), ", "))"))
             end
         end
     end
