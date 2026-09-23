@@ -1472,3 +1472,150 @@ end
     end
 
 end
+
+# ── Phase 9a: synthetic dual-Doppler *field* test helper ────────────────────
+#
+# `make_synthetic_dual_doppler_field`/`make_synthetic_radar_volumes_field`
+# (test/test_helpers.jl) generalize `make_synthetic_dual_doppler` to a
+# spatially varying wind `wind(x, y, z) -> (u, v, w)`, sampled at each gate's
+# own Cartesian position via Daisho's own gridding-geometry internals
+# (`_sweep_zyx_and_beams` / `_sweep_gate_yx`). This testset validates the
+# helper itself — not yet the Phase 9 variational solve, which lands with
+# `problem.jl`.
+@testset "synthetic dual-Doppler field helper" begin
+
+    # Local copy of the `_p_synth` pattern used above (out of scope here: that
+    # one is a local function inside the "Wind Synthesis" `@testset`).
+    function _p_field(; var = 1.0, ms = [5.0, 5.0], maxel = 45.0)
+        p0 = DaishoParameters()
+        return Daisho.DaishoParameters(p0.moments, p0.qc, p0.gridding, p0.grid,
+            p0.io, SynthesisParameters(velocity_variance = var, max_sigma = ms,
+                                       max_elevation = maxel), p0.provided)
+    end
+
+    @testset "parity with the uniform-wind helper" begin
+        u_true, v_true = 8.0, -3.0
+        wind = (x, y, z) -> (u_true, v_true, 0.0)
+        volA_f, volB_f = make_synthetic_dual_doppler_field(wind)
+        volA_u, volB_u = make_synthetic_dual_doppler(u = u_true, v = v_true)
+
+        for (vf, vu) in ((volA_f, volA_u), (volB_f, volB_u))
+            @test length(vf.sweeps) == length(vu.sweeps)
+            for (sf, su) in zip(vf.sweeps, vu.sweeps)
+                # `make_synthetic_dual_doppler_field` keeps VEL at Float64 (see
+                # its docstring); `make_synthetic_dual_doppler` rounds to
+                # Float32 as a raw-instrument emulation. Both compute the
+                # identical Float64 expression `u*sin(az)cos(el) +
+                # v*cos(az)cos(el)` first, so they agree up to that Float32
+                # rounding — atol set just above Float32 eps for these
+                # magnitudes, well short of meaningful physical difference.
+                @test Float64.(sf.fields["VEL"].data) ≈ Float64.(su.fields["VEL"].data) atol = 2.0e-5
+            end
+        end
+    end
+
+    @testset "gate geometry matches Daisho's own beam-height / ground-range formulas" begin
+        ref_lat, ref_lon = 16.0, -24.0
+        radarA_lat, radarA_lon = ref_lat - 0.20, ref_lon
+        r = 20000.0
+        el_deg = 0.0
+        az_deg = 90.0
+
+        volA, _, posA, _ = make_synthetic_dual_doppler_field(
+            (x, y, z) -> (0.0, 0.0, 0.0);
+            ref_lat = ref_lat, ref_lon = ref_lon,
+            radarA_lat = radarA_lat, radarA_lon = radarA_lon,
+            azimuths = [az_deg], elevations = [el_deg], ranges = [r],
+            return_gate_positions = true)
+
+        x, y, z = posA[1].x[1, 1], posA[1].y[1, 1], posA[1].z[1, 1]
+
+        # 4/3-earth beam-height / ground-range formulas, independently applied.
+        h = Daisho.beam_height(r, el_deg, 0.0)
+        s = Daisho.Reff * asin(r * cos(deg2rad(el_deg)) / (Daisho.Reff + h))
+
+        # Fresh, independent call into the same Daisho internals the
+        # accumulator uses, for the radar's own TM-frame position.
+        TM = Daisho.CoordRefSystems.shift(
+            Daisho.TransverseMercator{1.0, ref_lat, Daisho.WGS84Latest}, lonₒ = ref_lon)
+        _, radar_zyx, beams, _, _ = Daisho._sweep_zyx_and_beams(
+            volA.sweeps[1], radarA_lat, radarA_lon, 0.0, TM)
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+        xA, yA = radar_zyx[1][3], radar_zyx[1][2]
+
+        @test x ≈ xA + s * sin(deg2rad(az_deg)) atol = 1e-6
+        @test y ≈ yA + s * cos(deg2rad(az_deg)) atol = 1e-6
+        @test z ≈ h                             atol = 1e-9
+
+        @test x ≈ gate_yx[2, 1] atol = 1e-9
+        @test y ≈ gate_yx[1, 1] atol = 1e-9
+        @test z ≈ beams[1, 4]   atol = 1e-9
+    end
+
+    @testset "consistency through the real gridding pipeline (linear wind)" begin
+        p = _p_field()
+        ref_lat, ref_lon = 16.0, -24.0
+        wind = (x, y, z) -> (8.0 + 1.0e-4 * y, -3.0 + 1.0e-4 * x, 0.0)
+
+        volA, volB = make_synthetic_dual_doppler_field(wind;
+            ref_lat = ref_lat, ref_lon = ref_lon)
+
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = ref_lat, reference_longitude = ref_lon,
+            x_axis = collect(Float64, -20000.0:10000.0:20000.0),
+            y_axis = collect(Float64, -20000.0:10000.0:20000.0),
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        acc = WindGridAccumulator(spec, "VEL")
+        for s in eachindex(volA.sweeps); grid_sweep!(acc, volA, s, p); end
+        for s in eachindex(volB.sweeps); grid_sweep!(acc, volB, s, p); end
+        out = finalize_wind(acc, p)
+
+        nz, ny, nx = size(out.comp1)
+        nsolved = 0
+        for iz in 1:nz, iy in 1:ny, ix in 1:nx
+            out.quality_flag[iz, iy, ix] == Int8(0) || continue
+            nsolved += 1
+            x, y, z = spec.x_axis[ix], spec.y_axis[iy], spec.z_axis[iz]
+            u_expected, v_expected, _ = wind(x, y, z)
+            @test out.comp1[iz, iy, ix] ≈ u_expected atol = 0.3
+            @test out.comp2[iz, iy, ix] ≈ v_expected atol = 0.3
+        end
+        @test nsolved > 0
+    end
+
+    @testset "fallspeed kwarg shifts VEL by w_t·sin(el) exactly" begin
+        wind = (x, y, z) -> (5.0, 2.0, 1.0)
+        elevations = [0.5, 20.0]   # include a steep beam
+        wt = -5.0
+
+        volA0, volB0 = make_synthetic_dual_doppler_field(wind; elevations = elevations)
+        volA1, volB1 = make_synthetic_dual_doppler_field(wind; elevations = elevations,
+            fallspeed = (x, y, z) -> wt)
+
+        for (v0, v1) in ((volA0, volA1), (volB0, volB1))
+            for (s0, s1) in zip(v0.sweeps, v1.sweeps)
+                el = deg2rad(s0.fixed_angle)
+                diff = s1.fields["VEL"].data .- s0.fields["VEL"].data
+                @test all(d -> isapprox(d, wt * sin(el); atol = 1e-12), diff)
+            end
+        end
+    end
+
+    @testset "dbz kwarg fills DBZ at the gate positions" begin
+        wind = (x, y, z) -> (0.0, 0.0, 0.0)
+        dbzfun = (x, y, z) -> 20.0 + 1.0e-4 * x - 2.0e-4 * y
+        volA, volB, posA, posB = make_synthetic_dual_doppler_field(wind;
+            dbz = dbzfun, return_gate_positions = true)
+
+        for (v, pos) in ((volA, posA), (volB, posB))
+            for (sweep, p_sweep) in zip(v.sweeps, pos)
+                @test haskey(sweep.fields, "DBZ")
+                for (r, gcol) in ((1, 1), (5, 3), (10, 7))
+                    x, y, z = p_sweep.x[r, gcol], p_sweep.y[r, gcol], p_sweep.z[r, gcol]
+                    @test sweep.fields["DBZ"].data[r, gcol] ≈ dbzfun(x, y, z) atol = 1e-9
+                end
+            end
+        end
+    end
+
+end
