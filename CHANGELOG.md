@@ -14,7 +14,11 @@ incremental cost function, Gauss–Newton/CG solver via Krylov.jl), new
 `[synthesis.gate_error]`. See the
 [theory](https://csu-tropical.github.io/Daisho.jl/dev/theory/variational_wind/)
 and [guide](https://csu-tropical.github.io/Daisho.jl/dev/guide/variational_wind/)
-pages.
+pages, the
+[Variational Wind Analysis](https://csu-tropical.github.io/Daisho.jl/dev/api/variational_wind/)
+and
+[Variational Operator Layer](https://csu-tropical.github.io/Daisho.jl/dev/api/variational_operators/)
+API reference pages, and `docs/examples/variational_demo.jl`.
 
 All additions are **optional and non-breaking**: `[reference_state]`,
 `[variational]`, `[synthesis.fall_speed]`, and `[synthesis.gate_error]` are
@@ -22,6 +26,19 @@ absent by default, and `[synthesis] include_vertical_velocity` defaults to
 `false`, so every existing configuration and the stage-1 `(u, v)` product
 keep loading and behaving bit-identically.
 
+- `analyze_radar_volumes_variational(volumes, output_file, index_time, sgrid, p)`
+  is the file-writing entry point: it grids every volume onto the Springsteel
+  quadrature lattice through the stage-1 `WindGridAccumulator`, runs the
+  scalar spectral products unchanged, builds and solves the
+  `VariationalProblem`, and writes one CF-1.12 NetCDF with
+  `write_variational_netcdf` — the gridded scalar fields plus, on the regular
+  output grid, `U`/`V`/`W` (or `<name>_ANALYSIS` for a `[fields]`-derived
+  state variable), `VORT`, `DIV`, `MCRESIDUAL`, and optionally
+  `*_BACKGROUND`/`*_INCREMENT`/derivative fields and, on the mish
+  (quadrature) lattice, `*_MISH`, the stage-1 product, `NOBS_VR`, and
+  `RHOBAR`. `write_radar_netcdf` gained a `time` keyword (seconds since the
+  Unix epoch; `nothing` keeps the historical time-less layout) so the
+  variational and plain spectral writers share one time-aware code path.
 - New `[fields]` tags `reflectivity` (gate dBZ for the fall-speed correction
   and the `wind_synthesis` `reflectivity` state role) and `spectrum_width`
   (gate spectrum width for the per-gate error model).
@@ -31,6 +48,24 @@ keep loading and behaving bit-identically.
   profile). The mish-space background-error filter is variance-normalised,
   so `[variational.background_error] sigma` is the per-point
   background-error standard deviation.
+- New exported API: the pipeline (`analyze_radar_volumes_variational`,
+  `write_variational_netcdf`); the in-memory problem/result
+  (`VariationalProblem`, `Background`, `solve_variational`,
+  `VariationalResult`, `analysis_field`, `background_field`,
+  `increment_field`, `mass_continuity_residual`, `horizontal_divergence`,
+  `vertical_vorticity`, `evaluate_analysis!`); the state vector
+  (`StateVector`, `StateVariable`, `create_state_grid`, `state_view`,
+  `wind_indices`); observations (`AbstractObservation`,
+  `RadialVelocitySuperObs`, `MassContinuityObs`, `ScalarValueObs`,
+  `PointObs`, `WindSpeedObs`, `ObsGroup`, `ObservationSet`, `MishIndex`,
+  `ObsTerm`, `build_observation_set`, `build_radial_velocity_superobs`,
+  `build_mass_continuity_obs`, `build_scalar_value_obs`); the solver
+  (`solver_options`, `VarSolverOptions`, `VarSolverStats`); and the stage-1
+  extensions (`FallSpeedParameters`, `GateErrorParameters`, `GateModel`,
+  `terminal_fall_speed`, `gate_sigma`). The unexported operator layer
+  (spline/filter operators, observation backends, cost function) is
+  documented on its own API page for callers who need to build a custom
+  problem.
 - New direct dependencies: `LinearAlgebra`, `SparseArrays`, `Krylov`
   (compat `0.10`).
 - **Wind-accumulator JLD2 schema v2** (`WIND_ACCUMULATOR_SCHEMA_VERSION`

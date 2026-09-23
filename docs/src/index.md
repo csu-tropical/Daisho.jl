@@ -10,7 +10,7 @@
 - **Spectral gridding**: Grid directly onto [Springsteel.jl](https://github.com/csu-tropical/Springsteel.jl) semi-spectral grids for downstream variational analysis (see the [Spectral Gridding](guide/spectral_gridding.md) guide)
 - **Echo products**: Post-gridding hydrometeor identification (FHC) and rain-rate retrievals under a configurable `[echo]` namespace (see the [Echo Products](guide/echo_products.md) guide)
 - **Hybrid scan**: A near-surface product built from the lowest unblocked elevation at each grid column (see the [Hybrid Scan](guide/hybrid_scan.md) guide)
-- **Multi-Doppler wind synthesis**: Stage-1 (u, v) variational synthesis (in development; see the [Wind Synthesis](guide/wind_synthesis.md) guide)
+- **Multi-Doppler wind synthesis**: Stage-1 (u, v) least-squares retrieval plus an incremental 3DVAR variational solver producing a mass-continuity-consistent (u, v, w) analysis (see the [Wind Synthesis](guide/wind_synthesis.md) and [Variational Wind](guide/variational_wind.md) guides)
 - **SRTM terrain**: Digital elevation model integration for terrain-aware quality control (see the [SRTM](guide/srtm.md) guide)
 - **TOML-driven configuration**: The entire read → QC → grid pipeline is driven by a single, strictly-validated [`DaishoParameters`](@ref) TOML file
 
@@ -102,7 +102,7 @@ workflow for building rolling grids across flight legs.
 - [Quality Control](guide/quality_control.md): QC workflow and functions
 - [Gridding](guide/gridding.md): Gridding algorithms and options
 - [Spectral Gridding](guide/spectral_gridding.md): Gridding onto Springsteel semi-spectral grids
-- [Wind Synthesis](guide/wind_synthesis.md): Multi-Doppler stage-1 (u, v) variational synthesis
+- [Wind Synthesis](guide/wind_synthesis.md): Multi-Doppler stage-1 (u, v) retrieval and the [variational (u, v, w) solver](guide/variational_wind.md)
 - [Echo Products](guide/echo_products.md): FHC and rain-rate retrievals under `[echo]`
 - [Hybrid Scan](guide/hybrid_scan.md): Near-surface product from the lowest unblocked elevation
 - [SRTM](guide/srtm.md): Terrain data integration

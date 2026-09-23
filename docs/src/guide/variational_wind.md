@@ -52,6 +52,17 @@ get `(result, problem)` instead — the [`VariationalProblem`](@ref) holds the
 stage-1 product (`problem.stage1`), the observation set, and the state grid
 with the analysis loaded — and `write_output = false` to skip the file.
 
+A ready-to-use script for this path ships at
+`docs/examples/variational_demo.jl`: it builds the `[variational]`
+configuration from a base TOML, runs the analysis, prints the solver stats,
+cost-by-group, mass-continuity residual RMS, and `NOBS_VR` coverage, and (with
+CairoMakie installed) plots a horizontal `U`/`V` + `DBZ` cross-section and a
+vertical `W` cross-section read back from the written NetCDF.
+
+```
+julia --project=. docs/examples/variational_demo.jl radarA.nc radarB.nc [out_basename [config.toml]]
+```
+
 ### In-memory API
 
 For tests, interactive work, or an orchestrator (Sparrow) that wants the
