@@ -52,8 +52,22 @@ physical `u, v, w` (plan §1: "State winds are physical `u, v, w` (not
 """
 struct IdentityTransform <: AbstractStateTransform end
 
+"""
+    to_physical(t::AbstractStateTransform, c, z) -> Real
+    to_control(t::AbstractStateTransform, u, z) -> Real
+
+Map a control-space value `c` to its physical value (and back) at mish
+height `z` (metres). [`IdentityTransform`](@ref): both are the identity.
+"""
 to_physical(::IdentityTransform, c::Real, z::Real) = c
 to_control(::IdentityTransform, u::Real, z::Real) = u
+
+"""
+    d_physical_d_control(t::AbstractStateTransform, c, z) -> Real
+
+The pointwise Jacobian `∂(to_physical)/∂c` at control value `c` and height
+`z`; `1` for [`IdentityTransform`](@ref).
+"""
 d_physical_d_control(::IdentityTransform, c::Real, z::Real) = 1.0
 
 # ── Background-error specifications ──────────────────────────────────────────

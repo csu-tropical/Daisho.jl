@@ -24,43 +24,69 @@ underlying mathematics; this guide covers configuration and workflow.
 ### High-level entry point
 
 ```julia
-using Daisho
+using Daisho, Dates
 
 p = DaishoParameters("mygrid.toml")   # [variational] enabled = true
 sgrid = Daisho.create_radar_grid(p)   # from [grid.springsteel] + [fields]
 
 result = analyze_radar_volumes_variational(
-    volumes, "analysis.nc", index_time, sgrid, p;
+    volumes, "analysis.nc", DateTime(2026, 9, 23, 12), sgrid, p;
     heading = -9999.0, institution = "", source = "",
     include_derivatives = false, frame = CartesianFrame())
 ```
 
-`volumes` is one `Volume` or a collection of them (multi-radar, exactly as
-for stage 1 — there is no radar-index argument). The call grids every sweep
-into a `WindGridAccumulator`, builds the reference-density profile, the
-state vector, the observation set, solves the incremental cost function, and
-writes `output_file` with `write_variational_netcdf`.
+[`analyze_radar_volumes_variational`](@ref) takes one `Volume` or a vector
+of them (multi-radar, exactly as for stage 1 — there is no radar-index
+argument); the grid is centred on the centroid of the radars' reference
+positions. The call grids every sweep into a [`WindGridAccumulator`](@ref)
+(so one `[fields]` entry must carry the `velocity` tag), runs the scalar
+spectral products exactly as
+[`grid_radar_volume_spectral`](@ref Daisho.grid_radar_volume_spectral)
+does, builds the reference-density profile, the state vector, the
+background and the observation set, solves the incremental cost function,
+and writes the file with [`write_variational_netcdf`](@ref). The third
+argument (`index_time`, a `DateTime`) becomes the file's `time` coordinate.
+
+It returns the [`VariationalResult`](@ref). Pass `return_problem = true` to
+get `(result, problem)` instead — the [`VariationalProblem`](@ref) holds the
+stage-1 product (`problem.stage1`), the observation set, and the state grid
+with the analysis loaded — and `write_output = false` to skip the file.
 
 ### In-memory API
 
 For tests, interactive work, or an orchestrator (Sparrow) that wants the
-analysis without going through a file, build and solve a problem directly:
+analysis without going through a file, build and solve a problem directly
+on the Springsteel quadrature grid:
 
 ```julia
-acc = build_accumulator(spec, p)                  # WindGridAccumulator
-# ... grid_sweep!(acc, volume, s, p) for every sweep ...
+spec = Daisho.build_springsteel_grid_spec(sgrid;
+    reference_latitude = lat, reference_longitude = lon)
+acc = build_accumulator(spec, p)                   # WindGridAccumulator
+h_roi, v_roi = Daisho.compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
+                                         v_factor = p.gridding.vertical_roi_factor)
+for vol in volumes, s in eachindex(vol.sweeps)
+    grid_sweep!(acc, vol, s, p; roi = (h_roi, v_roi))
+end
+radar_grid = finalize_grid(acc.scalar)             # gridded scalars on the mish
 
 prob = VariationalProblem(acc, radar_grid, sgrid, p)
-result = solve_variational(prob)                  # ::VariationalResult
+result = solve_variational(prob)                   # ::VariationalResult
 
-analysis_field(result, "U")                        # regular-grid U, (nx, ny, nz)
-mass_continuity_residual(result)                   # div(u,v) + dw/dz + w*dlnrhobar/dz
+analysis_field(result, "U")                        # U on the mish, (nz, ny, nx)
+mass_continuity_residual(prob, result)             # ∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz
+evaluate_analysis!(prob.state_grid, result)        # load the analysis into the state grid
 ```
 
-`radar_grid` is the finalized gridded scalar array (`finalize_grid(acc.scalar)`
-or equivalent) supplying value observations for any `[fields]`-derived scalar
+`radar_grid` supplies value observations for any `[fields]`-derived scalar
 in the state (§ "Adding a scalar to the state" below); pass `nothing` when
-the state has no such variable.
+the state has no such variable. [`analysis_field`](@ref),
+[`background_field`](@ref) and [`increment_field`](@ref) return mish arrays;
+[`horizontal_divergence`](@ref), [`vertical_vorticity`](@ref) and
+[`mass_continuity_residual`](@ref) the mish diagnostics. For custom
+observation sets and backgrounds see [`build_observation_set`](@ref),
+[`Background`](@ref) and the in-memory
+`VariationalProblem(state, state_grid, observations, background, reference, p)`
+constructor.
 
 ## Configuration
 
@@ -304,19 +330,37 @@ type (`natural`, `dirichlet` at 0, `neumann` at 0, …) instead.
 
 ## Output variables
 
-On the **regular output grid**: `U`, `V`, `W`, `VORT` (`∂v/∂x − ∂u/∂y`,
-s⁻¹), `DIV` (`∂u/∂x + ∂v/∂y`, s⁻¹), `MCRESIDUAL` (`DIV + ∂w/∂z +
-w·dlnρ̄/dz`, s⁻¹ — the anelastic continuity residual, a direct check of
-solver convergence), and (with `include_derivatives = true`) derivative
-suffixes for each. `output_background`/`output_increment` add
-`*_BACKGROUND`/`*_INCREMENT` for every state variable.
+[`write_variational_netcdf`](@ref) writes one file. The scalar `[fields]`
+come first, exactly as [`grid_radar_volume_spectral`](@ref Daisho.grid_radar_volume_spectral)
+writes them (Springsteel's regular output grid, dims `x, y, z`, plus
+`time`); every regular-grid variable is `Float64` with a `NaN` fill on the
+same dims.
+
+On the **regular output grid**:
+
+| Variable | Units | Meaning |
+|:---------|:------|:--------|
+| `U`, `V`, `W` | m s⁻¹ | The analysis (a `[fields]`-derived state variable such as `DBZ` is written as `DBZ_ANALYSIS`). |
+| `VORT` | s⁻¹ | `∂v/∂x − ∂u/∂y` |
+| `DIV` | s⁻¹ | `∂u/∂x + ∂v/∂y` |
+| `MCRESIDUAL` | s⁻¹ | `DIV + ∂w/∂z + w·dlnρ̄/dz` — the anelastic continuity residual, a direct check of solver convergence (only when `W` is in the state). |
+| `U_x`, `U_xx`, `U_y`, … | | With `include_derivatives = true`: the derivative fields of every analysis variable, with the same suffixes as the scalars. |
+| `*_BACKGROUND` | | With `output_background`: the background, per state variable. |
+| `*_INCREMENT` | | With `output_increment`: analysis − background, so `BACKGROUND + INCREMENT = analysis`. |
 
 With `output_mish = true`, also on the **mish (quadrature) lattice**
-(`x_mish`, `y_mish`, `z_mish` dimensions): the analysis itself at quadrature
-points, the stage-1 per-point diagnostics `USTD`, `VSTD`, `QFLAG` (never
-resampled — these are properties of the accumulator, not the spline), the
-super-observation row count `NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)`
-(the reference-density profile actually used).
+(`x_mish`, `y_mish`, `z_mish` dimensions): `U_MISH`, `V_MISH`, `W_MISH`
+(the analysis itself at the quadrature points, `Float64`), the stage-1
+per-point product `U_STAGE1`, `V_STAGE1`, `USTD`, `VSTD`, `DET`, `NGATES`,
+`QFLAG` (never resampled — these are properties of the accumulator, not the
+spline; written as the QC'd product with the `[io]` fill, as
+[`write_wind_synthesis`](@ref) does), the super-observation row count
+`NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)` (the reference-density
+profile actually used).
+
+Global attributes add `variational_background`,
+`variational_outer_iterations`, `variational_cg_iterations` (total CG
+iterations) and `variational_converged` (`1`/`0`) to the usual radar set.
 
 ## Troubleshooting
 
@@ -328,7 +372,9 @@ super-observation row count `NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)`
   contributing, or `[synthesis] max_elevation`/ROI settings are excluding
   more gates than intended.
 - **High `MCRESIDUAL`.** Either the solver has not converged (check
-  `converged`/`outer_iterations`/`inner_iterations` on the returned stats —
+  `result.converged` and `result.stats.outer_iterations` /
+  `result.stats.inner_iterations` ([`VarSolverStats`](@ref)), or the
+  `variational_*` global attributes of the file —
   raise `max_inner_iterations` or loosen `inner_tolerance` if CG is hitting
   the cap) or `mass_continuity_sigma_per_s` is too loose relative to the
   radial-velocity term (tighten it, or check `[reference_state]` for a
@@ -340,9 +386,9 @@ super-observation row count `NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)`
   that `[variational.radial_velocity] error_inflation` /
   `mass_continuity_sigma_per_s` are not making the observation term
   overwhelmingly dominant relative to the `I` term.
-- **Checking which observation term dominates the cost.** The solver
-  returns a per-group cost breakdown (`cost_by_group` /
-  `cost_nonlinear_by_backend`) — compare `:radial_velocity`,
+- **Checking which observation term dominates the cost.** The result
+  carries a per-kind cost breakdown (`result.cost_by_group`; per backend:
+  `result.stats.cost_by_backend`) — compare `:radial_velocity`,
   `:mass_continuity`, and `:scalar_value` (if present) to see which term the
   optimizer is spending its effort on.
 

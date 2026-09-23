@@ -40,6 +40,8 @@ makedocs(
             "api/gridding.md",
             "api/spectral_gridding.md",
             "api/wind_synthesis.md",
+            "api/variational_wind.md",
+            "api/variational_operators.md",
             "api/echo_products.md",
             "api/hybrid_scan.md",
             "api/srtm.md",

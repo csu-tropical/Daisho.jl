@@ -1,6 +1,7 @@
-# Variational (3DVAR) wind solver — operator layer and, in later phases, the
-# observation operators, cost function, solver, state vector, and pipeline.
-# Nothing is exported yet; the public API is decided in a later phase.
+# Variational (3DVAR) wind solver: operator layer, observation operators, cost
+# function, solver, state vector, observations, problem, and the file-writing
+# pipeline. The public API is exported from `src/Daisho.jl`; the operator layer
+# stays unexported (qualified `Daisho.` names, documented in the API reference).
 
 include("linear_operator.jl")
 include("pencil.jl")
@@ -13,5 +14,4 @@ include("state.jl")
 include("observations.jl")
 include("superobs.jl")
 include("problem.jl")
-
-# Later phases: pipeline.jl
+include("pipeline.jl")

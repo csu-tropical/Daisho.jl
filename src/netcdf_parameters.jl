@@ -202,6 +202,40 @@ phidp_l1_attrib = OrderedDict(
         "units"                     => "deg",
     )
 
+# Variational (3DVAR) wind analysis diagnostics. The wind components
+# themselves (U, V, W) take their CF names from `_cf_component_attrs`.
+vort_attrib = OrderedDict(
+    "standard_name"             => "atmosphere_relative_vorticity",
+    "long_name"                 => "Vertical component of relative vorticity",
+    "units"                     => "s-1",
+)
+
+div_attrib = OrderedDict(
+    "standard_name"             => "divergence_of_wind",
+    "long_name"                 => "Horizontal divergence",
+    "units"                     => "s-1",
+)
+
+# No CF standard name exists for these two; the table's convention (every
+# entry carries a standard_name) uses the variable name, as for RATE_* above.
+mcresidual_attrib = OrderedDict(
+    "standard_name"             => "MCRESIDUAL",
+    "long_name"                 => "anelastic mass continuity residual",
+    "units"                     => "s-1",
+)
+
+rhobar_attrib = OrderedDict(
+    "standard_name"             => "air_density",
+    "long_name"                 => "Reference-state air density",
+    "units"                     => "kg m-3",
+)
+
+nobs_vr_attrib = OrderedDict(
+    "standard_name"             => "NOBS_VR",
+    "long_name"                 => "Number of radial-velocity super-observation rows",
+    "units"                     => "1",
+)
+
 unknown_attrib = OrderedDict(
     "standard_name"             => "UNKNOWN",
     "long_name"                 => "unknown",
@@ -239,5 +273,10 @@ variable_attrib_dict["TEMP_FOR_PID"] = temp_for_pid_attrib
 variable_attrib_dict["HEIGHT"] = height_attrib
 variable_attrib_dict["elevation_angle"] = elevation_angle_attrib
 variable_attrib_dict["HYBRID_HEIGHT"] = hybrid_height_attrib
+variable_attrib_dict["VORT"] = vort_attrib
+variable_attrib_dict["DIV"] = div_attrib
+variable_attrib_dict["MCRESIDUAL"] = mcresidual_attrib
+variable_attrib_dict["RHOBAR"] = rhobar_attrib
+variable_attrib_dict["NOBS_VR"] = nobs_vr_attrib
 variable_attrib_dict["UNKNOWN"] = unknown_attrib
 

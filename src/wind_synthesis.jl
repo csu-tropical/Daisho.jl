@@ -927,47 +927,72 @@ end
 
 # Define the wind component / uncertainty / diagnostic variables (the two
 # frame components, their `*STD`, `DET`, `NGATES`, `QFLAG`) into an open dataset
-# `ds` whose `X`/`Y`/`Z`/`time` dims and `grid_mapping`/`latitude`/`longitude`
-# already exist. Shared by [`write_wind_synthesis`](@ref) (fresh file) and
-# `write_grid_products` (appended onto the scalar grid). `data` planes are
-# `(nz, ny, nx)`, permuted to `(nx, ny, nz)` for the X,Y,Z,time variables.
-function _write_wind_data_vars!(ds, out::SynthesisOutput)
+# `ds` whose dims (and, when `coordinates` names them, `latitude`/`longitude`)
+# and `grid_mapping` already exist. Shared by [`write_wind_synthesis`](@ref)
+# (fresh file), `write_grid_products` (appended onto the scalar grid) and
+# `write_variational_netcdf` (mish diagnostics). `data` planes are
+# `(nz, ny, nx)`, permuted to `(nx, ny, nz)` for the x, y, z variables.
+#
+# `dims` is the 3 spatial dim names in x, y, z order, with an optional size-1
+# `"time"` first or last; `component_suffix` is appended to the two component
+# names only (e.g. `"_STAGE1"` → `U_STAGE1`, while σ stays `USTD`);
+# `coordinates = nothing` omits the `coordinates` attribute.
+function _write_wind_data_vars!(ds, out::SynthesisOutput;
+                                dims::Tuple{Vararg{String}} = ("X", "Y", "Z", "time"),
+                                component_suffix::AbstractString = "",
+                                coordinates::Union{Nothing,AbstractString} = "longitude latitude")
     _xyz(A) = permutedims(A, (3, 2, 1))
     c1, c2 = out.component_names
     s1, s2 = c1 * "STD", c2 * "STD"
     fv = Float32(out.fill_value)
+    _put!(v, data) = _put_xyz!(v, dims, data)
+
+    function _common(attrs)
+        attrs["grid_mapping"] = "grid_mapping"
+        coordinates === nothing || (attrs["coordinates"] = coordinates)
+        return attrs
+    end
 
     function _wind_field!(name, data, long_name; std_name = nothing,
                           units = "m s-1")
-        attrs = OrderedDict{String,Any}("long_name" => long_name,
-            "units" => units, "grid_mapping" => "grid_mapping",
-            "coordinates" => "longitude latitude",
-            "_FillValue" => fv)
+        attrs = OrderedDict{String,Any}("long_name" => long_name, "units" => units)
+        _common(attrs)
+        attrs["_FillValue"] = fv
         std_name === nothing || (attrs["standard_name"] = std_name)
-        defVar(ds, name, Float32, ("X", "Y", "Z", "time"); attrib = attrs)[:, :, :, 1] =
-            Float32.(_xyz(data))
+        _put!(defVar(ds, name, Float32, dims; attrib = attrs), Float32.(_xyz(data)))
     end
 
     sn1, ln1 = _cf_component_attrs(c1)
     sn2, ln2 = _cf_component_attrs(c2)
-    _wind_field!(c1, out.comp1, ln1; std_name = sn1)
-    _wind_field!(c2, out.comp2, ln2; std_name = sn2)
+    _wind_field!(c1 * component_suffix, out.comp1, ln1; std_name = sn1)
+    _wind_field!(c2 * component_suffix, out.comp2, ln2; std_name = sn2)
     _wind_field!(s1, out.sigma1, "$(c1) normalized uncertainty (standard deviation)")
     _wind_field!(s2, out.sigma2, "$(c2) normalized uncertainty (standard deviation)")
     _wind_field!("DET", out.det, "Normal-equation determinant (baseline conditioning)";
                  units = "1")
 
-    defVar(ds, "NGATES", Int32, ("X", "Y", "Z", "time"); attrib = OrderedDict(
-        "long_name" => "Number of contributing gates",
-        "grid_mapping" => "grid_mapping",
-        "coordinates" => "longitude latitude"))[:, :, :, 1] = _xyz(out.n_gates)
+    _put!(defVar(ds, "NGATES", Int32, dims; attrib = _common(OrderedDict{String,Any}(
+        "long_name" => "Number of contributing gates"))), _xyz(out.n_gates))
 
-    defVar(ds, "QFLAG", Int8, ("X", "Y", "Z", "time"); attrib = OrderedDict(
+    _put!(defVar(ds, "QFLAG", Int8, dims; attrib = _common(OrderedDict{String,Any}(
         "long_name" => "Quality flag (bitwise)",
         "flag_masks" => Int8[QFLAG_SIGMA1, QFLAG_SIGMA2, QFLAG_SINGULAR, QFLAG_NODATA],
         "flag_meanings" => "sigma1_above_threshold sigma2_above_threshold " *
-                           "singular_geometry no_data",
-        "grid_mapping" => "grid_mapping",
-        "coordinates" => "longitude latitude"))[:, :, :, 1] = _xyz(out.quality_flag)
+                           "singular_geometry no_data"))), _xyz(out.quality_flag))
     return ds
+end
+
+# Write an (nx, ny, nz) array into a variable defined on `dims` (3 spatial
+# names plus an optional size-1 "time" first or last).
+function _put_xyz!(v, dims, data::AbstractArray{<:Any,3})
+    if length(dims) == 3
+        v[:, :, :] = data
+    elseif first(dims) == "time"
+        v[1, :, :, :] = data
+    elseif last(dims) == "time"
+        v[:, :, :, 1] = data
+    else
+        throw(ArgumentError("_put_xyz!: unsupported dims $(dims)"))
+    end
+    return v
 end

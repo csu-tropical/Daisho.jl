@@ -4,8 +4,8 @@
 # derivative slabs, divergence, vorticity, anelastic mass-continuity residual).
 #
 # This file holds the in-memory API only; the file-writing pipeline
-# (`analyze_radar_volumes_variational`, `write_variational_netcdf`) is a later
-# phase.
+# (`analyze_radar_volumes_variational`, `write_variational_netcdf`) is in
+# pipeline.jl.
 
 # ── Background ────────────────────────────────────────────────────────────────
 
@@ -577,8 +577,22 @@ mish-space increment; `key` is a state-variable name (`"U"`), singular role
 """
 analysis_field(r::VariationalResult, key::Union{Int,String,Symbol}) =
     copy(state_view(r.analysis, r.state, key))
+
+"""
+    background_field(r::VariationalResult, key) -> Array{Float64,3}
+
+The `(nz, ny, nx)` mish background of one state variable; see
+[`analysis_field`](@ref).
+"""
 background_field(r::VariationalResult, key::Union{Int,String,Symbol}) =
     copy(state_view(r.background, r.state, key))
+
+"""
+    increment_field(r::VariationalResult, key) -> Array{Float64,3}
+
+The `(nz, ny, nx)` mish-space increment `D F ξ_total` of one state variable
+(not spline-smoothed); see [`analysis_field`](@ref).
+"""
 increment_field(r::VariationalResult, key::Union{Int,String,Symbol}) =
     copy(state_view(r.increment, r.state, key))
 

@@ -93,4 +93,24 @@ export HybridScanParameters
 export apply_hybrid_scan, build_hybrid_scan, hybrid_scan_output_names
 export hybrid_beam_heights, hybrid_scan_tilt_angle
 
+# Variational (3DVAR) wind analysis. The operator layer (AbstractLinearOp,
+# SplineProjection, SplineEvaluation, MishFilter, DiagonalScaling, ChainOp,
+# ObsSet, the obs backends, IncrementalCostFunction, HessianOperator,
+# solve_incremental!) stays unexported; `XYZ` is not exported either (it would
+# clash with ColorTypes.XYZ for plotting users) — use `Daisho.XYZ`.
+export analyze_radar_volumes_variational, write_variational_netcdf
+export VariationalProblem, solve_variational, VariationalResult, Background
+export analysis_field, background_field, increment_field
+export mass_continuity_residual, horizontal_divergence, vertical_vorticity
+export evaluate_analysis!, solver_options, VarSolverOptions, VarSolverStats
+export StateVector, StateVariable, create_state_grid, state_view, wind_indices
+export AbstractObservation, RadialVelocitySuperObs, MassContinuityObs
+export ScalarValueObs, PointObs, WindSpeedObs, ObsGroup, ObservationSet
+export MishIndex, ObsTerm
+export build_observation_set, build_radial_velocity_superobs
+export build_mass_continuity_obs, build_scalar_value_obs
+# Stage-1 extensions used by the variational stage (fall speed, gate error)
+export FallSpeedParameters, GateErrorParameters, GateModel
+export terminal_fall_speed, gate_sigma
+
 end # module Daisho
