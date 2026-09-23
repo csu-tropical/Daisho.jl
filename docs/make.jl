@@ -19,6 +19,7 @@ makedocs(
             "guide/gridding.md",
             "guide/spectral_gridding.md",
             "guide/wind_synthesis.md",
+            "guide/variational_wind.md",
             "guide/echo_products.md",
             "guide/reference_state.md",
             "guide/hybrid_scan.md",
@@ -28,6 +29,7 @@ makedocs(
             "theory/beam_geometry.md",
             "theory/gridding_algo.md",
             "theory/wind_synthesis.md",
+            "theory/variational_wind.md",
         ],
         "API Reference" => [
             "api/parameters.md",

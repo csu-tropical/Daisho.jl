@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+### Variational wind solver (stage 2)
+
+An incremental, samurai-style 3DVAR analysis producing a coupled `(u, v, w)`
+wind field satisfying anelastic mass continuity, built on Springsteel's
+cubic B-spline quadrature grid. New `src/variational/` operator layer
+(spline projection/evaluation, mish-space filter, observation backends,
+incremental cost function, Gauss–Newton/CG solver via Krylov.jl), new
+`[reference_state]`, `[variational]`, and `[synthesis]` extensions —
+`include_vertical_velocity`, `[synthesis.fall_speed]`,
+`[synthesis.gate_error]`. See the
+[theory](https://csu-tropical.github.io/Daisho.jl/dev/theory/variational_wind/)
+and [guide](https://csu-tropical.github.io/Daisho.jl/dev/guide/variational_wind/)
+pages.
+
+All additions are **optional and non-breaking**: `[reference_state]`,
+`[variational]`, `[synthesis.fall_speed]`, and `[synthesis.gate_error]` are
+absent by default, and `[synthesis] include_vertical_velocity` defaults to
+`false`, so every existing configuration and the stage-1 `(u, v)` product
+keep loading and behaving bit-identically.
+
+- New `[fields]` tags `reflectivity` (gate dBZ for the fall-speed correction
+  and the `wind_synthesis` `reflectivity` state role) and `spectrum_width`
+  (gate spectrum width for the per-gate error model).
+- New direct dependencies: `LinearAlgebra`, `SparseArrays`, `Krylov`
+  (compat `0.10`).
+- **Wind-accumulator JLD2 schema v2** (`WIND_ACCUMULATOR_SCHEMA_VERSION`
+  1 → 2, adding the per-gate model): v1 `*.jld2` wind-accumulator files no
+  longer load with `load_wind_accumulator`; regenerate them.
+
 ## v0.2.0 — Flat per-field tag vocabulary, optional blocks, gate-state terminology
 
 *First registered release. Changes below are relative to the unregistered v0.1
