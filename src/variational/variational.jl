@@ -12,5 +12,6 @@ include("solver.jl")
 include("state.jl")
 include("observations.jl")
 include("superobs.jl")
+include("problem.jl")
 
-# Later phases: problem.jl, pipeline.jl
+# Later phases: pipeline.jl
