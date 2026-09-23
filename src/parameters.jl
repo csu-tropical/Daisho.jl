@@ -535,6 +535,51 @@ Base.@kwdef struct SynthesisParameters
 end
 
 """
+    ReferenceStateParameters
+
+Hydrostatic reference-density profile ρ̄(z), loaded from the optional
+`[reference_state]` block. Shared across consumers that need a base-state
+density or temperature profile: variational-stage mass continuity
+(`∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz = 0`), radar fall-speed correction, and
+(in a future phase) FHC temperature. See [`build_reference_profile`](@ref),
+[`ExponentialReferenceProfile`](@ref), and [`SoundingReferenceProfile`](@ref).
+
+# Fields
+- `source::String`: `"exponential"` (default) for a simple analytic profile, or
+  `"sounding"` to build a full hydrostatic reference state from a sounding file
+  via Springsteel (`Springsteel.calculate_reference_state`).
+- `sounding_file::String`: path to the sounding file; required (and must
+  exist) when `source = "sounding"`. Format: a surface line `p_sfc theta q_v`
+  (pressure in hPa, potential temperature in K, water-vapor mixing ratio in
+  g/kg), followed by one `z theta q_v` line per level (`z` in metres, `q_v` in
+  g/kg), matching the samurai/Scythe sounding format.
+- `moisture::Bool`: sounding source only; when `true` (default) the reference
+  density includes the vapor partial density (`ρ̄ = ρ̄_d + ρ̄_v`); when `false`
+  the state is built dry (`ρ̄ = ρ̄_d`).
+- `density_surface_kg_m3::Float64`: exponential source only; surface density
+  ρ₀ in kg m⁻³ (default `1.2`).
+- `density_scale_height_m::Float64`: exponential source only; scale height H
+  in metres (default `8500.0`); ρ̄(z) = ρ₀·exp(−z/H).
+- `temperature_surface_k::Float64`: exponential source only; optional surface
+  temperature T₀ in Kelvin. `NaN` (the default) means no temperature profile
+  is available — [`reference_temperature_kelvin`](@ref) and
+  [`freezing_level_m`](@ref) then return `nothing`, and
+  [`temperature_celsius`](@ref) throws.
+- `lapse_rate_k_m::Float64`: exponential source only; lapse rate Γ in K/m
+  (default `0.0065`, the US Standard Atmosphere troposphere value), used only
+  when `temperature_surface_k` is finite: T(z) = T₀ − Γ·z.
+"""
+Base.@kwdef struct ReferenceStateParameters
+    source::String                = "exponential"
+    sounding_file::String         = ""
+    moisture::Bool                = true
+    density_surface_kg_m3::Float64 = 1.2
+    density_scale_height_m::Float64 = 8500.0
+    temperature_surface_k::Float64 = NaN
+    lapse_rate_k_m::Float64       = 0.0065
+end
+
+"""
     EchoProductsParameters
 
 Configuration for the post-gridding echo products — fuzzy hydrometeor
@@ -696,9 +741,13 @@ present block stays strict.
 - `grid::GridParameters`
 - `io::IOParameters`
 - `synthesis::SynthesisParameters`
+- `echo::EchoProductsParameters`
+- `hybrid_scan::HybridScanParameters`
+- `reference_state::ReferenceStateParameters`
 - `provided::Set{Symbol}`: which optional top-level sections (`:qc`,
-  `:gridding`, `:grid`, `:synthesis`) were actually present in the loaded TOML.
-  Absence is tracked explicitly — it is *not* inferred from default values.
+  `:gridding`, `:grid`, `:synthesis`, `:echo`, `:hybrid_scan`,
+  `:reference_state`) were actually present in the loaded TOML. Absence is
+  tracked explicitly — it is *not* inferred from default values.
 
 # Examples
 ```julia
@@ -718,6 +767,7 @@ struct DaishoParameters
     synthesis::SynthesisParameters
     echo::EchoProductsParameters
     hybrid_scan::HybridScanParameters
+    reference_state::ReferenceStateParameters
     provided::Set{Symbol}
 end
 
@@ -749,6 +799,17 @@ DaishoParameters(moments::MomentParameters, qc::QCParameters,
     DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo,
                      HybridScanParameters(), provided)
 
+# Back-compat convenience for callers built before the `[reference_state]`
+# block existed (nine positional args ending …, hybrid_scan, provided).
+# Inject a default reference_state block.
+DaishoParameters(moments::MomentParameters, qc::QCParameters,
+                 gridding::GriddingParameters, grid::GridParameters,
+                 io::IOParameters, synthesis::SynthesisParameters,
+                 echo::EchoProductsParameters, hybrid_scan::HybridScanParameters,
+                 provided::Set{Symbol}) =
+    DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo,
+                     hybrid_scan, ReferenceStateParameters(), provided)
+
 # ── Loader ───────────────────────────────────────────────────────────────────
 
 """
@@ -775,7 +836,7 @@ DaishoParameters(path::AbstractString) = DaishoParameters(_load_toml(path))
 # numbers and must not silently drive a grid.
 function DaishoParameters(d::AbstractDict)
     provided = Set{Symbol}()
-    for s in (:qc, :gridding, :grid, :synthesis, :echo, :hybrid_scan)
+    for s in (:qc, :gridding, :grid, :synthesis, :echo, :hybrid_scan, :reference_state)
         haskey(d, string(s)) && push!(provided, s)
     end
 
@@ -787,7 +848,9 @@ function DaishoParameters(d::AbstractDict)
     synthesis = haskey(d, "synthesis") ? _synthesis_from_dict(d["synthesis"])                   : SynthesisParameters()
     echo      = haskey(d, "echo")      ? _echo_from_dict(d["echo"])                             : EchoProductsParameters()
     hybrid    = haskey(d, "hybrid_scan") ? _hybrid_scan_from_dict(d["hybrid_scan"])             : HybridScanParameters()
-    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, hybrid, provided)
+    reference_state = haskey(d, "reference_state") ? _reference_state_from_dict(d["reference_state"]) : ReferenceStateParameters()
+    return DaishoParameters(moments, qc, gridding, grid, io, synthesis, echo, hybrid,
+                            reference_state, provided)
 end
 
 """
@@ -1200,6 +1263,47 @@ function _hybrid_scan_from_dict(d::AbstractDict)
             "selected cells would not appear in the output."))
     end
     return hp
+end
+
+# Build ReferenceStateParameters from the optional `[reference_state]` block.
+# Every key defaults when absent; unknown keys raise to catch typos, matching
+# the rest of the loader. `source` gates which keys are actually meaningful,
+# but every key stays legal regardless of `source` (e.g. the exponential
+# defaults may sit alongside a sounding source, unused but not rejected).
+function _reference_state_from_dict(d::AbstractDict)
+    allowed = (:source, :sounding_file, :moisture, :density_surface_kg_m3,
+        :density_scale_height_m, :temperature_surface_k, :lapse_rate_k_m)
+    unknown = setdiff(Set(Symbol.(keys(d))), Set(allowed))
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[reference_state]`. " *
+        "Allowed keys: $(join(allowed, ", "))"))
+
+    kw = Dict{Symbol,Any}()
+    for f in allowed
+        sk = String(f)
+        haskey(d, sk) || continue
+        kw[f] = _coerce_field(ReferenceStateParameters, f, d[sk])
+    end
+    rp = ReferenceStateParameters(; kw...)
+
+    rp.source in ("exponential", "sounding") || throw(ArgumentError(
+        "`[reference_state]` source = \"$(rp.source)\" is not valid; allowed: " *
+        "\"exponential\", \"sounding\"."))
+    if rp.source == "sounding"
+        isempty(rp.sounding_file) && throw(ArgumentError(
+            "`[reference_state]` source = \"sounding\" requires `sounding_file` " *
+            "to be set."))
+        isfile(rp.sounding_file) || throw(ArgumentError(
+            "`[reference_state]` sounding_file \"$(rp.sounding_file)\" does not " *
+            "exist."))
+    end
+    rp.density_surface_kg_m3 > 0.0 || throw(ArgumentError(
+        "`[reference_state]` density_surface_kg_m3 must be positive (got " *
+        "$(rp.density_surface_kg_m3))."))
+    rp.density_scale_height_m > 0.0 || throw(ArgumentError(
+        "`[reference_state]` density_scale_height_m must be positive (got " *
+        "$(rp.density_scale_height_m))."))
+    return rp
 end
 
 # Each `[grid.*]` sub-table is independently optional and defaults when absent;

@@ -8,6 +8,8 @@ using NearestNeighbors, Distances
 using CoordRefSystems, Unitful
 using Springsteel
 using JLD2
+using LinearAlgebra, SparseArrays
+import Krylov
 
 # Constants
 const Reff = 4.0 * 6371000.0 / 3.0
@@ -15,6 +17,7 @@ const Reff = 4.0 * 6371000.0 / 3.0
 include("netcdf_parameters.jl")
 include("temperature_profile.jl")
 include("parameters.jl")
+include("reference_density.jl")
 include("radar.jl")
 include("cfradial.jl")
 include("cfradial_reader.jl")
@@ -41,6 +44,12 @@ export MetadataParameters
 export radar_vars
 export IOParameters
 export SynthesisParameters
+export ReferenceStateParameters
+
+# Reference density profiles (exponential | Springsteel sounding)
+export AbstractReferenceProfile, ExponentialReferenceProfile, SoundingReferenceProfile
+export reference_density, dlnrho_dz, reference_temperature_kelvin, freezing_level_m
+export build_reference_profile
 
 # CfRadial 2.1 data model
 export Volume, SweepGroup, Field, FieldMetadata

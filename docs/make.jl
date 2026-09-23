@@ -20,6 +20,7 @@ makedocs(
             "guide/spectral_gridding.md",
             "guide/wind_synthesis.md",
             "guide/echo_products.md",
+            "guide/reference_state.md",
             "guide/hybrid_scan.md",
             "guide/srtm.md",
         ],
@@ -30,6 +31,7 @@ makedocs(
         ],
         "API Reference" => [
             "api/parameters.md",
+            "api/reference_state.md",
             "api/types.md",
             "api/radar_io.md",
             "api/quality_control.md",
