@@ -34,6 +34,7 @@ include("rainrate.jl")
 include("echo_products.jl")
 include("hybrid_scan.jl")
 include("springsteel_adapter.jl")
+include("variational/variational.jl")
 
 # Runtime parameter system exports
 export DaishoParameters, print_config
