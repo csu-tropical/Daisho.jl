@@ -26,22 +26,49 @@
 # The 3-D filter is separable: the three axis operators act on different
 # indices of the (kDim, jDim, iDim) mish array and commute exactly, so the
 # sweep order (k, j, i forward; i, j, k adjoint) affects only round-off.
+#
+# Variance normalisation (the solver default, decided 2026-09-23). The
+# row-normalised F shrinks white noise: (FFᵀ)_ii = Σ_j F_ij² ≪ 1, so D·F·ξ
+# with ξ ~ N(0, I) would have a standard deviation far below the configured
+# σ_b (≈ 5% of it for 1-cell lengths on a mubar-3 mish). The solver therefore
+# uses, per axis,
+#
+#     F̃ = N⁻¹F,    N = diag(√(Σ_j F_ij²)),
+#
+# so diag(F̃F̃ᵀ) = 1 exactly at every mish point. The 3-D filter is the tensor
+# product of its axis filters, hence diag(F̃₃F̃₃ᵀ) = Π_axes diag(F̃_a F̃_aᵀ) = 1
+# exactly too, and B = S D F̃F̃ᵀ D Sᵀ has per-point variance σ_b² before the
+# spline projection. The correlation shape of F̃F̃ᵀ is unchanged (the
+# √2-widened kernel); F̃'s row sums are no longer 1 (≈ √(2√π·s) in the
+# interior for a Gaussian of s mish points on a uniform mish). The `:row`
+# form stays available for Springsteel parity and for mean-preserving
+# smoothing of fields.
 
 const _SpringsteelSplineFilter = Union{Springsteel.GaussianFilter,Springsteel.LanczosFilter}
 
 """
-    AxisFilter(filter::Springsteel.AbstractFilter, ax::AxisSpline; symmetric = false)
+    AxisFilter(filter::Springsteel.AbstractFilter, ax::AxisSpline;
+               normalisation = :variance, symmetric = false)
 
 Sparse `Dim×Dim` matrix form of a Springsteel spline-direction filter
 (`GaussianFilter` or `LanczosFilter`; `sigma`/`a` in cell widths of
 `ax.sp.DX`) on the mish points of `ax`, with its materialised transpose `Ft`
 so both directions are CSC products.
 
-- `symmetric = false` (default): `F[i,j] = K(x_j − x_i)/W_i` within the kernel
-  support, exactly Springsteel's `_convolve_axis!` (row-normalised, so
-  `F·1 = 1`; a row whose weight sum is ≤ 0 is the identity row). Not
-  symmetric: see the file header.
-- `symmetric = true`: `F = W_q^{1/2}·(K/κ)·W_q^{1/2}` with the SB quadrature
+- `symmetric = false` (default) builds the row-normalised convolution
+  `F_row[i,j] = K(x_j − x_i)/W_i` within the kernel support, exactly
+  Springsteel's `_convolve_axis!` (`F_row·1 = 1`; a row whose weight sum is
+  ≤ 0 is the identity row; not symmetric: see the file header), and then
+  applies `normalisation`:
+  - `:variance` (default, the solver's background-error filter):
+    `F = N⁻¹F_row` with `N = diag(√(Σ_j F_row[i,j]²))`, so
+    `diag(F Fᵀ) = 1` exactly at every mish point (white noise keeps unit
+    variance; `sigma` of `D` is then the background-error standard
+    deviation). Row sums are no longer 1.
+  - `:row`: `F = F_row` (Springsteel parity; mean-preserving smoothing).
+- `symmetric = true` (experimental; `normalisation` is ignored and the
+  stored `normalisation` is `:none` — this variant is NOT
+  variance-normalised): `F = W_q^{1/2}·(K/κ)·W_q^{1/2}` with the SB quadrature
   weights `W_q = diag(ax.w)` (`DX·quadweights`) and `κ = ∫K` over the
   support (so the kernel integrates to one; Springsteel's Lanczos kernel has
   `K(0) = 1`, `∫K ≈ DX`), built on the upper triangle and mirrored, so it is
@@ -57,7 +84,8 @@ are not stored; the diagonal always is. `SpectralFilter` (and any other
 filter type) throws `ArgumentError`.
 
 Fields: `F`, `Ft`, `support` (kernel half-width, metres), `length_cells`
-(Gaussian `sigma` or Lanczos `a`, in cells), `symmetric`.
+(Gaussian `sigma` or Lanczos `a`, in cells), `symmetric`, `normalisation`
+(`:variance`, `:row`, or `:none` for the symmetric variant).
 """
 struct AxisFilter
     F::SparseMatrixCSC{Float64,Int}
@@ -65,6 +93,15 @@ struct AxisFilter
     support::Float64
     length_cells::Float64
     symmetric::Bool
+    normalisation::Symbol
+end
+
+const _FILTER_NORMALISATIONS = (:variance, :row)
+
+function _check_normalisation(normalisation::Symbol)
+    normalisation in _FILTER_NORMALISATIONS || throw(ArgumentError(
+        "filter normalisation must be :variance or :row, got :$(normalisation)"))
+    return normalisation
 end
 
 function _check_spline_filter(filter)
@@ -87,15 +124,37 @@ end
 _filter_length(f::Springsteel.GaussianFilter) = Float64(f.sigma)
 _filter_length(f::Springsteel.LanczosFilter) = Float64(f.a)
 
-function AxisFilter(filter::Springsteel.AbstractFilter, ax::AxisSpline; symmetric::Bool = false)
+function AxisFilter(filter::Springsteel.AbstractFilter, ax::AxisSpline;
+                    normalisation::Symbol = :variance, symmetric::Bool = false)
+    _check_normalisation(normalisation)
     _check_spline_filter(filter)
     K, support = Springsteel._spline_kernel(filter, ax.sp.DX)
     x = ax.mishPoints
     issorted(x) || throw(ArgumentError("AxisFilter: mish points must be non-decreasing"))
-    F = symmetric ? _symmetric_filter_matrix(K, support, x, ax.w) :
-                    _row_normalised_filter_matrix(K, support, x)
-    Ft = symmetric ? copy(F) : sparse(transpose(F))
-    return AxisFilter(F, Ft, Float64(support), _filter_length(filter), symmetric)
+    if symmetric
+        F = _symmetric_filter_matrix(K, support, x, ax.w)
+        return AxisFilter(F, copy(F), Float64(support), _filter_length(filter), true, :none)
+    end
+    F = _row_normalised_filter_matrix(K, support, x)
+    normalisation === :variance && _variance_normalise!(F)
+    return AxisFilter(F, sparse(transpose(F)), Float64(support), _filter_length(filter),
+                      false, normalisation)
+end
+
+# Rescale each row i of F by 1/√(Σ_j F_ij²) in place, so diag(F Fᵀ) = 1.
+# Every row has a nonzero diagonal (identity rows included), so no row is zero.
+function _variance_normalise!(F::SparseMatrixCSC{Float64,Int})
+    n = size(F, 1)
+    ss = zeros(n)
+    rv = rowvals(F); nz = nonzeros(F)
+    @inbounds for p in eachindex(nz)
+        ss[rv[p]] += nz[p]^2
+    end
+    all(>(0.0), ss) || error("AxisFilter: a filter row has zero norm (internal invariant)")
+    @inbounds for p in eachindex(nz)
+        nz[p] /= sqrt(ss[rv[p]])
+    end
+    return F
 end
 
 # Two-pointer sweep mirroring Springsteel._convolve_axis! exactly (same window
@@ -195,9 +254,10 @@ struct _SparseMulKernel; A::SparseMatrixCSC{Float64,Int}; end
 
 """
     MishFilter(grid, varnames, filters::AbstractMatrix{<:Union{Nothing,Springsteel.AbstractFilter}};
-               symmetric = false, nchunks = Threads.nthreads())
+               normalisation = :variance, symmetric = false, nchunks = Threads.nthreads())
     MishFilter(grid, varnames, lengths_cells::AbstractMatrix{<:Real};
-               kind = :gaussian, n_sigma = 4, symmetric = false, nchunks = Threads.nthreads())
+               kind = :gaussian, n_sigma = 4, normalisation = :variance,
+               symmetric = false, nchunks = Threads.nthreads())
 
 Separable 3-D mish-space filter `F` on a variable-major mish vector (per
 variable `(kDim, jDim, iDim)` column-major; `varnames` selects and orders the
@@ -205,7 +265,19 @@ variables of the RRR `grid`, as for [`SplineProjection`](@ref)). `filters` is
 `3 × nvars` with rows `1 = k`, `2 = j`, `3 = i` (the convention of the spline
 operators); `nothing` leaves that axis unfiltered, and a variable with no
 filter at all passes through unchanged. Each entry becomes an
-[`AxisFilter`](@ref) on that variable's axis spline.
+[`AxisFilter`](@ref) on that variable's axis spline with the given
+`normalisation`:
+
+- `:variance` (default; the background-error filter of the solver): every
+  axis filter is variance-normalised, so the tensor product satisfies
+  `diag(F Fᵀ) = Π_axes diag(F_a F_aᵀ) = 1` exactly at every mish point —
+  white control noise keeps unit variance and `D`'s σ is the
+  background-error standard deviation (before the spline projection).
+- `:row`: Springsteel's row-normalised convolution (`F·1 = 1`), for
+  Springsteel parity and mean-preserving smoothing of fields.
+
+`symmetric = true` (experimental) ignores `normalisation` and is not
+variance-normalised ([`filter_normalisation`](@ref) then returns `:none`).
 
 The convenience form takes filter lengths in cells: `kind = :gaussian`
 (`sigma = length`, truncated at `n_sigma`·σ) or `:lanczos` (`a = length`,
@@ -223,11 +295,14 @@ struct MishFilter <: AbstractLinearOp
     axes::Matrix{Union{Nothing,AxisFilter}}   # (3, nvars): [1,v]=k, [2,v]=j, [3,v]=i
     pool::Vector{PencilScratch}
     buf::Vector{Float64}                      # one variable's mish (ping-pong scratch)
+    normalisation::Symbol                     # :variance, :row, or :none (symmetric)
 end
 
 function MishFilter(grid, varnames::AbstractVector{<:AbstractString},
                     filters::AbstractMatrix{<:Union{Nothing,Springsteel.AbstractFilter}};
-                    symmetric::Bool = false, nchunks::Integer = Threads.nthreads())
+                    normalisation::Symbol = :variance, symmetric::Bool = false,
+                    nchunks::Integer = Threads.nthreads())
+    _check_normalisation(normalisation)
     g = _spline_grid_geometry(grid, varnames)
     nv = _nvars(g)
     size(filters) == (3, nv) || throw(DimensionMismatch(
@@ -236,14 +311,17 @@ function MishFilter(grid, varnames::AbstractVector{<:AbstractString},
     for v in 1:nv, a in 1:3
         f = filters[a, v]
         f === nothing && continue
-        axes[a, v] = AxisFilter(f, g.axes[a, v]; symmetric = symmetric)
+        axes[a, v] = AxisFilter(f, g.axes[a, v]; normalisation = normalisation,
+                                symmetric = symmetric)
     end
-    return MishFilter(g, axes, _geometry_pool(g, nchunks), zeros(_nmish(g)))
+    return MishFilter(g, axes, _geometry_pool(g, nchunks), zeros(_nmish(g)),
+                      symmetric ? :none : normalisation)
 end
 
 function MishFilter(grid, varnames::AbstractVector{<:AbstractString},
                     lengths_cells::AbstractMatrix{<:Real};
                     kind::Symbol = :gaussian, n_sigma::Integer = 4,
+                    normalisation::Symbol = :variance,
                     symmetric::Bool = false, nchunks::Integer = Threads.nthreads())
     kind in (:gaussian, :lanczos) || throw(ArgumentError(
         "MishFilter: kind must be :gaussian or :lanczos, got :$(kind)"))
@@ -261,8 +339,18 @@ function MishFilter(grid, varnames::AbstractVector{<:AbstractString},
             filters[idx] = Springsteel.LanczosFilter(a = Int(L))
         end
     end
-    return MishFilter(grid, varnames, filters; symmetric = symmetric, nchunks = nchunks)
+    return MishFilter(grid, varnames, filters; normalisation = normalisation,
+                      symmetric = symmetric, nchunks = nchunks)
 end
+
+"""
+    filter_normalisation(M::MishFilter) -> Symbol
+
+`:variance` (every axis filter variance-normalised, `diag(F Fᵀ) = 1`),
+`:row` (row-normalised, `F·1 = 1`), or `:none` (the experimental symmetric
+variant).
+"""
+filter_normalisation(M::MishFilter) = M.normalisation
 
 Base.size(M::MishFilter) = (n = _nvars(M.geom) * _nmish(M.geom); (n, n))
 

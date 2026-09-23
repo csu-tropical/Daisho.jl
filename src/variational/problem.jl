@@ -9,14 +9,15 @@
 
 # ── Background ────────────────────────────────────────────────────────────────
 
-const _BACKGROUND_MODES = (:zero, :synthesis, :custom)
-const _BACKGROUND_CONFIG_MODES = ("zero", "synthesis")
+const _BACKGROUND_MODES = (:zero, :synthesis, :synthesis_uniform_sigma, :synthesis_profile, :custom)
+const _BACKGROUND_CONFIG_MODES = VARIATIONAL_BACKGROUND_VOCAB
 
 """
     Background(x::Vector{Float64}, sigma::Vector{Float64}, mode::Symbol)
-    Background(state::StateVector, p::DaishoParameters)                        # :zero
-    Background(state::StateVector, stage1::SynthesisOutput, p::DaishoParameters)  # :synthesis
-    Background(state::StateVector, nothing, p::DaishoParameters)               # from `[variational] background`
+    Background(state::StateVector, p::DaishoParameters)                              # :zero
+    Background(state::StateVector, stage1_or_nothing, p::DaishoParameters)           # dispatch on config
+    Background(state::StateVector, state_grid, stage1_or_nothing, p::DaishoParameters;
+               nchunks = Threads.nthreads())                                         # dispatch on config
 
 The background (first guess) of the variational analysis and the diagonal
 `D` of its background-error chain `C = S∘D∘F`, both on the state mish.
@@ -28,25 +29,35 @@ The background (first guess) of the variational analysis and the diagonal
   loop's starting point.
 - `sigma::Vector{Float64}`: the per-point background-error standard deviation
   (same layout), every entry finite and `> 0` so `D` is positive definite.
-- `mode::Symbol`: `:zero`, `:synthesis`, or `:custom` (the raw constructor's
-  label for a caller-supplied background).
+  Because `F` is variance-normalised (`diag(F Fᵀ) = 1`), this is the actual
+  per-point background-error standard deviation (before the spline
+  projection).
+- `mode::Symbol`: `:zero`, `:synthesis`, `:synthesis_uniform_sigma`,
+  `:synthesis_profile`, or `:custom` (the raw constructor's label for a
+  caller-supplied background).
 
-# Modes
-- `:zero` (`[variational] background = "zero"`, samurai-like): `x = 0`,
-  `sigma = background_sigma_vector(state)` (each variable's
-  `[variational.background_error]` σ).
-- `:synthesis` (`background = "synthesis"`): the stage-1 multi-Doppler
-  product seeds the horizontal winds. For the `:wind_u`/`:wind_v` state
-  variables, `x = stage1.comp1`/`comp2` where `stage1.quality_flag == 0`
-  (else `0`), and `sigma = background_error_inflation · stage1.sigma1`/`sigma2`
-  there (else the variable's config σ). The stage-1 σ is additionally
-  guarded from below by `1e-3 ·` the config σ: at heavily overdetermined
-  points the sandwich σ can be tiny, which would make `D` nearly singular and
-  pin the analysis to the background. Every other variable (W, scalars) keeps
-  its config σ and a zero background. Stage-1 and the radial-velocity
-  super-obs come from the same gates, so this mode counts the radar data
-  twice; `background_error_inflation ≫ 1` weakens the background to
-  compensate (documented double-counting guard).
+# Modes (`[variational] background`, a flat vocabulary)
+With `σ` each variable's configured `[variational.background_error]` σ and
+`inflation = background_error_inflation`:
+
+- `"zero"` → `:zero` (samurai-like): `x = 0`, `sigma = σ`
+  (`background_sigma_vector(state)`). Any stage-1 product is ignored.
+- `"synthesis"` → `:synthesis`: `U`/`V` background = the **smooth fit**
+  ([`synthesis_smooth_fit`](@ref)); σ map = the **smoothed stage-1 σ map**
+  ([`synthesis_sigma_map`](@ref)), clamped to `[σ/10, σ]`, times
+  `inflation`. Other variables: `x = 0`, `sigma = σ·inflation`.
+- `"synthesis_uniform_sigma"` → `:synthesis_uniform_sigma`: the smooth fit,
+  with `sigma = σ·inflation` for every variable.
+- `"synthesis_profile"` → `:synthesis_profile`: `U`/`V` background = the
+  **level-mean profile** ([`synthesis_level_profile`](@ref)), constant on
+  each mish level; `sigma = σ·inflation` for every variable.
+
+`W` and scalar state variables have a zero background in every mode.
+
+The smooth fit needs the state grid (it is one auxiliary variational solve),
+so `"synthesis"` and `"synthesis_uniform_sigma"` need the four-argument form;
+the three-argument form throws `ArgumentError` for them. Every `synthesis*`
+mode needs `stage1` (`nothing` → `ArgumentError`).
 
 `stage1` must be the product of [`finalize_wind`](@ref) on the accumulator
 built on this state's mish (`size(stage1.comp1) == state.dims`, else
@@ -54,12 +65,12 @@ built on this state's mish (`size(stage1.comp1) == state.dims`, else
 [`StateVector`](@ref): its `component_names` must equal the names of the
 `:wind_u`/`:wind_v` state variables (`ArgumentError` otherwise). Note the
 radial-velocity super-obs always constrain Cartesian `(u, v)`, so the
-`:synthesis` background is only meaningful with the default
+`synthesis*` backgrounds are only meaningful with the default
 `CartesianFrame`.
 
-The three-argument form with `nothing` dispatches on
-`p.variational.background`: `"zero"` → the `:zero` background; `"synthesis"`
-→ `ArgumentError` (a stage-1 product is required).
+**Double counting.** Stage 1 and the radial-velocity super-obs come from the
+same gates, so every `synthesis*` mode counts the radar data twice;
+`background_error_inflation ≫ 1` weakens the background to compensate.
 """
 struct Background
     x::Vector{Float64}
@@ -89,16 +100,47 @@ function Background(state::StateVector, p::DaishoParameters)
     return Background(zeros(length(state)), background_sigma_vector(state), :zero)
 end
 
-function Background(state::StateVector, ::Nothing, p::DaishoParameters)
-    mode = _check_background_config(p)
-    mode == "synthesis" && throw(ArgumentError(
-        "Background: [variational] background = \"synthesis\" needs the stage-1 " *
+function _require_stage1(stage1, mode::String)
+    stage1 === nothing && throw(ArgumentError(
+        "Background: [variational] background = \"$(mode)\" needs the stage-1 " *
         "SynthesisOutput (from finalize_wind), got `nothing`"))
-    return Background(state, p)
+    return stage1
 end
 
-function Background(state::StateVector, stage1::SynthesisOutput, p::DaishoParameters)
-    _check_background_config(p)
+function Background(state::StateVector, stage1::Union{Nothing,SynthesisOutput},
+                    p::DaishoParameters)
+    mode = _check_background_config(p)
+    mode == "zero" && return Background(state, p)
+    s1 = _require_stage1(stage1, mode)
+    mode == "synthesis_profile" && return _profile_background(state, s1, p)
+    throw(ArgumentError(
+        "Background: [variational] background = \"$(mode)\" (smooth fit) needs the state " *
+        "grid; use Background(state, state_grid, stage1, p)"))
+end
+
+function Background(state::StateVector, state_grid, stage1::Union{Nothing,SynthesisOutput},
+                    p::DaishoParameters; nchunks::Integer = Threads.nthreads())
+    mode = _check_background_config(p)
+    mode == "zero" && return Background(state, p)
+    s1 = _require_stage1(stage1, mode)
+    mode == "synthesis_profile" && return _profile_background(state, s1, p)
+    x = synthesis_smooth_fit(state, state_grid, s1, p; nchunks = nchunks)
+    infl = p.variational.background_error_inflation
+    sigma = background_sigma_vector(state) .* infl
+    if mode == "synthesis"
+        iu, iv, _ = wind_indices(state)
+        smap = synthesis_sigma_map(state, state_grid, s1, p; nchunks = nchunks)
+        for v in (iu, iv)
+            r = _state_range(state, v)
+            sigma[r] .= smap[r]
+        end
+        return Background(x, sigma, :synthesis)
+    end
+    return Background(x, sigma, :synthesis_uniform_sigma)
+end
+
+# Stage-1 product on the state mish and in the state's frame.
+function _check_stage1(state::StateVector, stage1::SynthesisOutput)
     for a in (stage1.comp1, stage1.comp2, stage1.sigma1, stage1.sigma2, stage1.quality_flag)
         size(a) == state.dims || throw(DimensionMismatch(
             "Background: stage-1 arrays have size $(size(a)) but the state mish is " *
@@ -110,20 +152,177 @@ function Background(state::StateVector, stage1::SynthesisOutput, p::DaishoParame
         "Background: stage-1 component names $(stage1.component_names) differ from the " *
         "state's wind_u/wind_v variables $(names); finalize_wind and StateVector must use " *
         "the same output frame"))
-    infl = p.variational.background_error_inflation
-    x = zeros(length(state))
-    sigma = background_sigma_vector(state)
+    return iu, iv
+end
+
+# Configured (uniform) σ of state variable v.
+_config_sigma(state::StateVector, p::DaishoParameters, v::Int) =
+    background_error_for(p.variational, state.vars[v].name).sigma
+
+"""
+    synthesis_smooth_fit(state, state_grid, stage1::SynthesisOutput, p; nchunks = Threads.nthreads())
+        -> Vector{Float64}
+
+The smooth-fit background of the `"synthesis"` and
+`"synthesis_uniform_sigma"` modes (flat, variable-major, `length(state)`):
+the spline field closest to the stage-1 `(u, v)` at unflagged points
+(`quality_flag == 0`), from one AUXILIARY variational solve with
+
+- a zero background and each variable's configured uniform σ, the configured
+  (variance-normalised) mish filter, and the state grid's spline projection
+  — the same `C = S∘D∘F` as a `"zero"` problem;
+- no mass continuity and no radar super-obs;
+- one linear value observation ([`ScalarValueObs`](@ref), group kind
+  `:synthesis_fit`) per good point and component: value `stage1.comp1`
+  (`comp2`), σ = `max(stage1.sigma1 (sigma2), σ_U (σ_V)/100)`, so
+  well-determined points dominate;
+- the inner solver settings of the main solve ([`solver_options`](@ref)`(p)`
+  with `max_outer = 1`; the problem is linear).
+
+The result is the spline analysis of that solve on the mish for `U`/`V`; all
+other variables are 0. In data gaps the fit relaxes smoothly to 0 over the
+filter length. Cost: one extra CG solve of the size of the main one. With no
+good stage-1 point the fit is 0 everywhere (`@warn`).
+"""
+function synthesis_smooth_fit(state::StateVector, state_grid, stage1::SynthesisOutput,
+                              p::DaishoParameters; nchunks::Integer = Threads.nthreads())
+    iu, iv = _check_stage1(state, stage1)
     q = stage1.quality_flag
+    obs = ScalarValueObs[]
     for (v, comp, sig) in ((iu, stage1.comp1, stage1.sigma1), (iv, stage1.comp2, stage1.sigma2))
-        xv = state_view(x, state, v)
-        sv = state_view(sigma, state, v)
-        @inbounds for idx in eachindex(q)
+        guard = _config_sigma(state, p, v) / 100
+        for idx in CartesianIndices(q)
             q[idx] == 0 || continue
-            xv[idx] = comp[idx]
-            sv[idx] = max(infl * sig[idx], 1e-3 * sv[idx])   # guard vs the config σ
+            (isfinite(comp[idx]) && isfinite(sig[idx])) || continue
+            k, j, i = Tuple(idx)
+            push!(obs, ScalarValueObs(MishIndex(k, j, i), v, comp[idx], max(sig[idx], guard)))
         end
     end
-    return Background(x, sigma, :synthesis)
+    x = zeros(length(state))
+    if isempty(obs)
+        @warn "synthesis_smooth_fit: no stage-1 point has quality_flag == 0; the background is 0"
+        return x
+    end
+    names = variable_names(state)
+    S = SplineProjection(state_grid, names; nchunks = nchunks)
+    sig = Union{Float64,Vector{Float64}}[_config_sigma(state, p, v) for v in 1:nvars(state)]
+    D = DiagonalScaling(sig, state.n_mish)
+    F = _state_mish_filter(state_grid, state, p; nchunks = nchunks)
+    C = ChainOp(S, D, F)
+    obsset = build_obsset(ObservationSet(ObsGroup[ObsGroup(:synthesis_fit, obs)]), state,
+                          state_grid; nchunks = nchunks)
+    cf = IncrementalCostFunction(C, obsset, zeros(size(S, 1)))
+    o = solver_options(p)
+    opts = VarSolverOptions(max_outer = 1, max_inner = o.max_inner,
+                            inner_tolerance = o.inner_tolerance,
+                            outer_tolerance = o.outer_tolerance, history = false)
+    stats = solve_incremental!(cf, opts)
+    stats.inner_converged[end] || @warn "synthesis_smooth_fit: the auxiliary CG solve did not " *
+        "reach inner_tolerance in max_inner_iterations" iterations = stats.inner_iterations[end]
+    a = zeros(size(S, 1))
+    analysis_coefficients!(a, cf)
+    E = SplineEvaluation(state_grid, names, [(iu, 1), (iv, 1)])
+    y = zeros(size(E, 1))
+    apply!(y, E, a)
+    nm = state.n_mish
+    x[_state_range(state, iu)] .= view(y, 1:nm)
+    x[_state_range(state, iv)] .= view(y, nm+1:2nm)
+    return x
+end
+
+"""
+    synthesis_sigma_map(state, state_grid, stage1::SynthesisOutput, p; nchunks = Threads.nthreads())
+        -> Vector{Float64}
+
+The background-error σ of the `"synthesis"` mode (flat, variable-major).
+For `U` (and likewise `V`) with configured σ: start from
+`s = stage1.sigma1` at good points (`quality_flag == 0`, finite σ) and
+`s = σ` at flagged points; smooth the VARIANCE map `s²` with the
+configured mish filter of that variable in its row-normalised
+(mean-preserving) form (`MishFilter(…; normalisation = :row)`); take the
+square root; clamp to `[σ/10, σ]`; multiply by
+`background_error_inflation`. Every other variable: `σ · inflation`.
+"""
+function synthesis_sigma_map(state::StateVector, state_grid, stage1::SynthesisOutput,
+                             p::DaishoParameters; nchunks::Integer = Threads.nthreads())
+    iu, iv = _check_stage1(state, stage1)
+    infl = p.variational.background_error_inflation
+    out = background_sigma_vector(state) .* infl
+    q = stage1.quality_flag
+    kind = Symbol(p.variational.filter_type)
+    cells = _state_filter_cells(state_grid, state, kind)
+    for (v, sig) in ((iu, stage1.sigma1), (iv, stage1.sigma2))
+        σc = _config_sigma(state, p, v)
+        var = [(q[idx] == 0 && isfinite(sig[idx])) ? sig[idx]^2 : σc^2 for idx in eachindex(q)]
+        Fv = MishFilter(state_grid, [state.vars[v].name], cells[:, v:v]; kind = kind,
+                        normalisation = :row, nchunks = nchunks)
+        sm = zeros(state.n_mish)
+        apply!(sm, Fv, vec(var))
+        # A Lanczos kernel's negative lobes can drive the smoothed variance
+        # negative; the clamp below the lower bound handles that.
+        out[_state_range(state, v)] .= infl .* clamp.(sqrt.(max.(sm, 0.0)), σc / 10, σc)
+    end
+    return out
+end
+
+"""
+    synthesis_level_profile(state::StateVector, stage1::SynthesisOutput) -> (u::Vector{Float64}, v::Vector{Float64})
+
+The level-mean stage-1 profile of the `"synthesis_profile"` mode, one value
+per mish level `k` (length `state.dims[1]`): the plain mean of
+`stage1.comp1` (`comp2`) over the good points (`quality_flag == 0`) of that
+level. Levels without a good point are filled by linear interpolation in
+`z_mish` between the nearest levels that have one (constant extrapolation
+beyond the lowest/highest such level). If no level has a good point the
+profile is all zeros (`@warn`).
+"""
+function synthesis_level_profile(state::StateVector, stage1::SynthesisOutput)
+    _check_stage1(state, stage1)
+    nz = state.dims[1]
+    q = stage1.quality_flag
+    z = state.z_mish
+    profiles = map((stage1.comp1, stage1.comp2)) do comp
+        m = fill(NaN, nz)
+        for k in 1:nz
+            s = 0.0; n = 0
+            for i in axes(q, 3), j in axes(q, 2)
+                (q[k, j, i] == 0 && isfinite(comp[k, j, i])) || continue
+                s += comp[k, j, i]; n += 1
+            end
+            n > 0 && (m[k] = s / n)
+        end
+        m
+    end
+    have = findall(isfinite, profiles[1])
+    if isempty(have)
+        @warn "synthesis_profile background: no stage-1 point has quality_flag == 0; " *
+              "the U/V background is 0"
+        return zeros(nz), zeros(nz)
+    end
+    for m in profiles, k in 1:nz
+        isfinite(m[k]) && continue
+        lo = findlast(<(k), have); hi = findfirst(>(k), have)
+        if lo === nothing
+            m[k] = m[have[hi]]
+        elseif hi === nothing
+            m[k] = m[have[lo]]
+        else
+            k1, k2 = have[lo], have[hi]
+            w = (z[k] - z[k1]) / (z[k2] - z[k1])
+            m[k] = (1 - w) * m[k1] + w * m[k2]
+        end
+    end
+    return profiles[1], profiles[2]
+end
+
+function _profile_background(state::StateVector, stage1::SynthesisOutput, p::DaishoParameters)
+    iu, iv = _check_stage1(state, stage1)
+    pu, pv = synthesis_level_profile(state, stage1)
+    x = zeros(length(state))
+    state_view(x, state, iu) .= reshape(pu, :, 1, 1)
+    state_view(x, state, iv) .= reshape(pv, :, 1, 1)
+    sigma = background_sigma_vector(state) .* p.variational.background_error_inflation
+    return Background(x, sigma, :synthesis_profile)
 end
 
 # ── VariationalProblem ───────────────────────────────────────────────────────
@@ -169,6 +368,16 @@ struct VariationalProblem{G,TC,CF}
     params::DaishoParameters
 end
 
+# The configured background-error filter of the state (variance-normalised
+# unless asked otherwise), as in the main problem.
+function _state_mish_filter(state_grid, state::StateVector, p::DaishoParameters;
+                            normalisation::Symbol = :variance,
+                            nchunks::Integer = Threads.nthreads())
+    kind = Symbol(p.variational.filter_type)
+    return MishFilter(state_grid, variable_names(state), _state_filter_cells(state_grid, state, kind);
+                      kind = kind, normalisation = normalisation, nchunks = nchunks)
+end
+
 # Filter lengths (metres → cells) for `MishFilter`'s convenience form. The
 # Gaussian's length is its σ; the Lanczos kernel's is its lobe half-width `a`,
 # which must be an integer number of cells: round to the nearest integer ≥ 1
@@ -192,6 +401,8 @@ In-memory constructor from parts. Builds
 - `D = DiagonalScaling` with the per-point map `background.sigma` of every
   variable;
 - `F = MishFilter(state_grid, names, cells; kind = Symbol(p.variational.filter_type))`
+  (variance-normalised, `diag(F Fᵀ) = 1`, so `background.sigma` is the
+  per-point background-error standard deviation)
   where `cells = filter_lengths_cells(state_grid, names, filter_lengths_m(state))`:
   each variable's `[variational.background_error] filter_length_m` is the
   Gaussian σ (or the Lanczos half-width `a`, rounded to a whole number ≥ 1 of
@@ -216,9 +427,7 @@ function VariationalProblem(state::StateVector, state_grid,
     S = SplineProjection(state_grid, names; nchunks = nchunks)
     sig = Union{Float64,Vector{Float64}}[background.sigma[_state_range(state, v)] for v in 1:nvars(state)]
     D = DiagonalScaling(sig, nm)
-    kind = Symbol(p.variational.filter_type)
-    F = MishFilter(state_grid, names, _state_filter_cells(state_grid, state, kind);
-                   kind = kind, nchunks = nchunks)
+    F = _state_mish_filter(state_grid, state, p; nchunks = nchunks)
     C = ChainOp(S, D, F)
     obsset = build_obsset(observations, state, state_grid; nchunks = nchunks)
     a_g = zeros(size(S, 1))
@@ -241,8 +450,10 @@ then `grid_sweep!` over every sweep):
 2. `reference` defaults to [`build_reference_profile`](@ref)`(p, sgrid)`;
 3. `state = StateVector(p, sgrid; frame)`,
    `state_grid = create_state_grid(p, sgrid, state)`;
-4. `background = Background(state, stage1 or nothing, p)` per
-   `[variational] background`;
+4. `background = Background(state, state_grid, stage1, p; nchunks)` per
+   `[variational] background` (the `"synthesis"` and
+   `"synthesis_uniform_sigma"` modes run one auxiliary smooth-fit solve
+   here);
 5. observations: the radial-velocity super-obs of `acc`
    ([`radial_velocity_superobs`](@ref), which also yields `nobs_vr`), mass
    continuity, and value obs of `[fields]`-derived state variables from
@@ -256,12 +467,12 @@ function VariationalProblem(acc::WindGridAccumulator,
                             frame::SynthesisFrame = CartesianFrame(),
                             reference::Union{Nothing,AbstractReferenceProfile} = nothing,
                             nchunks::Integer = Threads.nthreads())
-    mode = _check_background_config(p)
+    _check_background_config(p)
     stage1 = finalize_wind(acc, p; frame = frame)
     ref = reference === nothing ? build_reference_profile(p, sgrid) : reference
     state = StateVector(p, sgrid; frame = frame)
     state_grid = create_state_grid(p, sgrid, state)
-    background = Background(state, mode == "synthesis" ? stage1 : nothing, p)
+    background = Background(state, state_grid, stage1, p; nchunks = nchunks)
     group, nobs_vr = radial_velocity_superobs(acc, state, p)
     obs = build_observation_set(nothing, radar_grid, state, ref, p)
     nobs(group) > 0 && pushfirst!(obs.groups, group)

@@ -248,6 +248,18 @@ using TOML
         err = _var_err(base -> base["variational"]["background"] = "bogus")
         @test err isa ArgumentError
         @test occursin("background", err.msg)
+        # Flat background vocabulary (2026-09-23).
+        for mode in ("zero", "synthesis", "synthesis_uniform_sigma", "synthesis_profile")
+            p = _var_load(base -> base["variational"]["background"] = mode)
+            @test p.variational.background == mode
+        end
+        @test Daisho.VARIATIONAL_BACKGROUND_VOCAB ==
+              ("zero", "synthesis", "synthesis_uniform_sigma", "synthesis_profile")
+        # A typo is rejected, and the message lists the allowed values.
+        err = _var_err(base -> base["variational"]["background"] = "synthesis_profiles")
+        @test err isa ArgumentError
+        @test occursin("synthesis_profiles", err.msg)
+        @test occursin("synthesis_uniform_sigma", err.msg)
 
         err = _var_err(base -> base["variational"]["filter_type"] = "bogus")
         @test err isa ArgumentError

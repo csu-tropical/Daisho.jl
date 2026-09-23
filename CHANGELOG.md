@@ -25,6 +25,12 @@ keep loading and behaving bit-identically.
 - New `[fields]` tags `reflectivity` (gate dBZ for the fall-speed correction
   and the `wind_synthesis` `reflectivity` state role) and `spectrum_width`
   (gate spectrum width for the per-gate error model).
+- `[variational] background` is a flat vocabulary: `"zero"` (default),
+  `"synthesis"` (smooth spline fit to stage 1 + smoothed stage-1 σ map),
+  `"synthesis_uniform_sigma"`, `"synthesis_profile"` (level-mean stage-1
+  profile). The mish-space background-error filter is variance-normalised,
+  so `[variational.background_error] sigma` is the per-point
+  background-error standard deviation.
 - New direct dependencies: `LinearAlgebra`, `SparseArrays`, `Krylov`
   (compat `0.10`).
 - **Wind-accumulator JLD2 schema v2** (`WIND_ACCUMULATOR_SCHEMA_VERSION`

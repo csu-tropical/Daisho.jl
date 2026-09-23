@@ -640,6 +640,16 @@ automatic state-variable role resolution: `"wind_u"`, `"wind_v"`, `"wind_w"`,
 const VARIATIONAL_ROLE_VOCAB = ("wind_u", "wind_v", "wind_w", "reflectivity", "scalar")
 
 """
+    VARIATIONAL_BACKGROUND_VOCAB
+
+Allowed values of `[variational] background` (a flat vocabulary):
+`"zero"`, `"synthesis"`, `"synthesis_uniform_sigma"`, `"synthesis_profile"`.
+See [`VariationalParameters`](@ref) and the `Background` constructors.
+"""
+const VARIATIONAL_BACKGROUND_VOCAB = ("zero", "synthesis", "synthesis_uniform_sigma",
+                                      "synthesis_profile")
+
+"""
     BackgroundErrorEntry
 
 One state variable's background-error specification for the variational
@@ -723,14 +733,23 @@ disabling the analysis does not relax the schema.
   order. Each entry is `"U"`, `"V"`, `"W"`, or a `[fields]` name (appended
   as a value-observed scalar state variable). Must be non-empty, unique,
   and contain both `"U"` and `"V"`. Default `["U", "V", "W"]`.
-- `background::String`: `"zero"` (background = 0 everywhere, with the
-  configured `background_error` σ — samurai-like) or `"synthesis"`
-  (stage-1 `(u, v)` as background, with a stage-1 σ-derived B for `U`/`V`;
-  `W` still comes from `background_error`). Default `"zero"`.
-- `background_error_inflation::Float64`: multiplies σ_b when
-  `background = "synthesis"`, guarding against double-counting the stage-1
-  uncertainty and the configured `background_error` σ. Must be positive.
-  Default `1.0`.
+- `background::String`: one of [`VARIATIONAL_BACKGROUND_VOCAB`](@ref).
+  Default `"zero"`.
+  - `"zero"`: background 0 everywhere with the configured
+    `background_error` σ (samurai-like).
+  - `"synthesis"`: `U`/`V` background = the smooth spline fit to the
+    stage-1 `(u, v)` at unflagged points (one auxiliary variational solve),
+    with σ_b a smoothed stage-1 σ map (clamped to `[σ/10, σ]` of the
+    configured σ).
+  - `"synthesis_uniform_sigma"`: the same smooth fit, with the configured
+    (uniform) σ.
+  - `"synthesis_profile"`: `U`/`V` background = the level-mean stage-1
+    profile (constant on each mish level), with the configured σ.
+  `W` and scalar state variables always have a zero background.
+- `background_error_inflation::Float64`: multiplies σ_b of every variable
+  in the three `synthesis*` modes, guarding against double-counting the
+  radar data (the stage-1 background and the super-obs come from the same
+  gates). Ignored for `"zero"`. Must be positive. Default `1.0`.
 - `mass_continuity::Bool`: enforce the anelastic mass-continuity pseudo-
   observation at every mish point
   (`∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz = 0`). Requires `"W"` in `state`.
@@ -1895,9 +1914,9 @@ function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
         "`[variational]` mass_continuity = true requires \"W\" in `state`."))
 
     background = get(kw, :background, VariationalParameters().background)
-    background in ("zero", "synthesis") || throw(ArgumentError(
+    background in VARIATIONAL_BACKGROUND_VOCAB || throw(ArgumentError(
         "`[variational]` background = \"$(background)\" is not valid; allowed: " *
-        "\"zero\", \"synthesis\"."))
+        join(("\"$(m)\"" for m in VARIATIONAL_BACKGROUND_VOCAB), ", ") * "."))
 
     filter_type = get(kw, :filter_type, VariationalParameters().filter_type)
     filter_type in ("gaussian", "lanczos") || throw(ArgumentError(

@@ -40,12 +40,18 @@ function _mish_xyz(grid)
 end
 
 # Control chain C = S∘D∘F with Gaussian filter lengths (cells) L[axis, var].
-function _solv_chain(grid, sigma_b, L; nchunks = Threads.nthreads())
+# These solver-algebra tests were tuned (σ_b, CG caps and tolerances) with the
+# row-normalised filter, whose effective background σ is ≈ 5–20% of `sigma_b`;
+# they pin `normalisation = :row` so the conditioning they were designed
+# around is unchanged (the algebra under test holds for any SPD B). The
+# solver's default variance-normalised F is covered by
+# test_variational_filter.jl and test_variational_solve.jl.
+function _solv_chain(grid, sigma_b, L; nchunks = Threads.nthreads(), normalisation = :row)
     nm = grid.params.iDim * grid.params.jDim * grid.params.kDim
     S = Daisho.SplineProjection(grid, _SOLV_VARS; nchunks = nchunks)
     σ = sigma_b isa AbstractVector ? sigma_b : fill(Float64(sigma_b), 3)
     D = Daisho.DiagonalScaling(Union{Float64,Vector{Float64}}[σ...], nm)
-    F = Daisho.MishFilter(grid, _SOLV_VARS, L; nchunks = nchunks)
+    F = Daisho.MishFilter(grid, _SOLV_VARS, L; nchunks = nchunks, normalisation = normalisation)
     return Daisho.ChainOp(S, D, F), S, D, F
 end
 

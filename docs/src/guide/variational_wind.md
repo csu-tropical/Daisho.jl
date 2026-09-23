@@ -113,7 +113,7 @@ error_guard_min_m_s         = 1.0
 [variational]
 enabled = true
 state = ["U", "V", "W"]              # append a [fields] name to analyse a scalar
-background = "zero"                  # "zero" | "synthesis"
+background = "zero"                  # "zero" | "synthesis" | "synthesis_uniform_sigma" | "synthesis_profile"
 background_error_inflation = 1.0
 mass_continuity = true
 mass_continuity_sigma_per_s = 1.0e-4
@@ -160,8 +160,8 @@ W = { min = "dirichlet" }
 |:----|:------|:--------|:--------|
 | `enabled` | — | `false` | Master switch. The whole block (and sub-tables) validates strictly whether or not this is `true`. |
 | `state` | — | `["U","V","W"]` | State-vector names, in order. Each is `"U"`/`"V"`/`"W"` or a `[fields]` name (appended as a value-observed scalar). Must be non-empty, unique, and contain both `"U"` and `"V"`. |
-| `background` | — | `"zero"` | `"zero"` or `"synthesis"` — see "Choosing a background" below. |
-| `background_error_inflation` | — | `1.0` | Multiplies σ_b when `background = "synthesis"`. Must be positive. |
+| `background` | — | `"zero"` | `"zero"`, `"synthesis"`, `"synthesis_uniform_sigma"`, or `"synthesis_profile"`. See "Choosing a background" below. |
+| `background_error_inflation` | — | `1.0` | Multiplies σ_b of every state variable in the three `synthesis*` modes (ignored for `"zero"`). Must be positive. |
 | `mass_continuity` | — | `true` | Enforce the anelastic continuity pseudo-observation at every mish point. Requires `"W"` in `state`. |
 | `mass_continuity_sigma_per_s` | s⁻¹ | `1.0e-4` | σ of the divergence residual; inverse-variance weight `1/σ²`. Must be positive. |
 | `max_outer_iterations` | — | `1` | Gauss–Newton outer iterations. `1` is exact when every observation is linear; only matters with a nonlinear observation type. |
@@ -172,7 +172,7 @@ W = { min = "dirichlet" }
 | `output_increment` | — | `false` | Write `*_INCREMENT` fields. |
 | `output_mish` | — | `false` | Also write mish-lattice fields and stage-1/super-obs diagnostics (§ "Output variables"). |
 | `filter_type` | — | `"gaussian"` | `"gaussian"` or `"lanczos"` mish-space background-error filter kernel. Gaussian has no negative lobes; Lanczos does, near boundaries. |
-| `[variational.background_error.<name>].sigma` | native (m/s for winds) | required | Background-error σ_b for state variable `<name>` (or `"default"`). Must be positive. |
+| `[variational.background_error.<name>].sigma` | native (m/s for winds) | required | Background-error standard deviation σ_b of state variable `<name>` (or `"default"`) at every mish point: the mish filter is variance-normalised (`diag(F Fᵀ) = 1`), so filtered white noise scaled by σ_b has exactly this pointwise standard deviation, whatever the filter length. Must be positive. |
 | `[variational.background_error.<name>].filter_length_m` | m | required | Mish-space filter length along `[i, j, k]`. `0.0` on an axis disables filtering there. |
 | `[variational.radial_velocity].error_inflation` | — | `1.0` | Multiplies `σ²_vr` for the super-observation inverse variance only. |
 | `[variational.radial_velocity].horizontal_approximation` | — | `false` | Drop the `w·sin(el)` term from the super-obs geometry (samurai `horizontal_radar_appx`); allows `[synthesis] include_vertical_velocity = false`. |
@@ -206,20 +206,49 @@ shared unchanged by mass continuity and the fall-speed correction above.
 
 ## Choosing a background
 
+`W` (and any scalar state variable) always starts from 0 with its
+configured σ_b; the modes differ in the `U`/`V` first guess and σ_b. The
+three `synthesis*` modes need the stage-1 product (the high-level
+`VariationalProblem(acc, …)` supplies it) and multiply every σ_b by
+`background_error_inflation`.
+
 - **`"zero"`** (default): the background is 0 everywhere, with σ_b from
-  `[variational.background_error]` — the samurai-like choice, appropriate
-  when there is no reason to trust a prior first guess more than the current
-  volume's own data.
-- **`"synthesis"`**: `U`/`V` take the stage-1 `(u, v)` analysis wherever its
-  `quality_flag == 0` (0 elsewhere); `W` still comes from
-  `background_error`. This gives the solver a physically-motivated starting
-  point and can speed convergence, but the stage-1 background and the
-  radial-velocity super-observations are built from the *same* gates — using
-  both without correction lets that data count twice. Increase
-  `background_error_inflation` to weaken the background term relative to the
-  always-present radar likelihood; it trades off the double count, it does
-  not eliminate it. Prefer `"zero"` unless you have a specific reason to
-  seed the analysis.
+  `[variational.background_error]`. This is the samurai-like choice, right
+  when no first guess deserves more trust than the current volume's own
+  data. At the edges of the data the analysis relaxes toward 0 over the
+  filter length.
+- **`"synthesis"`**: `U`/`V` background = a **smooth fit** to the stage-1
+  `(u, v)` at unflagged points. The fit is one auxiliary variational solve
+  (one extra CG solve): configured filter and σ, one value observation per
+  good point weighted by its stage-1 σ, and no continuity or radar
+  super-obs. It relaxes smoothly to 0 over the filter length in data gaps.
+  σ_b is the stage-1 σ map with its variance smoothed by the same filter,
+  clamped to `[σ/10, σ]` of the configured σ. The background is tightest
+  where stage 1 is well determined and falls back to the configured σ in
+  gaps. Use it to *adjust* a good stage-1 analysis, for example to add `w`
+  and enforce continuity without moving well-observed dual-Doppler winds far,
+  or to steady the analysis near a baseline.
+- **`"synthesis_uniform_sigma"`**: the same smooth fit, with the configured
+  (uniform) σ_b. Use it when stage-1 coverage is spotty or its σ is
+  unreliable. The first guess helps, but no point is trusted more than
+  another.
+- **`"synthesis_profile"`**: `U`/`V` background = the **level-mean** stage-1
+  profile (the plain mean of the good points on each mish level, constant
+  horizontally; levels with none are interpolated linearly in height),
+  with the configured σ_b. It is the least local of the synthesis modes.
+  Use it for spotty coverage, or as an environmental first guess that
+  relaxes gaps toward the mean flow instead of 0.
+
+**Double counting.** Stage 1 and the radial-velocity super-observations are
+built from the *same* gates, so every `synthesis*` background counts that
+data twice: once in the prior mean, once in the likelihood. `"synthesis"`
+double counts most, because it trusts the stage-1 σ; `"synthesis_profile"`
+least. Increase `background_error_inflation` to weaken the background
+relative to the always-present radar term. It trades off the double count;
+it does not eliminate it. It also raises the Hessian's condition number
+`∝ σ_b²`, so large inflations need a larger `max_inner_iterations`. In the
+test case, inflation 10 took ≈ 4–5k CG iterations and inflation 100 took
+≈ 20–30k.
 
 ## Adding a scalar to the state
 

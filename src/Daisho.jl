@@ -46,7 +46,7 @@ export radar_vars
 export IOParameters
 export SynthesisParameters
 export VariationalParameters, BackgroundErrorEntry, RadialVelocityObsParameters
-export ScalarObsEntry, background_error_for, VARIATIONAL_ROLE_VOCAB
+export ScalarObsEntry, background_error_for, VARIATIONAL_ROLE_VOCAB, VARIATIONAL_BACKGROUND_VOCAB
 export ReferenceStateParameters
 
 # Reference density profiles (exponential | Springsteel sounding)

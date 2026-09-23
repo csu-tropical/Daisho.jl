@@ -423,7 +423,9 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
         nm = st.n_mish
         S = Daisho.SplineProjection(stg, names)
         D = Daisho.DiagonalScaling(Union{Float64,Vector{Float64}}[amp, amp, amp], nm)
-        F = Daisho.MishFilter(stg, names, fill(1.0, 3, 3))
+        # σ_b (`amp`) and the CG limits were tuned with the row-normalised
+        # filter (see _solv_chain in test_variational_solver.jl).
+        F = Daisho.MishFilter(stg, names, fill(1.0, 3, 3); normalisation = :row)
         cf = Daisho.IncrementalCostFunction(Daisho.ChainOp(S, D, F), obsset, zeros(size(S, 1)))
         t = @elapsed stats = Daisho.solve_incremental!(cf, Daisho.VarSolverOptions(max_inner = 1000, inner_tolerance = 1e-6))
         a = zeros(size(S, 1)); Daisho.analysis_coefficients!(a, cf)

@@ -29,23 +29,28 @@ function _solve_load(mutate! = identity)
         "state" => ["U", "V", "W"],
         "background" => "zero",
         "mass_continuity_sigma_per_s" => 1.0e-4,
-        "max_inner_iterations" => 500,
+        # The weak-background (inflation 10) solves below need ≈ 3.8k–5.3k
+        # CG iterations; the others ≈ 0.6k.
+        "max_inner_iterations" => 10000,
         "inner_tolerance" => 1.0e-6,
-        # Filter lengths ≈ 1 cell (4 km horizontal, 1 km vertical). The
-        # row-normalised mish filter F (F·1 = 1) shrinks the amplitude of
-        # white control noise: here std(F ξ) ≈ 0.05, so the effective
-        # background-error σ of D·F·ξ is ≈ 0.05 × the configured sigma. The
-        # configured 100 / 20 m/s give ≈ 5 / 1 m/s effective (the template's
-        # 10 / 2 would give ≈ 0.5 / 0.1 m/s and pull the analysis ~0.5 m/s
-        # toward the zero background at the edges of the data).
+        # Filter lengths ≈ 1 cell (4 km horizontal, 1 km vertical) and the
+        # template's σ_b (10 m/s for U/V, 2 m/s for W). The mish filter F is
+        # variance-normalised (diag(F Fᵀ) = 1), so these σ are the actual
+        # per-point background-error standard deviations. (Before that
+        # normalisation the row-normalised F shrank white control noise to
+        # std ≈ 0.05, and this test had to configure 100 / 20 m/s.)
         "background_error" => Dict(
-            "default" => Dict("sigma" => 100.0, "filter_length_m" => [4000.0, 4000.0, 1000.0]),
-            "W"       => Dict("sigma" => 20.0,  "filter_length_m" => [4000.0, 4000.0, 1000.0])),
+            "default" => Dict("sigma" => 10.0, "filter_length_m" => [4000.0, 4000.0, 1000.0]),
+            "W"       => Dict("sigma" => 2.0,  "filter_length_m" => [4000.0, 4000.0, 1000.0])),
     )
     mutate!(base)
     open(path, "w") do io; TOML.print(io, base); end
     return DaishoParameters(path)
 end
+
+# A copy of a stage-1 SynthesisOutput with some fields replaced.
+_s1_with(s1; kw...) = Daisho.SynthesisOutput(; merge(
+    (; (f => getfield(s1, f) for f in fieldnames(Daisho.SynthesisOutput))...), (; kw...))...)
 
 # Grid every sweep of every volume through the real accumulator exactly like
 # `_grid_volumes_spectral!` (Springsteel quadrature lattice, compute_roi).
@@ -193,64 +198,165 @@ end
         @info "Phase 9 derivative diagnostics" vort_rms_err = vort_err vort_true = vort_true div_rms = div_rms
     end
 
-    @testset "synthesis background" begin
-        iu, iv, iw = Daisho.wind_indices(state)
-        # The Background picks stage-1 values/σ where quality_flag == 0 and
-        # the config values elsewhere.
-        pinf = _solve_load(b -> (b["variational"]["background"] = "synthesis";
-                                 b["variational"]["background_error_inflation"] = 100.0))
-        bg = Daisho.Background(state, stage1, pinf)
+    obs_region = ok .| filled
+    iu, iv, iw = Daisho.wind_indices(state)
+    σU, σW = 10.0, 2.0
+    # Max |jump| between adjacent mish points along each axis of a 3-D field.
+    maxjump(a) = maximum(maximum(abs.(diff(a; dims = d))) for d in 1:3)
+    maxdiff(a, b, m) = maximum(abs.(a[m] .- b[m]))
+
+    @testset "synthesis background (smooth fit + smoothed σ map)" begin
+        psyn = _solve_load(b -> (b["variational"]["background"] = "synthesis"))
+        t_bg = @elapsed bg = Daisho.Background(state, prob.state_grid, stage1, psyn)
         @test bg.mode == :synthesis
         xu = Daisho.state_view(bg.x, state, iu); su = Daisho.state_view(bg.sigma, state, iu)
         xv = Daisho.state_view(bg.x, state, iv); sv = Daisho.state_view(bg.sigma, state, iv)
-        @test xu[ok] == stage1.comp1[ok]
-        @test xv[ok] == stage1.comp2[ok]
-        @test all(iszero, xu[.!ok]) && all(iszero, xv[.!ok])
-        @test su[ok] ≈ max.(100.0 .* stage1.sigma1[ok], 1e-3 * 100.0)
-        @test sv[ok] ≈ max.(100.0 .* stage1.sigma2[ok], 1e-3 * 100.0)
-        @test all(==(100.0), su[.!ok]) && all(==(100.0), sv[.!ok])
+        # Smooth fit: close to stage 1 at good points, finite and smooth
+        # everywhere (no step to zero at flagged points).
+        fitU = maxdiff(xu, stage1.comp1, ok); fitV = maxdiff(xv, stage1.comp2, ok)
+        @test fitU < 0.3
+        @test fitV < 0.3
+        @test all(isfinite, bg.x)
+        jU = maxjump(xu); jV = maxjump(xv)
+        @test jU < 1.0
+        @test jV < 1.0
         @test all(iszero, Daisho.state_view(bg.x, state, iw))
-        @test all(==(20.0), Daisho.state_view(bg.sigma, state, iw))
-        # Dispatch on the config: "synthesis" + stage1 → synthesis mode.
-        @test Daisho.Background(state, stage1, pinf).x == bg.x
+        # σ map: clamped to [σ/10, σ] (inflation 1), smoother than the raw
+        # stage-1/config map, and equal to the definition.
+        @test all(s -> σU / 10 - 1e-12 <= s <= σU + 1e-12, su)
+        @test all(s -> σU / 10 - 1e-12 <= s <= σU + 1e-12, sv)
+        @test all(==(σW), Daisho.state_view(bg.sigma, state, iw))
+        raw = [ok[idx] ? stage1.sigma1[idx] : σU for idx in CartesianIndices(ok)]
+        rawc = clamp.(raw, σU / 10, σU)
+        @test maxjump(su) < maxjump(rawc)
+        FU = Daisho.MishFilter(prob.state_grid, ["U"], Daisho.filter_lengths_cells(prob.state_grid,
+                 ["U"], Daisho.filter_lengths_m(state)[:, iu:iu]); normalisation = :row)
+        sm = zeros(state.n_mish)
+        Daisho.apply!(sm, FU, vec(raw .^ 2))
+        @test vec(su) ≈ clamp.(sqrt.(max.(sm, 0.0)), σU / 10, σU)
+        # Dispatch: the 3-argument form cannot build the smooth fit (no state
+        # grid); the high-level problem builds exactly this background.
+        @test_throws ArgumentError Daisho.Background(state, stage1, psyn)
+        @test_throws ArgumentError Daisho.Background(state, prob.state_grid, nothing, psyn)
 
-        # Large inflation was expected to make the background weak and so
-        # reproduce the zero-background answer. It does NOT (max |ΔU|, |ΔV| ≈ 5.6, 7.1
-        # m/s on the observed region; CG converged, a true minimiser): the
-        # :synthesis background is a step (stage-1 values where
-        # quality_flag == 0, 0 elsewhere) and its σ map is rough point to
-        # point (inflation·stage-1 σ ∈ [33, 194] beside the config 100). D
-        # multiplies the smooth filtered control pointwise, so a smooth
-        # increment through a rough σ map, or one cancelling the step's
-        # spline projection, needs a rough control that F (Gaussian, σ ≈ 1
-        # cell) can barely produce; the minimiser trades that prior cost
-        # against misfit. Each ingredient alone shows it (diagnosed with
-        # this setup): stage-1 x + uniform σ → 5.7 m/s, zero x + the rough
-        # σ map → 4.6 m/s, zero x + iid σ ∈ [33, 194] → 12 m/s. Recorded as
-        # broken pending a design decision (e.g. smooth the σ map / fill
-        # the background smoothly across flagged points).
-        prob_inf = Daisho.VariationalProblem(acc, radar_grid, sgrid, pinf)
-        @test prob_inf.background.mode == :synthesis
-        r_inf = Daisho.solve_variational(prob_inf)
-        @test r_inf.converged
-        # Compared on the observed region: at the few no-data points the
-        # analysis is the (different) background itself.
-        obs_region = ok .| filled
-        dU = maximum(abs.(Daisho.analysis_field(r_inf, "U")[obs_region] .- Ua[obs_region]))
-        dV = maximum(abs.(Daisho.analysis_field(r_inf, "V")[obs_region] .- Va[obs_region]))
-        @test_broken dU < 0.1
-        @test_broken dV < 0.1
-
-        # Inflation 1 (stage-1 σ used as-is, the double-counting case) is
-        # still close to the truth on the observed region.
-        p1 = _solve_load(b -> (b["variational"]["background"] = "synthesis"))
-        r1 = Daisho.solve_variational(Daisho.VariationalProblem(acc, radar_grid, sgrid, p1))
+        prob1 = Daisho.VariationalProblem(acc, radar_grid, sgrid, psyn)
+        @test prob1.background.mode == :synthesis
+        @test prob1.background.x ≈ bg.x rtol = 1e-10
+        @test prob1.background.sigma ≈ bg.sigma rtol = 1e-12
+        r1 = Daisho.solve_variational(prob1)
         @test r1.converged
         U1 = Daisho.analysis_field(r1, "U"); V1 = Daisho.analysis_field(r1, "V")
-        e1 = max(maximum(abs.(U1[obs_region] .- Ut[obs_region])),
-                 maximum(abs.(V1[obs_region] .- Vt[obs_region])))
+        e1 = max(maxdiff(U1, Ut, obs_region), maxdiff(V1, Vt, obs_region))
         @test e1 < 0.5
-        @info "Phase 9 synthesis background" inflation100_max_diff = max(dU, dV) inflation1_max_err = e1 cg_inf = repr(r_inf.stats.inner_iterations) cg_1 = repr(r1.stats.inner_iterations)
+
+        # Large inflation: a weak background, so the analysis approaches the
+        # zero-background one on the observed region. Two measured limits
+        # (2026-09-23, this setup) set the inflation and the tolerance:
+        # - With the variance-normalised F the zero background's σ = 10 m/s
+        #   is a real prior that pulls the edges of the data toward 0 (the
+        #   zero-background analysis is itself up to 0.25 m/s from the truth
+        #   at filled points). A much weaker background therefore converges
+        #   to a slightly DIFFERENT answer, not the zero-background one. With
+        #   inflation 100 and CG fully converged (rtol 1e-6) the max
+        #   difference is 0.338 m/s (synthesis) / 0.351 m/s
+        #   (synthesis_uniform_sigma), both 0.21 m/s from the truth. That
+        #   is not σ-map roughness: synthesis_uniform_sigma has no σ map.
+        # - Inflation 100 makes σ_b 100–1000 m/s, and CG needs 21.6k / 28.5k
+        #   iterations (35 s / 49 s) without a preconditioner. Inflation 10
+        #   converges in ≈ 3.8k / 5.3k iterations and is still weak (σ_b of
+        #   U/V 10–84 m/s here vs the zero background's 10 m/s).
+        pinf = _solve_load(b -> (b["variational"]["background"] = "synthesis";
+                                 b["variational"]["background_error_inflation"] = 10.0))
+        prob_inf = Daisho.VariationalProblem(acc, radar_grid, sgrid, pinf)
+        @test prob_inf.background.x ≈ bg.x rtol = 1e-10
+        sui = Daisho.state_view(prob_inf.background.sigma, state, iu)
+        @test sui ≈ 10 .* su
+        @test all(==(10 * σW), Daisho.state_view(prob_inf.background.sigma, state, iw))
+        r_inf = Daisho.solve_variational(prob_inf)
+        @test r_inf.converged
+        Ui = Daisho.analysis_field(r_inf, "U"); Vi = Daisho.analysis_field(r_inf, "V")
+        d_inf = max(maxdiff(Ui, Ua, obs_region), maxdiff(Vi, Va, obs_region))
+        e_inf = max(maxdiff(Ui, Ut, obs_region), maxdiff(Vi, Vt, obs_region))
+        @test d_inf < 0.3     # measured 0.24
+        @test e_inf < 0.3     # measured 0.11
+        @info "Phase 9b synthesis background" build_seconds = t_bg fit_max_err_U = fitU fit_max_err_V = fitV max_jump_U = jU max_jump_V = jV sigma_U_range = extrema(su) sigma_jump_smoothed = maxjump(su) sigma_jump_raw = maxjump(rawc) inflation1_max_err = e1 inflation10_max_diff_vs_zero = d_inf inflation10_max_err = e_inf cg_1 = repr(r1.stats.inner_iterations) cg_inf = repr(r_inf.stats.inner_iterations)
+    end
+
+    @testset "synthesis_uniform_sigma background" begin
+        pun = _solve_load(b -> (b["variational"]["background"] = "synthesis_uniform_sigma"))
+        bg = Daisho.Background(state, prob.state_grid, stage1, pun)
+        @test bg.mode == :synthesis_uniform_sigma
+        @test bg.sigma == Daisho.background_sigma_vector(state)
+        xu = Daisho.state_view(bg.x, state, iu)
+        @test maxdiff(xu, stage1.comp1, ok) < 0.3
+        @test all(iszero, Daisho.state_view(bg.x, state, iw))
+        r1 = Daisho.solve_variational(Daisho.VariationalProblem(acc, radar_grid, sgrid, pun))
+        @test r1.converged
+        e1 = max(maxdiff(Daisho.analysis_field(r1, "U"), Ut, obs_region),
+                 maxdiff(Daisho.analysis_field(r1, "V"), Vt, obs_region))
+        @test e1 < 0.5
+        # Weak background: see the inflation note in the "synthesis" testset
+        # (the 0.1 m/s target is not reachable: converged inflation 100 gives
+        # 0.351 m/s, inflation 10 gives 0.26 m/s, because the zero
+        # background's σ = 10 m/s is itself a real prior at the data edges).
+        pinf = _solve_load(b -> (b["variational"]["background"] = "synthesis_uniform_sigma";
+                                 b["variational"]["background_error_inflation"] = 10.0))
+        prob_inf = Daisho.VariationalProblem(acc, radar_grid, sgrid, pinf)
+        @test prob_inf.background.sigma == 10 .* Daisho.background_sigma_vector(state)
+        r_inf = Daisho.solve_variational(prob_inf)
+        @test r_inf.converged
+        Ui = Daisho.analysis_field(r_inf, "U"); Vi = Daisho.analysis_field(r_inf, "V")
+        d_inf = max(maxdiff(Ui, Ua, obs_region), maxdiff(Vi, Va, obs_region))
+        e_inf = max(maxdiff(Ui, Ut, obs_region), maxdiff(Vi, Vt, obs_region))
+        @test d_inf < 0.3     # measured 0.26
+        @test e_inf < 0.3     # measured 0.13
+        @info "Phase 9b synthesis_uniform_sigma background" inflation1_max_err = e1 inflation10_max_diff_vs_zero = d_inf inflation10_max_err = e_inf cg_inf = repr(r_inf.stats.inner_iterations)
+    end
+
+    @testset "synthesis_profile background" begin
+        ppr = _solve_load(b -> (b["variational"]["background"] = "synthesis_profile"))
+        bg = Daisho.Background(state, stage1, ppr)
+        @test bg.mode == :synthesis_profile
+        @test Daisho.Background(state, prob.state_grid, stage1, ppr).x == bg.x
+        @test bg.sigma == Daisho.background_sigma_vector(state)
+        xu = Daisho.state_view(bg.x, state, iu); xv = Daisho.state_view(bg.x, state, iv)
+        @test all(iszero, Daisho.state_view(bg.x, state, iw))
+        for k in 1:nz
+            @test all(==(xu[k, 1, 1]), xu[k, :, :])
+            @test all(==(xv[k, 1, 1]), xv[k, :, :])
+        end
+        # One level by hand: the plain mean of the good stage-1 points.
+        k0 = argmax([count(ok[k, :, :]) for k in 1:nz])
+        m = ok[k0, :, :]
+        @test xu[k0, 1, 1] ≈ sum(stage1.comp1[k0, :, :][m]) / count(m)
+        @test xv[k0, 1, 1] ≈ sum(stage1.comp2[k0, :, :][m]) / count(m)
+        rp = Daisho.solve_variational(Daisho.VariationalProblem(acc, radar_grid, sgrid, ppr))
+        @test rp.converged
+        ep = max(maxdiff(Daisho.analysis_field(rp, "U"), Ut, obs_region),
+                 maxdiff(Daisho.analysis_field(rp, "V"), Vt, obs_region))
+        @test ep < 0.5
+
+        # A level with no good points is interpolated linearly in z between
+        # its neighbours; an empty top level takes the nearest level's value.
+        with_flags(qf) = _s1_with(stage1; quality_flag = qf)
+        levmean(k) = sum(stage1.comp1[k, :, :][ok[k, :, :]]) / count(ok[k, :, :])
+        kmid = 1 + nz ÷ 2
+        @test all(k -> count(ok[k, :, :]) > 0, (kmid - 1, kmid + 1, nz - 1))
+        qf = copy(stage1.quality_flag)
+        qf[kmid, :, :] .= Daisho.QFLAG_SINGULAR
+        qf[nz, :, :] .= Daisho.QFLAG_NODATA
+        bgq = Daisho.Background(state, with_flags(qf), ppr)
+        xq = Daisho.state_view(bgq.x, state, iu)
+        z = state.z_mish
+        wgt = (z[kmid] - z[kmid - 1]) / (z[kmid + 1] - z[kmid - 1])
+        @test xq[kmid, 3, 4] ≈ (1 - wgt) * levmean(kmid - 1) + wgt * levmean(kmid + 1)
+        @test xq[nz, 2, 2] ≈ levmean(nz - 1)
+        @test xq[1, 1, 1] ≈ levmean(1)
+        # All flagged → zeros and a warning.
+        qall = fill(Daisho.QFLAG_NODATA, size(qf))
+        bg0 = @test_logs (:warn, r"no stage-1 point") Daisho.Background(state, with_flags(qall), ppr)
+        @test all(iszero, bg0.x)
+        @info "Phase 9b synthesis_profile background" max_err = ep level = k0 u_mean = xu[k0, 1, 1]
     end
 
     @testset "solver options, Background errors, in-memory constructor" begin
@@ -268,6 +374,18 @@ end
         @test Daisho.Background(state, nothing, p).sigma == bz.sigma
         psyn = _solve_load(b -> (b["variational"]["background"] = "synthesis"))
         @test_throws ArgumentError Daisho.Background(state, nothing, psyn)
+        ppr = _solve_load(b -> (b["variational"]["background"] = "synthesis_profile"))
+        @test_throws ArgumentError Daisho.Background(state, nothing, ppr)
+        @test_throws ArgumentError Daisho.Background(state, prob.state_grid, nothing, ppr)
+        pun = _solve_load(b -> (b["variational"]["background"] = "synthesis_uniform_sigma"))
+        @test_throws ArgumentError Daisho.Background(state, stage1, pun)
+        # "zero" ignores a supplied stage-1 product.
+        @test Daisho.Background(state, stage1, p).mode == :zero
+        @test Daisho.Background(state, prob.state_grid, stage1, p).x == zeros(length(state))
+        # Frame check: stage-1 components must be the state's u/v names.
+        s1rot = _s1_with(stage1; component_names = ("UR", "VT"))
+        @test_throws ArgumentError Daisho.Background(state, s1rot, ppr)
+        @test_throws ArgumentError Daisho.Background(state, prob.state_grid, s1rot, psyn)
         # Raw constructor validation.
         n = length(state)
         @test_throws DimensionMismatch Daisho.Background(zeros(n), ones(n - 1), :zero)
@@ -279,7 +397,8 @@ end
             reference_longitude = ref_lon, x_axis = [0.0, 1000.0], y_axis = [0.0, 1000.0],
             z_axis = [500.0])
         acc_small = Daisho.WindGridAccumulator(spec_small, "VEL"; n_unknowns = 3)
-        @test_throws DimensionMismatch Daisho.Background(state, Daisho.finalize_wind(acc_small, p), psyn)
+        @test_throws DimensionMismatch Daisho.Background(state, prob.state_grid, Daisho.finalize_wind(acc_small, p), psyn)
+        @test_throws DimensionMismatch Daisho.Background(state, Daisho.finalize_wind(acc_small, p), ppr)
 
         # In-memory constructor from parts reproduces the high-level problem.
         prob2 = Daisho.VariationalProblem(state, prob.state_grid, prob.observations,

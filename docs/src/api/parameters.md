@@ -28,4 +28,5 @@ Daisho.RadialVelocityObsParameters
 Daisho.ScalarObsEntry
 Daisho.background_error_for
 Daisho.VARIATIONAL_ROLE_VOCAB
+Daisho.VARIATIONAL_BACKGROUND_VOCAB
 ```

@@ -66,7 +66,8 @@ end
             for c in cols, filt in (GaussianFilter(sigma = 1.5), LanczosFilter(a = 3),
                                     GaussianFilter(sigma = 0.6, n_sigma = 3), LanczosFilter(a = 2))
                 ax = Daisho.AxisSpline(_filt_template(grid, a, c))
-                af = Daisho.AxisFilter(filt, ax)
+                af = Daisho.AxisFilter(filt, ax; normalisation = :row)
+                @test af.normalisation === :row
                 K, support = Springsteel._spline_kernel(filt, ax.sp.DX)
                 @test af.support == support
                 @test af.length_cells == (filt isa GaussianFilter ? filt.sigma : Float64(filt.a))
@@ -84,6 +85,18 @@ end
                 end
                 # Row normalisation: F·1 = 1 to round-off.
                 @test maximum(abs.(af.F * ones(ax.Dim) .- 1)) < 1e-14
+
+                # Variance normalisation (the default): F̃ = N⁻¹F with
+                # N = diag(√(Σ_j F_ij²)), so diag(F̃F̃ᵀ) = 1 exactly.
+                afv = Daisho.AxisFilter(filt, ax)
+                @test afv.normalisation === :variance
+                @test afv.support == af.support && afv.length_cells == af.length_cells
+                @test afv.Ft == sparse(transpose(afv.F))
+                Nrow = vec(sqrt.(sum(abs2, Matrix(af.F); dims = 2)))
+                @test _frelerr(Matrix(afv.F), Diagonal(1 ./ Nrow) * Matrix(af.F)) < 1e-14
+                @test maximum(abs.(diag(afv.F * afv.Ft) .- 1)) < 1e-14
+                # Row sums are no longer 1 (a smoothing filter has Σ F_ij² < 1).
+                @test minimum(afv.F * ones(ax.Dim)) > 1.0
             end
         end
 
@@ -107,7 +120,8 @@ end
             for (v, n) in enumerate(_FILT_VARS), (a, dir) in enumerate((:k, :j, :i))
                 filters[a, v] = get(sf[n], dir, nothing)
             end
-            MF = Daisho.MishFilter(grid, _FILT_VARS, filters)
+            MF = Daisho.MishFilter(grid, _FILT_VARS, filters; normalisation = :row)
+            @test Daisho.filter_normalisation(MF) === :row
             x = randn(rng, 3nm)
             for (v, n) in enumerate(_FILT_VARS)
                 fgrid.physical[:, gp.vars[n], 1] .= x[(v-1)*nm+1:v*nm]
@@ -139,6 +153,13 @@ end
             @test Daisho.adjoint_relative_error(ML; rng = rng) < 1e-12
             MS = Daisho.MishFilter(grid, _FILT_VARS, Lg; symmetric = true)
             @test Daisho.adjoint_relative_error(MS; rng = rng) < 1e-12
+            @test Daisho.filter_normalisation(MG) === :variance
+            @test Daisho.filter_normalisation(MS) === :none
+            @test Daisho.axis_filter(MS, :i, 1).normalisation === :none
+            MR = Daisho.MishFilter(grid, _FILT_VARS, Lg; normalisation = :row)
+            @test Daisho.adjoint_relative_error(MR; rng = rng) < 1e-12
+            MLR = Daisho.MishFilter(grid, _FILT_VARS, Ll; kind = :lanczos, normalisation = :row)
+            @test Daisho.adjoint_relative_error(MLR; rng = rng) < 1e-12
 
             # W (all axes nothing) passes through unchanged; V skips its j axis.
             x = randn(rng, 3nm)
@@ -181,10 +202,44 @@ end
             @test a1 == a2
         end
 
+        # ── 4b. Variance normalisation of the 3-D filter ────────────────────
+        @testset "3-D variance normalisation" begin
+            # diag(F̃F̃ᵀ) = Π_axes diag(F̃_a F̃_aᵀ) = 1 for the tensor product:
+            # ‖F̃ᵀ e_i‖² = (F̃F̃ᵀ)_ii at random points (one variable with a
+            # skipped axis, one unfiltered).
+            for (L, kind) in (([1.5 0.8 0.0; 1.2 NaN 0.0; 0.7 2.0 0.0], :gaussian),
+                              ([3.0 2.0 1.0; 2.0 1.0 0.0; 1.0 3.0 0.0], :lanczos))
+                MV = Daisho.MishFilter(grid, _FILT_VARS, L; kind = kind)
+                e = zeros(3nm); col = zeros(3nm)
+                for idx in rand(rng, 1:3nm, 8)
+                    fill!(e, 0.0); e[idx] = 1.0
+                    Daisho.apply_adjoint!(col, MV, e)
+                    @test abs(sum(abs2, col) - 1) < 1e-12
+                end
+                # The row-normalised filter shrinks white noise instead.
+                MR = Daisho.MishFilter(grid, _FILT_VARS, L; kind = kind, normalisation = :row)
+                fill!(e, 0.0); e[nm ÷ 2] = 1.0
+                Daisho.apply_adjoint!(col, MR, e)
+                @test sum(abs2, col) < 0.5
+            end
+            # Monte Carlo: pointwise variance of F̃ξ over white-noise samples ≈ 1.
+            MV = Daisho.MishFilter(grid, _FILT_VARS, fill(1.5, 3, 3))
+            ns = 200
+            acc2 = zeros(3nm); y = zeros(3nm)
+            for _ in 1:ns
+                Daisho.apply!(y, MV, randn(rng, 3nm))
+                acc2 .+= y .^ 2
+            end
+            pv = acc2 ./ ns
+            @info "Monte-Carlo pointwise variance of F̃ξ (mubar=$(mubar), $(quadrature))" mean = sum(pv) / length(pv) min = minimum(pv) max = maximum(pv)
+            @test abs(sum(pv) / length(pv) - 1) < 0.05
+            @test count(v -> abs(v - 1) < 0.2, pv) > 0.9 * length(pv)
+        end
+
         # ── 5. Smoothing sanity ─────────────────────────────────────────────
         @testset "Smoothing reduces variance" begin
             for (L, kind) in ((fill(1.5, 3, 3), :gaussian), (fill(3.0, 3, 3), :lanczos))
-                MF = Daisho.MishFilter(grid, _FILT_VARS, L; kind = kind)
+                MF = Daisho.MishFilter(grid, _FILT_VARS, L; kind = kind, normalisation = :row)
                 x = randn(rng, 3nm)
                 for v in 1:3
                     r = (v-1)*nm+1:v*nm
@@ -250,6 +305,8 @@ end
             @test_throws ArgumentError Daisho.MishFilter(grid, _FILT_VARS, fill(-1.0, 3, 3))
             @test_throws DimensionMismatch Daisho.MishFilter(grid, _FILT_VARS, ones(3, 2))
             @test_throws DimensionMismatch Daisho.MishFilter(grid, _FILT_VARS, ones(2, 3))
+            @test_throws ArgumentError Daisho.AxisFilter(GaussianFilter(sigma = 1.0), ax; normalisation = :bogus)
+            @test_throws ArgumentError Daisho.MishFilter(grid, _FILT_VARS, ones(3, 3); normalisation = :bogus)
         end
     end
     end
@@ -266,7 +323,7 @@ end
         o = ones(n)
 
         for filt in (GaussianFilter(sigma = 1.5), LanczosFilter(a = 3))
-            af = Daisho.AxisFilter(filt, ax)
+            af = Daisho.AxisFilter(filt, ax; normalisation = :row)
             K, support = Springsteel._spline_kernel(filt, ax.sp.DX)
             @test maximum(abs.(af.F * o .- 1)) < 1e-14
             cs = af.Ft * o
@@ -288,11 +345,27 @@ end
             end
             # F − Fᵀ = K_ij(1/W_i − 1/W_j): nonzero, i.e. F is not symmetric.
             @test norm(af.F - af.Ft) > 1e-3 * norm(af.F)
+
+            # Variance-normalised: diag(F̃F̃ᵀ) = 1 everywhere (boundaries too);
+            # interior row sums are 1/√(Σ_j F_ij²) > 1, not 1.
+            afv = Daisho.AxisFilter(filt, ax)
+            @test maximum(abs.(diag(afv.F * afv.Ft) .- 1)) < 1e-14
+            rs = afv.F * o
+            far = dist .> 2support
+            rs_far = rs[far]
+            @info "Variance-normalised interior row sums ($(nameof(typeof(filt))), $(quadrature))" min = minimum(rs_far) max = maximum(rs_far)
+            @test minimum(rs_far) > 1.2   # ≈ 1.5 (Lanczos a = 3), 3.3–4.0 (Gaussian σ = 1.5)
+            if filt isa GaussianFilter && quadrature == :regular
+                # Uniform mish, s = σ·mubar points: Σ F² ≈ 1/(2√π s), so the
+                # row sum of F̃ is √(2√π s) (= 3.26 for s = 3).
+                s_pts = filt.sigma * mubar
+                @test all(r -> isapprox(r, sqrt(2 * sqrt(pi) * s_pts); rtol = 1e-3), rs_far)
+            end
         end
 
         # With a wide truncation (n_sigma = 8) the row weights are uniform to
         # round-off in the interior even on the Gauss mish.
-        af8 = Daisho.AxisFilter(GaussianFilter(sigma = 1.5, n_sigma = 8), ax)
+        af8 = Daisho.AxisFilter(GaussianFilter(sigma = 1.5, n_sigma = 8), ax; normalisation = :row)
         far8 = dist .> 2af8.support
         count(far8) > 0 && @test maximum(abs.((af8.Ft * o)[far8] .- 1)) < 1e-12
 
@@ -301,7 +374,8 @@ end
         # window is symmetric about its centre; the Gauss mish needs a wider
         # truncation (n_sigma = 8) to reach round-off.
         lin = 3.0 .+ 0.002 .* x
-        for af in (Daisho.AxisFilter(GaussianFilter(sigma = 1.5, n_sigma = quadrature == :regular ? 4 : 8), ax),)
+        for af in (Daisho.AxisFilter(GaussianFilter(sigma = 1.5, n_sigma = quadrature == :regular ? 4 : 8), ax;
+                                     normalisation = :row),)
             inner = dist .> af.support
             @test maximum(abs.((af.F * lin)[inner] .- lin[inner])) < 1e-10 * maximum(abs, lin)
         end

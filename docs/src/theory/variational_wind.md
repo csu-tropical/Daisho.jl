@@ -72,29 +72,55 @@ consistent, allocation-free operators after warm-up.
 
 `F` is a separable, per-axis, per-variable convolution on the mish points,
 built from Springsteel's spline-direction kernel (`GaussianFilter` or
-`LanczosFilter`) and stored as a sparse row-normalised matrix
-(`AxisFilter`, `MishFilter`):
+`LanczosFilter`) and stored as a sparse matrix (`AxisFilter`,
+`MishFilter`). Per axis, the row-normalised convolution (exactly
+Springsteel's `_convolve_axis!`) is
 
 ```math
-F_{ij} = \frac{K(x_j - x_i)}{W_i}\ \text{for } |x_j - x_i| \le \text{support},
+F^{\mathrm{row}}_{ij} = \frac{K(x_j - x_i)}{W_i}\ \text{for } |x_j - x_i| \le \text{support},
 \qquad W_i = \sum_j K_{ij}
 ```
 
-`F` is **not symmetric**: `(F - F^\top)_{ij} = K_{ij}(1/W_i - 1/W_j)`, which
+and the solver uses its **variance-normalised** form
+
+```math
+\tilde F = N^{-1} F^{\mathrm{row}}, \qquad
+N = \mathrm{diag}\Big(\sqrt{\textstyle\sum_j (F^{\mathrm{row}}_{ij})^2}\Big),
+```
+
+so that ``\mathrm{diag}(\tilde F \tilde F^\top) = 1`` exactly at every mish
+point. The row-normalised filter preserves constants (``F^{\mathrm{row}}\mathbf 1 = \mathbf 1``)
+but shrinks white noise — ``(F^{\mathrm{row}} F^{\mathrm{row}\top})_{ii} = \sum_j (F^{\mathrm{row}}_{ij})^2 \ll 1``
+(≈ 0.05 for 1-cell lengths on a mubar-3 mish) — so with it the configured
+σ_b would not be the background-error standard deviation. Because the 3-D
+filter is a tensor product of its axis filters,
+``\mathrm{diag}(\tilde F_{3D} \tilde F_{3D}^\top) = \prod_{\text{axes}} \mathrm{diag}(\tilde F_a \tilde F_a^\top) = 1``
+exactly too, and ``B = S D \tilde F \tilde F^\top D S^\top`` has per-point
+variance σ_b² before the spline projection: **the configured `sigma` is the
+background-error standard deviation**. The rescaling changes only the
+amplitude, not the correlation shape: the correlation of ``\tilde F \tilde F^\top`` is
+still the √2-widened kernel (below). The rows of ``\tilde F`` no longer sum to
+one (in the interior ≈ ``\sqrt{2\sqrt\pi\, s}`` for a Gaussian of `s` mish
+points on a uniform mish). `MishFilter(…; normalisation = :row)` keeps the
+Springsteel-parity form, used for Springsteel parity tests and for
+mean-preserving smoothing of fields (the σ map of §9).
+
+``F^{\mathrm{row}}`` (and so ``\tilde F``) is **not symmetric**: ``(F - F^\top)_{ij} = K_{ij}(1/W_i - 1/W_j)``, which
 is nonzero within one kernel support of a domain boundary (the truncated
 window there gives adjacent points different row sums `W`) and, on a
 non-uniform (Gauss) mish, even in the interior at the size of the truncated
 kernel tail. `Fᵀ` is applied as the exact sparse transpose — never
 approximated as `F` — so the adjoint and the Hessian stay exact. (An
-optional `symmetric = true` variant, `W_q^{1/2}(K/\kappa)W_q^{1/2}` with the
+optional, experimental `symmetric = true` variant, ``W_q^{1/2}(K/\kappa)W_q^{1/2}`` with the
 SB quadrature weights, is available on `AxisFilter`/`MishFilter` for future
-preconditioning work but is not reachable from `[variational]` config today.)
+preconditioning work but is not reachable from `[variational]` config today;
+it is **not** variance-normalised.)
 
 Filter lengths are configured in **metres** per state variable and axis
 (`[variational.background_error.<name>] filter_length_m = [i, j, k]`) and
 converted to cells internally (`filter_lengths_cells`). Because `F` is not
-symmetric, the *effective* correlation length of the background covariance `B = C C^\top` seen by an
-observation is that of `F F^\top`, which for a Gaussian kernel of standard
+symmetric, the *effective* correlation length of the background covariance ``B = C C^\top`` seen by an
+observation is that of ``F F^\top``, which for a Gaussian kernel of standard
 deviation σ (in cells) is **√2·σ**, not σ — a common point of confusion
 migrating filter lengths from samurai (§7).
 
@@ -103,7 +129,8 @@ migrating filter lengths from samurai (§7).
 `D` is a diagonal operator (`DiagonalScaling`)
 holding each state variable's background-error standard deviation σ_b,
 either a single scalar (`UniformSigma`) or a
-per-mish-point map (`FieldSigma`). `D` is applied
+per-mish-point map (`FieldSigma`). With the variance-normalised ``\tilde F``,
+``D \tilde F ξ`` for white `ξ` has pointwise standard deviation exactly σ_b. `D` is applied
 *after* `F` (order `D·F`, i.e. filter white noise, then scale by σ_b) so a
 per-point σ map is respected and matches samurai's `SC` factor. `D` is
 symmetric, so its own adjoint equals itself.
@@ -369,28 +396,71 @@ quadratic term relative to the identity); a preconditioner slot (`M =` in
 
 ## 9. Background modes
 
-`[variational] background`:
+`[variational] background` is a flat vocabulary (decided 2026-09-23). With
+σ each variable's configured `[variational.background_error]` σ and
+`inflation = background_error_inflation`:
 
-- `"zero"` (default, samurai-like): the background is 0 everywhere for every
-  state variable, with σ_b from `[variational.background_error]`.
-- `"synthesis"`: `U`, `V` take the stage-1 `(u, v)` analysis
-  (`stage1.comp1`/`comp2`) wherever `quality_flag == 0`, else 0; the
-  background σ is `FieldSigma(background_error_inflation ·
-  stage1.sigma1/sigma2)`, floored at the configured σ where the stage-1
-  point was flagged (so a masked point falls back to the config prior
-  rather than an unreliable stage-1 σ). `W` always comes from
-  `background_error`, since stage 1 has no `w`.
+| `background` | `U`/`V` background `x_b` | `U`/`V` σ_b | other variables |
+|:--|:--|:--|:--|
+| `"zero"` (default) | 0 | σ | `x_b = 0`, σ |
+| `"synthesis"` | smooth fit | smoothed stage-1 σ map × inflation | `x_b = 0`, σ × inflation |
+| `"synthesis_uniform_sigma"` | smooth fit | σ × inflation | `x_b = 0`, σ × inflation |
+| `"synthesis_profile"` | level-mean profile | σ × inflation | `x_b = 0`, σ × inflation |
 
-**Double-counting caveat.** The `"synthesis"` background and the
+`W` has no stage-1 estimate, so its background is always 0.
+
+**Smooth fit** (`synthesis_smooth_fit`). The background `(u, v)` is the
+spline field closest to the stage-1 `(u, v)` at unflagged points
+(`quality_flag == 0`), found by an *auxiliary* variational solve with the
+machinery of §§1–8: a zero background with the configured uniform σ, the
+configured (variance-normalised) filter, no mass continuity and no radar
+super-obs, and one linear value observation per good point and component,
+
+```math
+y = \texttt{comp1}\ (\texttt{comp2}), \qquad
+\sigma_o = \max(\sigma_{1(2)}^{\text{stage 1}},\ \sigma/100),
+```
+
+so well-determined stage-1 points dominate. The auxiliary problem is linear
+(one Gauss–Newton step) and uses the main solve's inner tolerance and
+iteration cap; `x_b` is its spline analysis on the mish. The fit costs one
+extra CG solve. It is smooth everywhere: at flagged points and in data gaps
+it relaxes smoothly to 0 over the filter length instead of stepping to 0,
+the step that made the original `"synthesis"` background (stage-1 values
+where good, 0 elsewhere) unusable.
+
+**Smoothed σ map** (`synthesis_sigma_map`, `"synthesis"` only). Start from
+``s_i = σ^{\text{stage 1}}_i`` at good points and `s_i = σ` at flagged points;
+smooth the *variance* map `s²` with that variable's configured filter in its
+row-normalised (mean-preserving) form, take the square root, clamp to
+`[σ/10, σ]`, and multiply by `inflation`. `D` multiplies the smooth filtered
+control pointwise, so a σ map that jumps from point to point forces a rough
+control to produce a smooth increment. Smoothing removes those jumps, and
+the clamp keeps `D` well conditioned (no near-zero σ at heavily
+overdetermined points) and never above the configured prior.
+
+**Level-mean profile** (`synthesis_level_profile`,
+`"synthesis_profile"`). For each mish level `k`, `u_k` is the plain mean of
+the stage-1 `comp1` over the good points of that level (`v` likewise), and
+`x_b(k, j, i) = u_k`. Levels without a good point are filled by linear
+interpolation in `z` between the nearest levels that have one, with constant
+extrapolation at the ends. If no level has a good point the background is 0
+(with a warning).
+
+**Double-counting caveat.** Every `synthesis*` background and the
 radial-velocity super-obs term (§4) are built from the *same* underlying
 gates: the super-obs are the eigen-split of the very normal system stage 1
 solved to produce the background. Using both without correction lets that
-data count twice — once as the prior mean, once as the likelihood.
+data count twice, once as the prior mean and once as the likelihood.
 `background_error_inflation` (multiplying σ_b, hence *weakening* the
 background term relative to the always-present radar likelihood) is the
-guard against this; it does not eliminate the double count, it trades it off
-explicitly. The `"zero"` mode has no such coupling — its background carries
-no information from the current volume at all.
+guard against this. It does not eliminate the double count; it trades it
+off explicitly. The profile mode double counts least, since a level mean
+carries little of any single point's information. The `"zero"` mode has no
+such coupling: its background carries no information from the current
+volume at all. A very large inflation also inflates σ_b by the same factor,
+which steepens the Hessian's condition number `∝ (σ_b/σ_o)²` (§8):
+expect many more CG iterations.
 
 ## 10. Differences from samurai
 
@@ -416,7 +486,9 @@ no information from the current volume at all.
   samurai configured filter lengths in grid units and its recursive filter's
   effective correlation length equals its configured σ (a symmetric filter);
   Daisho's non-symmetric, exact-adjoint `F` has an effective `B = FF^\top`
-  correlation length of `√2` times the configured (cell) length.
+  correlation length of `√2` times the configured (cell) length. `F` is
+  variance-normalised, so the configured σ_b is the per-point
+  background-error standard deviation.
 - **No storm-motion advection term.** Out of scope for this phase (plan
   §1); a single synthesis time is assumed, as in stage 1.
 - **Flexible state vector**, not samurai's fixed seven variables:

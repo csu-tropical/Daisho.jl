@@ -201,9 +201,16 @@ enabled = false
 # [fields] name (appended as a value-observed scalar state variable). Must
 # be non-empty, unique, and contain both "U" and "V".
 state = ["U", "V", "W"]
-background = "zero"                  # "zero" | "synthesis" (stage-1 (u,v) as background)
-background_error_inflation = 1.0     # multiplies sigma_b when background = "synthesis"
-                                      # (guards against double-counting stage-1 uncertainty)
+# Background (first guess) of U/V; W and scalars always start from 0:
+#   "zero"                    0 everywhere, configured sigma (samurai-like)
+#   "synthesis"               smooth spline fit to the stage-1 (u,v) at unflagged
+#                             points (one extra CG solve) + smoothed stage-1 sigma map
+#                             clamped to [sigma/10, sigma]
+#   "synthesis_uniform_sigma" the same smooth fit + configured sigma
+#   "synthesis_profile"       level-mean stage-1 (u,v) profile + configured sigma
+background = "zero"
+background_error_inflation = 1.0     # multiplies sigma_b in every "synthesis*" mode
+                                      # (guards against double-counting the radar data)
 # Enforce anelastic mass continuity (div(u,v) + dw/dz + w*dlnrhobar/dz = 0) as
 # a pseudo-observation at every mish point. Requires "W" in state.
 mass_continuity = true
