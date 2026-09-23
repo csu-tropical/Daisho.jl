@@ -5,6 +5,7 @@
 include("linear_operator.jl")
 include("pencil.jl")
 include("spline_operator.jl")
+include("filter_operator.jl")
 
-# Later phases: filter_operator.jl, obs_operator.jl, cost_function.jl,
+# Later phases: obs_operator.jl, cost_function.jl,
 # solver.jl, state.jl, observations.jl, superobs.jl, problem.jl, pipeline.jl
