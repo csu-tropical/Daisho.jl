@@ -9,5 +9,6 @@ include("filter_operator.jl")
 include("obs_operator.jl")
 include("cost_function.jl")
 include("solver.jl")
+include("state.jl")
 
-# Later phases: state.jl, observations.jl, superobs.jl, problem.jl, pipeline.jl
+# Later phases: observations.jl, superobs.jl, problem.jl, pipeline.jl
