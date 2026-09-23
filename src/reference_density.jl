@@ -293,3 +293,17 @@ function build_reference_profile(p::DaishoParameters, sgrid)
             "\"$(rp.source)\"; allowed: \"exponential\", \"sounding\"."))
     end
 end
+
+# Field-wise equality (used by `GateModel` equality, e.g. when merging wind
+# accumulators). `isequal` so an absent temperature (`NaN`) compares equal to
+# itself. The sounding profile compares its sampled arrays and the Springsteel
+# state's type (the arrays are what every query reads).
+Base.:(==)(a::ExponentialReferenceProfile, b::ExponentialReferenceProfile) =
+    isequal(a.rho_surface_kg_m3, b.rho_surface_kg_m3) &&
+    isequal(a.scale_height_m, b.scale_height_m) &&
+    isequal(a.temperature_surface_k, b.temperature_surface_k) &&
+    isequal(a.lapse_rate_k_m, b.lapse_rate_k_m)
+
+Base.:(==)(a::SoundingReferenceProfile, b::SoundingReferenceProfile) =
+    a.z == b.z && a.rho == b.rho && a.drho_dz == b.drho_dz &&
+    a.temperature_k == b.temperature_k && typeof(a.state) == typeof(b.state)

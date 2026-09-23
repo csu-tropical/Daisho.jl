@@ -19,11 +19,14 @@ const DEFAULTS_TOML_PATH = joinpath(@__DIR__, "..", "config", "defaults.toml")
 const FIELD_TAG_VOCAB = (
     :linear_interp, :weighted_interp, :nearest_interp,  # interpolation
     :define_detection, :define_scanned,                 # role tags (consumed)
-    :velocity,                                          # reserved
+    :velocity,                                          # multi-Doppler radial velocity
     :beam_height,                                       # value sourced from gate geometry
+    :reflectivity,                                      # gate dBZ (fall-speed correction)
+    :spectrum_width,                                    # gate SW (per-gate velocity error)
 )
 const FIELD_INTERP_TAGS   = (:linear_interp, :weighted_interp, :nearest_interp)
-const FIELD_SINGULAR_TAGS = (:define_detection, :define_scanned, :velocity, :beam_height)
+const FIELD_SINGULAR_TAGS = (:define_detection, :define_scanned, :velocity, :beam_height,
+                             :reflectivity, :spectrum_width)
 
 # ── Section structs ──────────────────────────────────────────────────────────
 
@@ -501,6 +504,84 @@ Base.@kwdef struct IOParameters
 end
 
 """
+    FallSpeedParameters
+
+Hydrometeor terminal fall-speed correction for the radial velocities entering
+the wind normal system, loaded from the optional `[synthesis.fall_speed]`
+sub-table (a present table means "enabled"; every key is optional and defaults
+as below). Mirrors samurai (`VarDriver3D.cpp`), with heights in metres and the
+density correction taken from the configured `[reference_state]` profile:
+
+    Z    = 10^(dBZ/10)                                  (linear reflectivity, mm⁶ m⁻³)
+    DCOR = (ρ̄(0)/ρ̄(z))^density_exponent                (Beard 1985 density correction)
+    V_R  = −rain_coefficient · Z^rain_exponent · DCOR   (Joss & Waldvogel 1971)
+    V_S  = −snow_coefficient · Z^snow_exponent · DCOR   (Atlas et al. 1973)
+
+Fall speeds are in m/s and **negative (downward)**; the corrected gate value is
+`ṽ = v_r − w_t·sin(el)`. See `terminal_fall_speed` for the dBZ and
+melting-layer blending. Requires a `[fields]` entry tagged `reflectivity`.
+
+# Fields
+- `rain_coefficient::Float64`: rain relation coefficient (m/s per Z^rain_exponent), default `2.6`.
+- `rain_exponent::Float64`: rain relation exponent on linear Z (dimensionless), default `0.107`.
+- `snow_coefficient::Float64`: snow relation coefficient (m/s per Z^snow_exponent), default `0.817`.
+- `snow_exponent::Float64`: snow relation exponent on linear Z (dimensionless), default `0.063`.
+- `density_exponent::Float64`: exponent on `ρ̄(0)/ρ̄(z)` (dimensionless), default `0.45`.
+- `mixed_phase_dbz::Float64`: reflectivity (dBZ) at or below which the
+  above-melting-layer fall speed is pure snow; default `20.0`.
+- `rain_dbz::Float64`: reflectivity (dBZ) above which the above-melting-layer
+  fall speed is pure rain; linear blend in dBZ between the two. Must exceed
+  `mixed_phase_dbz`; default `30.0`.
+- `melting_layer_bottom_m::Float64`: height (m, grid z convention) of the
+  melting-layer bottom. `NaN` (default) ⇒ derived from the reference profile's
+  freezing level ([`freezing_level_m`](@ref)); an error is raised at use if
+  that profile carries no temperature.
+- `melting_layer_depth_m::Float64`: melting-layer depth (m) over which the fall
+  speed blends linearly in height from rain (bottom) to the above-layer value
+  (top); default `1000.0` (samurai `melting_zone_width` = 1 km).
+"""
+Base.@kwdef struct FallSpeedParameters
+    rain_coefficient::Float64       = 2.6
+    rain_exponent::Float64          = 0.107
+    snow_coefficient::Float64       = 0.817
+    snow_exponent::Float64          = 0.063
+    density_exponent::Float64       = 0.45
+    mixed_phase_dbz::Float64        = 20.0
+    rain_dbz::Float64               = 30.0
+    melting_layer_bottom_m::Float64 = NaN
+    melting_layer_depth_m::Float64  = 1000.0
+end
+
+"""
+    GateErrorParameters
+
+Per-gate radial-velocity error model, loaded from the optional
+`[synthesis.gate_error]` sub-table (a present table means "enabled"; every key
+is optional). Each gate's error standard deviation (m/s) is
+
+    σ_m = max(error_guard_min_m_s, |sin(el)|·fall_speed_error_m_s + SW·spectrum_width_error_factor)
+
+(samurai `radar_fallspeed_error` / `radar_sw_error` / `radar_min_error`); the SW
+term is omitted when no `spectrum_width`-tagged field is configured or the gate
+has no SW value. It is folded into the gridding weight as `w′ = w·σ²_vr/σ_m²`
+(`σ²_vr = velocity_variance`), which keeps the stage-1 planes and sandwich
+covariance formula valid and reduces to the unscaled weight when absent.
+
+# Fields
+- `fall_speed_error_m_s::Float64`: assumed fall-speed error (m/s), scaled by
+  `|sin(el)|`; default `2.0`.
+- `spectrum_width_error_factor::Float64`: multiplier (dimensionless) on the gate
+  spectrum width (m/s); default `1.0`.
+- `error_guard_min_m_s::Float64`: lower clamp (m/s) on σ_m, a stability guard
+  that keeps near-horizontal gates from receiving unbounded weight; default `1.0`.
+"""
+Base.@kwdef struct GateErrorParameters
+    fall_speed_error_m_s::Float64        = 2.0
+    spectrum_width_error_factor::Float64 = 1.0
+    error_guard_min_m_s::Float64         = 1.0
+end
+
+"""
     SynthesisParameters
 
 Stage-1 dual-Doppler wind-retrieval QC, loaded from the optional `[synthesis]`
@@ -526,12 +607,27 @@ always written; the quality flag records which σ threshold(s) failed.
   approximation drops the vertical term `w·sin(el)`, so steep beams (airborne
   tail radars reach ±70°) contaminate the horizontal solve; gates above this
   angle still grid every scalar field but are excluded from the wind solve.
-  Optional (TOML key `max_elevation`); defaults to `45.0`.
+  Optional (TOML key `max_elevation`); defaults to `45.0`. Applied **only**
+  when `include_vertical_velocity = false`: in the 3-unknown system steep beams
+  observe `w` and are kept.
+- `include_vertical_velocity::Bool`: accumulate the `(u, v, w)` 3×3 normal
+  system (`g = [sin az cos el, cos az cos el, sin el]`) instead of the 2×2
+  `(u, v)` one. Required by the variational stage (its super-obs need the `w`
+  row). The stage-1 [`finalize_wind`](@ref) product is unchanged in meaning: it
+  solves the `(u, v)` block (the dual-Doppler approximation applied post hoc).
+  Optional; defaults to `false`.
+- `fall_speed::Union{Nothing,FallSpeedParameters}`: hydrometeor fall-speed
+  correction (`[synthesis.fall_speed]`); `nothing` (absent) ⇒ no correction.
+- `gate_error::Union{Nothing,GateErrorParameters}`: per-gate error model
+  (`[synthesis.gate_error]`); `nothing` (absent) ⇒ uniform `σ²_vr` per gate.
 """
 Base.@kwdef struct SynthesisParameters
     velocity_variance::Float64 = 1.0
     max_sigma::Vector{Float64} = [2.0, 2.0]
     max_elevation::Float64     = 45.0
+    include_vertical_velocity::Bool = false
+    fall_speed::Union{Nothing,FallSpeedParameters} = nothing
+    gate_error::Union{Nothing,GateErrorParameters} = nothing
 end
 
 """
@@ -1101,14 +1197,83 @@ function _io_from_dict(d::AbstractDict)
     return _struct_from_dict(IOParameters, d; section="io")
 end
 
+# Samurai configuration keys that have a Daisho counterpart under `[synthesis]`
+# (or one of its sub-tables); a migration diagnostic names the Daisho key.
+const _SAMURAI_SYNTHESIS_KEYS = Dict(
+    "radar_fallspeed_error" => "`fall_speed_error_m_s` in `[synthesis.gate_error]`",
+    "radar_sw_error"        => "`spectrum_width_error_factor` in `[synthesis.gate_error]`",
+    "radar_min_error"       => "`error_guard_min_m_s` in `[synthesis.gate_error]`",
+    "horizontal_radar_appx" => "`include_vertical_velocity` in `[synthesis]` " *
+                               "(samurai `horizontal_radar_appx = true` ≈ " *
+                               "`include_vertical_velocity = false`)",
+    "max_radar_elevation"   => "`max_elevation` in `[synthesis]` (degrees)",
+    "melting_zone_width"    => "`melting_layer_depth_m` in `[synthesis.fall_speed]` " *
+                               "(metres; samurai used km)",
+)
+
+function _check_samurai_synthesis_keys(d::AbstractDict, section::String)
+    for k in keys(d)
+        ks = String(k)
+        if haskey(_SAMURAI_SYNTHESIS_KEYS, ks)
+            throw(ArgumentError(
+                "`[$section]` key `$ks` is a samurai configuration key. Its " *
+                "Daisho equivalent is $(_SAMURAI_SYNTHESIS_KEYS[ks]). " *
+                "Run `print_config(\"template.toml\")` for the documented template."))
+        end
+    end
+    return nothing
+end
+
+# Build an all-optional `@kwdef` sub-table struct strictly (unknown keys raise,
+# naming the section).
+_optional_subtable(::Type{T}, d::AbstractDict, section::String) where {T} =
+    _struct_from_dict(T, d; section = section, optional = Set(fieldnames(T)))
+
+function _fall_speed_from_dict(d::AbstractDict)
+    _check_samurai_synthesis_keys(d, "synthesis.fall_speed")
+    fs = _optional_subtable(FallSpeedParameters, d, "synthesis.fall_speed")
+    for f in (:rain_coefficient, :rain_exponent, :snow_coefficient,
+              :snow_exponent, :density_exponent)
+        v = getfield(fs, f)
+        (isfinite(v) && v > 0.0) || throw(ArgumentError(
+            "`[synthesis.fall_speed]` `$f` must be positive (got $v)."))
+    end
+    fs.mixed_phase_dbz < fs.rain_dbz || throw(ArgumentError(
+        "`[synthesis.fall_speed]` `mixed_phase_dbz` ($(fs.mixed_phase_dbz)) must " *
+        "be less than `rain_dbz` ($(fs.rain_dbz))."))
+    (isfinite(fs.melting_layer_depth_m) && fs.melting_layer_depth_m > 0.0) ||
+        throw(ArgumentError("`[synthesis.fall_speed]` `melting_layer_depth_m` " *
+            "must be positive (got $(fs.melting_layer_depth_m))."))
+    return fs
+end
+
+function _gate_error_from_dict(d::AbstractDict)
+    _check_samurai_synthesis_keys(d, "synthesis.gate_error")
+    ge = _optional_subtable(GateErrorParameters, d, "synthesis.gate_error")
+    (isfinite(ge.fall_speed_error_m_s) && ge.fall_speed_error_m_s >= 0.0) ||
+        throw(ArgumentError("`[synthesis.gate_error]` `fall_speed_error_m_s` " *
+            "must be ≥ 0 (got $(ge.fall_speed_error_m_s))."))
+    (isfinite(ge.spectrum_width_error_factor) && ge.spectrum_width_error_factor >= 0.0) ||
+        throw(ArgumentError("`[synthesis.gate_error]` `spectrum_width_error_factor` " *
+            "must be ≥ 0 (got $(ge.spectrum_width_error_factor))."))
+    (isfinite(ge.error_guard_min_m_s) && ge.error_guard_min_m_s > 0.0) ||
+        throw(ArgumentError("`[synthesis.gate_error]` `error_guard_min_m_s` " *
+            "must be positive (got $(ge.error_guard_min_m_s))."))
+    return ge
+end
+
 # Build SynthesisParameters from the flat `[synthesis]` keys. The per-component
 # σ thresholds live under the scalar TOML keys `max_sigma_1` / `max_sigma_2`
 # (more legible than a TOML array) but are stored as the `max_sigma` vector.
-# Strict: unknown or missing keys raise, matching the rest of the loader.
+# Strict: unknown or missing keys raise, matching the rest of the loader. The
+# optional `fall_speed` / `gate_error` sub-tables are each parsed strictly; a
+# present sub-table means "enabled".
 function _synthesis_from_dict(d::AbstractDict)
+    _check_samurai_synthesis_keys(d, "synthesis")
     required = ("velocity_variance", "max_sigma_1", "max_sigma_2")
-    optional = ("max_elevation",)
-    allowed = (required..., optional...)
+    optional = ("max_elevation", "include_vertical_velocity")
+    subtables = ("fall_speed", "gate_error")
+    allowed = (required..., optional..., subtables...)
     unknown = setdiff(Set(Symbol.(keys(d))), Set(Symbol.(allowed)))
     isempty(unknown) || throw(ArgumentError(
         "Unknown key(s) $(_fmt_keys(unknown)) in section `[synthesis]`. " *
@@ -1117,11 +1282,23 @@ function _synthesis_from_dict(d::AbstractDict)
     isempty(missing_keys) || throw(ArgumentError(
         "Missing required key(s) $(_fmt_keys(missing_keys)) in section " *
         "`[synthesis]`. Run `print_config(\"template.toml\")` for a complete template."))
+    for t in subtables
+        haskey(d, t) && !(d[t] isa AbstractDict) && throw(ArgumentError(
+            "`[synthesis]` `$t` must be a sub-table `[synthesis.$t]`, got " *
+            "$(typeof(d[t]))."))
+    end
+    ivv = get(d, "include_vertical_velocity", false)
+    ivv isa Bool || throw(ArgumentError(
+        "`[synthesis]` `include_vertical_velocity` must be a boolean (true/false), " *
+        "got $(repr(ivv))."))
     return SynthesisParameters(
         velocity_variance = Float64(d["velocity_variance"]),
         max_sigma = [Float64(d["max_sigma_1"]), Float64(d["max_sigma_2"])],
         max_elevation = haskey(d, "max_elevation") ? Float64(d["max_elevation"]) :
                         SynthesisParameters().max_elevation,
+        include_vertical_velocity = ivv,
+        fall_speed = haskey(d, "fall_speed") ? _fall_speed_from_dict(d["fall_speed"]) : nothing,
+        gate_error = haskey(d, "gate_error") ? _gate_error_from_dict(d["gate_error"]) : nothing,
     )
 end
 

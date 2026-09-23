@@ -1000,4 +1000,475 @@ end
         end
     end
 
+
+    # ── Variational Phase 5: stage-1 extensions (N=3, fall speed, gate error) ──
+
+    # Full-positional DaishoParameters with a custom [synthesis] / [reference_state].
+    function _p_gate(; fs = nothing, ge = nothing, n3 = false, maxel = 45.0,
+                     var = 1.0, ref = ReferenceStateParameters(), moments = nothing)
+        p0 = DaishoParameters()
+        syn = SynthesisParameters(velocity_variance = var, max_sigma = [2.0, 2.0],
+            max_elevation = maxel, include_vertical_velocity = n3,
+            fall_speed = fs, gate_error = ge)
+        return Daisho.DaishoParameters(moments === nothing ? p0.moments : moments,
+            p0.qc, p0.gridding, p0.grid, p0.io, syn, p0.echo, p0.hybrid_scan,
+            ref, p0.provided)
+    end
+    # Exponential reference with a temperature lapse ⇒ a freezing level exists.
+    _ref_warm() = ReferenceStateParameters(temperature_surface_k = 288.15,
+                                           lapse_rate_k_m = 0.0065)
+    function _mutated_config(f!)
+        path = tempname() * ".toml"
+        base = TOML.parsefile(Daisho.DEFAULTS_TOML_PATH)
+        f!(base)
+        open(path, "w") do io; TOML.print(io, base); end
+        return path
+    end
+    _load_err(path) = try; DaishoParameters(path); nothing; catch e; e; end
+
+    @testset "[synthesis] fall_speed / gate_error / include_vertical_velocity config" begin
+        # Template (new keys commented out) still loads; defaults off.
+        p = DaishoParameters()
+        @test p.synthesis.include_vertical_velocity == false
+        @test p.synthesis.fall_speed === nothing
+        @test p.synthesis.gate_error === nothing
+        # New tags on the template fields.
+        @test Daisho.field_with_tag_or(p, :reflectivity) == "DBZ"
+        @test Daisho.field_with_tag_or(p, :spectrum_width) == "WIDTH"
+
+        # Uncommenting the documented template blocks loads them. A block runs
+        # from its commented header to the first non-comment line; only
+        # "# key = value" lines are uncommented (prose lines use "#   ").
+        txt = read(Daisho.DEFAULTS_TOML_PATH, String)
+        @test occursin("# [synthesis.fall_speed]", txt)
+        @test occursin("# [synthesis.gate_error]", txt)
+        out = String[]
+        inblock = false
+        for ln in split(txt, '\n')
+            if startswith(ln, "# [synthesis.fall_speed]") || startswith(ln, "# [synthesis.gate_error]")
+                inblock = true
+            elseif inblock && !startswith(ln, "#")
+                inblock = false
+            end
+            if inblock && startswith(ln, "# ") && !startswith(ln, "#  ") &&
+               !occursin("melting_layer_bottom_m", ln)
+                push!(out, ln[3:end])
+            else
+                push!(out, ln)
+            end
+        end
+        path = tempname() * ".toml"
+        write(path, join(out, '\n'))
+        pu = DaishoParameters(path)
+        @test pu.synthesis.fall_speed == Daisho.FallSpeedParameters()
+        @test pu.synthesis.gate_error == Daisho.GateErrorParameters()
+        rm(path)
+
+        # Custom values round-trip; include_vertical_velocity parses.
+        path = _mutated_config() do b
+            b["synthesis"]["include_vertical_velocity"] = true
+            b["synthesis"]["fall_speed"] = Dict("rain_coefficient" => 3.0,
+                "mixed_phase_dbz" => 15.0, "rain_dbz" => 35.0,
+                "melting_layer_bottom_m" => 4000.0, "melting_layer_depth_m" => 500.0)
+            b["synthesis"]["gate_error"] = Dict("fall_speed_error_m_s" => 1.5,
+                "spectrum_width_error_factor" => 0.5, "error_guard_min_m_s" => 0.8)
+        end
+        pc = DaishoParameters(path)
+        @test pc.synthesis.include_vertical_velocity
+        fsp = pc.synthesis.fall_speed
+        @test fsp.rain_coefficient == 3.0
+        @test fsp.rain_exponent == 0.107          # absent ⇒ default
+        @test fsp.mixed_phase_dbz == 15.0 && fsp.rain_dbz == 35.0
+        @test fsp.melting_layer_bottom_m == 4000.0
+        @test fsp.melting_layer_depth_m == 500.0
+        @test pc.synthesis.gate_error ==
+              Daisho.GateErrorParameters(1.5, 0.5, 0.8)
+        rm(path)
+
+        # Empty sub-table ⇒ enabled with all defaults.
+        path = _mutated_config() do b
+            b["synthesis"]["fall_speed"] = Dict{String,Any}()
+        end
+        @test isnan(DaishoParameters(path).synthesis.fall_speed.melting_layer_bottom_m)
+        rm(path)
+
+        # Unknown key in each sub-table names the section.
+        for (tbl, sec) in (("fall_speed", "[synthesis.fall_speed]"),
+                           ("gate_error", "[synthesis.gate_error]"))
+            path = _mutated_config() do b
+                b["synthesis"][tbl] = Dict("bogus" => 1.0)
+            end
+            e = _load_err(path)
+            @test e isa ArgumentError && occursin(sec, e.msg)
+            rm(path)
+        end
+
+        # Validation errors.
+        for bad in (Dict("mixed_phase_dbz" => 30.0, "rain_dbz" => 30.0),
+                    Dict("mixed_phase_dbz" => 40.0, "rain_dbz" => 30.0),
+                    Dict("rain_coefficient" => 0.0),
+                    Dict("snow_exponent" => -0.1),
+                    Dict("melting_layer_depth_m" => 0.0))
+            path = _mutated_config() do b
+                b["synthesis"]["fall_speed"] = bad
+            end
+            @test _load_err(path) isa ArgumentError
+            rm(path)
+        end
+        for bad in (Dict("error_guard_min_m_s" => 0.0),
+                    Dict("fall_speed_error_m_s" => -1.0))
+            path = _mutated_config() do b
+                b["synthesis"]["gate_error"] = bad
+            end
+            @test _load_err(path) isa ArgumentError
+            rm(path)
+        end
+        path = _mutated_config() do b
+            b["synthesis"]["include_vertical_velocity"] = "yes"
+        end
+        @test _load_err(path) isa ArgumentError
+        rm(path)
+
+        # Samurai-key migration diagnostics name the Daisho key.
+        for (k, daisho_key, where) in (
+                ("radar_fallspeed_error", "fall_speed_error_m_s", :top),
+                ("radar_sw_error", "spectrum_width_error_factor", :top),
+                ("radar_min_error", "error_guard_min_m_s", :sub),
+                ("horizontal_radar_appx", "include_vertical_velocity", :top),
+                ("max_radar_elevation", "max_elevation", :top))
+            path = _mutated_config() do b
+                if where === :top
+                    b["synthesis"][k] = 1.0
+                else
+                    b["synthesis"]["gate_error"] = Dict(k => 1.0)
+                end
+            end
+            e = _load_err(path)
+            @test e isa ArgumentError
+            @test occursin(daisho_key, e.msg) && occursin(k, e.msg)
+            rm(path)
+        end
+
+        # New tags: a duplicated singular tag is rejected.
+        for tag in ("reflectivity", "spectrum_width")
+            path = _mutated_config() do b
+                push!(b["fields"]["SQI"], tag)
+            end
+            e = _load_err(path)
+            @test e isa ArgumentError && occursin(tag, e.msg)
+            rm(path)
+        end
+    end
+
+    @testset "GateModel construction" begin
+        # Neither block ⇒ no model.
+        @test Daisho.GateModel(_p_gate()) === nothing
+        acc0 = WindGridAccumulator(_wind_spec(), _p_gate())
+        @test acc0.gate_model === nothing
+        @test acc0.n_unknowns == 2
+
+        # Gate error only: no reference needed.
+        ge = Daisho.GateErrorParameters()
+        gm = Daisho.GateModel(_p_gate(ge = ge, var = 2.0))
+        @test gm.gate_error == ge && gm.fall_speed === nothing
+        @test gm.reference === nothing
+        @test gm.velocity_variance == 2.0
+        @test gm.spectrum_width_field == "WIDTH"
+
+        # Fall speed: exponential reference built internally; freezing level
+        # derived from the lapse rate when melting_layer_bottom_m is NaN.
+        fs = Daisho.FallSpeedParameters()
+        gm = Daisho.GateModel(_p_gate(fs = fs, ref = _ref_warm()))
+        @test gm.reflectivity_field == "DBZ"
+        @test gm.reference isa ExponentialReferenceProfile
+        @test gm.melting_layer_bottom_m ≈ 15.0 / 0.0065
+        # Explicit value wins.
+        gm2 = Daisho.GateModel(_p_gate(
+            fs = Daisho.FallSpeedParameters(melting_layer_bottom_m = 4200.0)))
+        @test gm2.melting_layer_bottom_m == 4200.0
+        # No temperature and no explicit bottom ⇒ error explaining the fix.
+        e = try; Daisho.GateModel(_p_gate(fs = fs)); nothing; catch x; x; end
+        @test e isa ArgumentError && occursin("melting_layer_bottom_m", e.msg)
+        # Explicit reference is used as given.
+        r = ExponentialReferenceProfile(1.0, 9000.0, 280.0, 0.005)
+        @test Daisho.GateModel(_p_gate(fs = fs); reference = r).reference == r
+        # Sounding source needs an explicit reference (needs the grid).
+        snd = ReferenceStateParameters(source = "sounding", sounding_file = "x.txt")
+        e = try; Daisho.GateModel(_p_gate(fs = fs, ref = snd)); nothing; catch x; x; end
+        @test e isa ArgumentError && occursin("reference", e.msg)
+        # Fall speed without a reflectivity-tagged field ⇒ error.
+        p0 = DaishoParameters()
+        norefl = Daisho.MomentParameters([Daisho.FieldSpec(f.name,
+            setdiff(f.tags, Set([:reflectivity]))) for f in p0.moments.fields])
+        e = try
+            Daisho.GateModel(_p_gate(fs = fs, ref = _ref_warm(), moments = norefl)); nothing
+        catch x; x; end
+        @test e isa ArgumentError && occursin("reflectivity", e.msg)
+
+        # Equality is field-wise.
+        a = Daisho.GateModel(_p_gate(fs = fs, ge = ge, ref = _ref_warm()))
+        b = Daisho.GateModel(_p_gate(fs = fs, ge = ge, ref = _ref_warm()))
+        @test a == b
+        @test a != Daisho.GateModel(_p_gate(fs = fs, ref = _ref_warm()))
+        @test a != Daisho.GateModel(_p_gate(fs = Daisho.FallSpeedParameters(rain_dbz = 31.0),
+                                            ge = ge, ref = _ref_warm()))
+        # NaN temperature fields compare equal on the exponential profile.
+        @test ExponentialReferenceProfile(1.2, 8500.0, NaN, 0.0065) ==
+              ExponentialReferenceProfile(1.2, 8500.0, NaN, 0.0065)
+        @test ExponentialReferenceProfile(1.2, 8500.0, NaN, 0.0065) !=
+              ExponentialReferenceProfile(1.2, 8000.0, NaN, 0.0065)
+    end
+
+    @testset "terminal_fall_speed (samurai relations)" begin
+        fs = Daisho.FallSpeedParameters()
+        ref = ExponentialReferenceProfile(1.2, 8500.0, NaN, 0.0065)
+        mb = 4000.0; top = mb + fs.melting_layer_depth_m
+        tfs(dbz, z) = Daisho.terminal_fall_speed(fs, dbz, z, ref, mb)
+        dcor(z) = (1.2 / reference_density(ref, z))^0.45
+        vtr(dbz, z) = -dcor(z) * 2.6 * (10.0^(dbz / 10))^0.107
+        vts(dbz, z) = -dcor(z) * 0.817 * (10.0^(dbz / 10))^0.063
+
+        # Rain at z=0 (DCOR = 1).
+        @test tfs(40.0, 0.0) ≈ -2.6 * 10^(4 * 0.107)
+        @test tfs(30.0, 0.0) ≈ -2.6 * 1000^0.107
+        # Below the melting layer samurai uses rain for every dBZ.
+        @test tfs(5.0, 1000.0) ≈ vtr(5.0, 1000.0)
+        # Above the melting layer: snow below mixed_phase_dbz, rain above
+        # rain_dbz, linear in dBZ between.
+        z = 7000.0
+        @test tfs(10.0, z) ≈ vts(10.0, z)
+        @test tfs(45.0, z) ≈ vtr(45.0, z)
+        @test tfs(25.0, z) ≈ 0.5 * (vts(25.0, z) + vtr(25.0, z))
+        # Continuity at the dBZ blend edges.
+        @test tfs(20.0 + 1e-9, z) ≈ tfs(20.0, z) atol = 1e-8
+        @test tfs(30.0 + 1e-9, z) ≈ tfs(30.0, z) atol = 1e-8
+        # Height blend across the melting layer: rain at the bottom, the
+        # above-layer (dBZ-blended) value at the top, linear between.
+        @test tfs(10.0, mb) ≈ vtr(10.0, mb)
+        @test tfs(10.0, top) ≈ vts(10.0, top)
+        zm = mb + 250.0
+        @test tfs(10.0, zm) ≈ 0.75 * vtr(10.0, zm) + 0.25 * vts(10.0, zm)
+        @test tfs(10.0, mb - 1e-7) ≈ tfs(10.0, mb) atol = 1e-8
+        @test tfs(10.0, top + 1e-7) ≈ tfs(10.0, top) atol = 1e-8
+        # Density correction: falls faster aloft (DCOR > 1).
+        @test dcor(9000.0) > 1.0
+        @test tfs(10.0, 9000.0) ≈ dcor(9000.0) * vts(10.0, 0.0)
+        # Always downward.
+        @test all(tfs(d, zz) < 0 for d in -10.0:5.0:60.0, zz in 0.0:500.0:10000.0)
+    end
+
+    @testset "gate_sigma" begin
+        ge = Daisho.GateErrorParameters()   # σ_fs 2.0, SW factor 1.0, guard 1.0
+        # Horizontal beam, no SW ⇒ guard.
+        @test Daisho.gate_sigma(ge, 0.0, NaN) == 1.0
+        # Steep beam: |sin el|·σ_fs.
+        @test Daisho.gate_sigma(ge, deg2rad(60.0), NaN) ≈ sin(deg2rad(60.0)) * 2.0
+        @test Daisho.gate_sigma(ge, -deg2rad(60.0), NaN) ≈ sin(deg2rad(60.0)) * 2.0
+        # SW term adds.
+        @test Daisho.gate_sigma(ge, deg2rad(60.0), 1.5) ≈ sin(deg2rad(60.0)) * 2.0 + 1.5
+        ge2 = Daisho.GateErrorParameters(spectrum_width_error_factor = 0.5)
+        @test Daisho.gate_sigma(ge2, 0.0, 4.0) ≈ 2.0
+        # Missing SW omitted (not propagated as NaN).
+        @test Daisho.gate_sigma(ge2, deg2rad(30.0), NaN) == 1.0
+    end
+
+    @testset "include_vertical_velocity ⇒ N=3 planes; finalize == N=2" begin
+        p3 = _p_gate(n3 = true)
+        acc3 = WindGridAccumulator(_wind_spec(), p3)
+        @test acc3.n_unknowns == 3
+        @test size(acc3.AtWA, 1) == 6 && size(acc3.M2, 1) == 6
+        @test size(acc3.AtWb, 1) == 3
+        @test build_accumulator(_wind_spec(), p3).n_unknowns == 3
+
+        # Same gates in both runs (max_elevation = 90 on the N=2 run; N=3
+        # ignores the cap because steep beams observe w).
+        p2 = _p_gate(maxel = 90.0)
+        p3 = _p_gate(n3 = true, maxel = 5.0)     # cap must not apply at N=3
+        volA, volB = make_synthetic_dual_doppler(u = 8.0, v = -3.0)
+        spec = GridSpec(shape = :volume_3d,
+            reference_latitude = 16.0, reference_longitude = -24.0,
+            x_axis = [-2000.0, 0.0, 2000.0], y_axis = [-2000.0, 0.0, 2000.0],
+            z_axis = collect(Float64, 200.0:200.0:1600.0))
+        a2 = WindGridAccumulator(spec, p2); a3 = WindGridAccumulator(spec, p3)
+        for vol in (volA, volB), s in eachindex(vol.sweeps)
+            grid_sweep!(a2, vol, s, p2); grid_sweep!(a3, vol, s, p3)
+        end
+        @test a3.gate_count == a2.gate_count
+        @test sum(a3.gate_count) > 0
+        # (u,v) block of the packed 3×3 equals the 2×2 planes exactly.
+        @test a3.AtWA[[1, 2, 4], :, :, :] == a2.AtWA
+        @test a3.M2[[1, 2, 4], :, :, :] == a2.M2
+        @test a3.AtWb[1:2, :, :, :] == a2.AtWb
+        @test any(a3.AtWA[6, :, :, :] .> 0)       # w row populated
+        o2 = finalize_wind(a2, p2); o3 = finalize_wind(a3, p3)
+        @test o3.comp1 == o2.comp1
+        @test o3.comp2 == o2.comp2
+        @test o3.sigma1 == o2.sigma1
+        @test o3.sigma2 == o2.sigma2
+        @test o3.det == o2.det
+        @test o3.quality_flag == o2.quality_flag
+        @test count(==(Int8(0)), o3.quality_flag) > 0
+    end
+
+    @testset "no gate model ⇒ planes bit-identical to the pre-change loop" begin
+        v = synthetic_volume(n_sweeps = 2, n_rays = 72, n_gates = 12)
+        spec = _near_radar_spec(v)
+        for (N, p) in ((2, _p_gate()), (3, _p_gate(n3 = true, maxel = 90.0)))
+            acc = WindGridAccumulator(spec, p)
+            @test acc.gate_model === nothing && acc.n_unknowns == N
+            for s in eachindex(v.sweeps); grid_sweep!(acc, v, s, p); end
+            np = Daisho._n_packed(N)
+            nz, ny, nx = Daisho.wind_accumulator_dims(spec)
+            rAtWA = zeros(np, nz, ny, nx); rAtWb = zeros(N, nz, ny, nx)
+            rM2 = zeros(np, nz, ny, nx); rwt = zeros(nz, ny, nx)
+            rgc = zeros(Int32, nz, ny, nx)
+            for s in eachindex(v.sweeps)
+                _ref_grid_sweep_wind_3d!(rAtWA, rAtWb, rM2, rwt, rgc, spec, "VEL", N,
+                    v.sweeps[s], p, Float64(v.latitude), Float64(v.longitude),
+                    Float64(v.altitude))
+            end
+            @test acc.AtWA == rAtWA
+            @test acc.AtWb == rAtWb
+            @test acc.M2 == rM2
+            @test acc.weight_total == rwt
+            @test acc.gate_count == rgc
+            @test sum(acc.gate_count) > 0
+        end
+    end
+
+    # One-cell accumulator + a hand-built contribution: exercises the per-gate
+    # model math in isolation from the geometry.
+    function _one_cell_gate(p; az = 30.0, el = 20.0, w = 0.7, beam_z = 1500.0,
+                            vr = 6.0, dbz = 35.0, sw = 1.2)
+        spec = GridSpec(shape = :volume_3d, reference_latitude = 0.0,
+            reference_longitude = 0.0, x_axis = [0.0], y_axis = [0.0], z_axis = [beam_z])
+        acc = WindGridAccumulator(spec, p)
+        sweep = SweepGroup(sweep_number = 0, sweep_mode = "azimuth_surveillance",
+            fixed_angle = el, time = [DateTime(2024, 1, 1)], range = [10000.0],
+            azimuth = [az], elevation = [el])
+        for (name, val) in (("VEL", vr), ("DBZ", dbz), ("WIDTH", sw))
+            add_field!(sweep, name, reshape([Float32(val)], 1, 1),
+                       FieldMetadata(units = "x", long_name = name))
+        end
+        c = Daisho.GateContribution(1, 1, 1, deg2rad(az), deg2rad(el), w, beam_z)
+        Daisho.accumulate_cell!(acc, Daisho.CartesianCell(1, 1, 1, beam_z, 1), sweep,
+            Int[], [c], Daisho.SweepKeys("SQI", "DBZ"), p)
+        g = zeros(acc.n_unknowns)
+        Daisho._wind_coeffs!(g, deg2rad(az), deg2rad(el), acc.n_unknowns)
+        return acc, g, Float64(Float32(vr)), Float64(Float32(dbz)), Float64(Float32(sw))
+    end
+    function _packed_outer(g, s)
+        N = length(g)
+        out = zeros(Daisho._n_packed(N))
+        for a in 1:N, b in a:N
+            out[Daisho._packed_index(a, b, N)] = s * (g[a] * g[b])   # same association as the accumulator
+        end
+        return out
+    end
+
+    @testset "gate model: weight scaling and fall-speed correction (one gate)" begin
+        w, el, var = 0.7, 20.0, 2.0
+        ge = Daisho.GateErrorParameters()
+        fs = Daisho.FallSpeedParameters()
+        for N3 in (false, true)
+            # Gate error only: w′ = w·σ²_vr/σ_m², v_r unchanged.
+            p = _p_gate(ge = ge, var = var, n3 = N3)
+            acc, g, vr, _, sw = _one_cell_gate(p; w = w, el = el)
+            σm = Daisho.gate_sigma(ge, deg2rad(el), sw)
+            @test σm ≈ sin(deg2rad(el)) * 2.0 + sw
+            wp = w * var / σm^2
+            @test acc.AtWA[:, 1, 1, 1] ≈ _packed_outer(g, wp) rtol = 1e-14
+            @test acc.M2[:, 1, 1, 1] ≈ _packed_outer(g, wp^2) rtol = 1e-14
+            @test acc.AtWb[:, 1, 1, 1] ≈ wp * vr .* g rtol = 1e-14
+            @test acc.weight_total[1, 1, 1] ≈ wp rtol = 1e-14
+            @test acc.gate_count[1, 1, 1] == 1
+
+            # Fall speed only: weight unchanged, ṽ = v_r − w_t·sin(el).
+            p = _p_gate(fs = fs, var = var, n3 = N3, ref = _ref_warm())
+            acc, g, vr, dbz, _ = _one_cell_gate(p; w = w, el = el)
+            gm = acc.gate_model
+            wt = Daisho.terminal_fall_speed(fs, dbz, 1500.0, gm.reference,
+                                            gm.melting_layer_bottom_m)
+            @test wt < 0
+            @test acc.AtWA[:, 1, 1, 1] == _packed_outer(g, w)
+            @test acc.AtWb[:, 1, 1, 1] ≈ w * (vr - wt * sin(deg2rad(el))) .* g rtol = 1e-14
+            @test acc.weight_total[1, 1, 1] == w
+
+            # Both.
+            p = _p_gate(fs = fs, ge = ge, var = var, n3 = N3, ref = _ref_warm())
+            acc, g, vr, dbz, sw = _one_cell_gate(p; w = w, el = el)
+            wp = w * var / Daisho.gate_sigma(ge, deg2rad(el), sw)^2
+            @test acc.AtWA[:, 1, 1, 1] ≈ _packed_outer(g, wp) rtol = 1e-14
+            @test acc.AtWb[:, 1, 1, 1] ≈ wp * (vr - wt * sin(deg2rad(el))) .* g rtol = 1e-14
+
+            # Missing reflectivity ⇒ no fall-speed correction; missing SW ⇒
+            # SW term omitted.
+            acc, g, vr, _, _ = _one_cell_gate(p; w = w, el = el, dbz = NaN, sw = NaN)
+            wp = w * var / Daisho.gate_sigma(ge, deg2rad(el), NaN)^2
+            @test acc.AtWb[:, 1, 1, 1] ≈ wp * vr .* g rtol = 1e-14
+            @test acc.AtWA[:, 1, 1, 1] ≈ _packed_outer(g, wp) rtol = 1e-14
+        end
+
+        # max_elevation applies at N=2 only.
+        acc, _, _, _, _ = _one_cell_gate(_p_gate(maxel = 10.0); el = 20.0)
+        @test acc.gate_count[1, 1, 1] == 0
+        acc, _, _, _, _ = _one_cell_gate(_p_gate(maxel = 10.0, n3 = true); el = 20.0)
+        @test acc.gate_count[1, 1, 1] == 1
+    end
+
+    @testset "JLD2 round trip at schema v2 with a GateModel" begin
+        @test Daisho.WIND_ACCUMULATOR_SCHEMA_VERSION == 2
+        p = _p_gate(fs = Daisho.FallSpeedParameters(), ge = Daisho.GateErrorParameters(),
+                    ref = _ref_warm(), n3 = true)
+        acc, _, _, _, _ = _one_cell_gate(p)
+        @test acc.gate_model isa Daisho.GateModel
+        path = tempname() * ".jld2"
+        try
+            save_wind_accumulator(path, acc)
+            rt = load_wind_accumulator(path)
+            @test rt.gate_model == acc.gate_model
+            @test rt.gate_model.reference == acc.gate_model.reference
+            @test rt.n_unknowns == 3
+            @test rt.AtWA == acc.AtWA && rt.AtWb == acc.AtWb && rt.M2 == acc.M2
+            @test rt.weight_total == acc.weight_total
+            @test rt.schema_version == 2
+        finally
+            isfile(path) && rm(path)
+        end
+
+        # A schema-1 file is refused.
+        old = WindGridAccumulator(; (f => getfield(acc, f)
+            for f in fieldnames(WindGridAccumulator) if f !== :schema_version)...,
+            schema_version = 1)
+        path = tempname() * ".jld2"
+        try
+            Daisho.JLD2.jldopen(path, "w") do f
+                f["wind_accumulator"] = old
+            end
+            e = try; load_wind_accumulator(path); nothing; catch x; x; end
+            @test e isa ArgumentError && occursin("schema", e.msg)
+        finally
+            isfile(path) && rm(path)
+        end
+    end
+
+    @testset "merge refuses differing gate models / N" begin
+        spec = _wind_spec()
+        fs = Daisho.FallSpeedParameters()
+        pa = _p_gate(fs = fs, ref = _ref_warm())
+        pb = _p_gate(fs = Daisho.FallSpeedParameters(rain_dbz = 32.0), ref = _ref_warm())
+        a = WindGridAccumulator(spec, pa)
+        @test_throws ArgumentError merge_wind_accumulators!(a, WindGridAccumulator(spec, pb))
+        @test_throws ArgumentError merge_wind_accumulators!(a, WindGridAccumulator(spec, _p_gate()))
+        @test_throws ArgumentError merge_wind_accumulators!(
+            WindGridAccumulator(spec, _p_gate()), a)
+        @test_throws ArgumentError merge_wind_accumulators!(
+            WindGridAccumulator(spec, _p_gate()), WindGridAccumulator(spec, _p_gate(n3 = true)))
+        # Equal models merge.
+        b = WindGridAccumulator(spec, pa)
+        b.AtWA[1, 1, 1, 1] = 2.0
+        merge_wind_accumulators!(a, b)
+        @test a.AtWA[1, 1, 1, 1] == 2.0
+    end
+
 end

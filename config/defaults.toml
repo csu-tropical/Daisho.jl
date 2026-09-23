@@ -51,8 +51,15 @@
 #   define_scanned    the field whose PRESENCE at a gate proves the gate was
 #                      scanned. Marks the cell scanned (was `missing_key`).
 #
-# Reserved (a known tag, consumed by nothing yet):
-#   velocity          future multi-Doppler radial-velocity selector.
+#   velocity          the radial-velocity field. Its presence selects the
+#                      multi-Doppler wind synthesis (WindGridAccumulator), which
+#                      also grids every scalar field.
+#   reflectivity      the gate reflectivity (dBZ) used by the hydrometeor
+#                      fall-speed correction ([synthesis.fall_speed]).
+#   spectrum_width    the gate spectrum width (m/s) used by the per-gate
+#                      velocity error model ([synthesis.gate_error]); optional
+#                      even then (the SW term is omitted without it).
+#   beam_height       take the value from each gate's geometry (see below).
 #
 # ── Three gate states (CfRadial 2.1 / ODIM) ──────────────────────────────────
 #   true missing  gate not measured        -> [io] fill_value (CF _FillValue)
@@ -64,9 +71,9 @@
 # intentional.
 
 [fields]
-DBZ   = ["linear_interp",   "define_detection"]
+DBZ   = ["linear_interp",   "define_detection", "reflectivity"]
 VEL   = ["weighted_interp",  "velocity"]
-WIDTH = ["weighted_interp"]
+WIDTH = ["weighted_interp",  "spectrum_width"]
 SQI   = ["weighted_interp",  "define_scanned"]
 # A `beam_height` field takes its value from each gate's geometry (elevation +
 # range), gridded as a beam-power-weighted mean — a per-cell height even on 2-D
@@ -144,8 +151,45 @@ max_sigma_2       = 2.0   # max normalized σ on output component 2 (V for Carte
 # Max line-of-sight elevation (deg) a gate may have to enter the 2-unknown (u,v)
 # solve; the dropped w·sin(el) term contaminates steep beams (airborne tail
 # radars reach ±70°). Above this, gates still grid scalars but not the wind.
-# Optional; defaults to 45.0.
+# Optional; defaults to 45.0. Applied only when include_vertical_velocity = false
+# (in the 3-unknown system steep beams observe w and are kept).
 max_elevation     = 45.0
+# Accumulate the (u,v,w) 3x3 normal system (g = [sin az cos el, cos az cos el,
+# sin el]) instead of the (u,v) 2x2 one. Needed by the variational stage. The
+# stage-1 U/V product is unchanged in meaning (the (u,v) block is solved).
+# Optional; defaults to false.
+include_vertical_velocity = false
+
+# Hydrometeor fall-speed correction of each gate's radial velocity (samurai
+# relations), OPTIONAL. Uncomment the table to enable it (a present table means
+# enabled; every key is optional and defaults as shown). Needs a [fields] entry
+# tagged `reflectivity`. Fall speeds are negative (downward), in m/s:
+#   w_t = -coefficient * Z^exponent * (rho(0)/rho(z))^density_exponent, Z linear
+# with rho from [reference_state]; the corrected value is v_r - w_t*sin(el).
+# Below the melting layer the rain relation is used; above it, snow at or below
+# mixed_phase_dbz, rain above rain_dbz, linear in dBZ between; across the
+# melting layer, linear in height between the two.
+# [synthesis.fall_speed]
+# rain_coefficient       = 2.6      # rain: coefficient (m/s), Joss & Waldvogel (1971)
+# rain_exponent          = 0.107    # rain: exponent on linear Z
+# snow_coefficient       = 0.817    # snow: coefficient (m/s), Atlas et al. (1973)
+# snow_exponent          = 0.063    # snow: exponent on linear Z
+# density_exponent       = 0.45     # exponent on rho(0)/rho(z), Beard (1985)
+# mixed_phase_dbz        = 20.0     # dBZ at/below which the above-layer speed is snow
+# rain_dbz               = 30.0     # dBZ above which the above-layer speed is rain
+# melting_layer_bottom_m = 4500.0   # m; absent => the [reference_state] freezing level
+#                                   #   (an error if that profile has no temperature)
+# melting_layer_depth_m  = 1000.0   # m; height-blend depth above melting_layer_bottom_m
+
+# Per-gate radial-velocity error model, OPTIONAL. Uncomment to enable (every key
+# optional). Per-gate sigma (m/s):
+#   sigma = max(error_guard_min_m_s, |sin(el)|*fall_speed_error_m_s + SW*spectrum_width_error_factor)
+# folded into the gridding weight as w' = w * velocity_variance / sigma^2. The SW
+# term needs a [fields] entry tagged `spectrum_width` (omitted otherwise).
+# [synthesis.gate_error]
+# fall_speed_error_m_s        = 2.0   # m/s, scaled by |sin(el)|
+# spectrum_width_error_factor = 1.0   # multiplier on the gate spectrum width
+# error_guard_min_m_s         = 1.0   # m/s; lower clamp (stability guard) on sigma
 
 # Shared Cartesian base geometry. The volume, composite, ppi, and column (QVP)
 # products all read this unless they have their own override section below.
