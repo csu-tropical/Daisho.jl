@@ -72,6 +72,17 @@ keep loading and behaving bit-identically.
   1 → 2, adding the per-gate model): v1 `*.jld2` wind-accumulator files no
   longer load with `load_wind_accumulator`; regenerate them.
 
+### CfRadial 1 packed (`n_points`) field layout
+
+- `read_cfradial` now reads CfRadial 1 files whose fields are stored as 1-D
+  variables over an `n_points` dimension indexed per ray by `ray_n_gates` /
+  `ray_start_index` (the layout LROSE/Radx and soloii write). Gates a ray does
+  not store are padded with true-missing (`NaN`). Previously such files loaded
+  with no fields at all and every downstream product was silently empty.
+- `read_cfradial` warns when a file yields no field variables.
+- `analyze_radar_volumes_variational` raises an `ArgumentError` when no gate
+  of the velocity field was gridded, instead of returning a zero analysis.
+
 ## v0.2.0 — Flat per-field tag vocabulary, optional blocks, gate-state terminology
 
 *First registered release. Changes below are relative to the unregistered v0.1

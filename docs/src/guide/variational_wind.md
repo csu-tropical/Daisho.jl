@@ -375,6 +375,12 @@ iterations) and `variational_converged` (`1`/`0`) to the usual radar set.
 
 ## Troubleshooting
 
+- **"no gate of the velocity field `…` was gridded".** The volumes carry no
+  usable radial velocity under the name tagged `velocity` in `[fields]`, or
+  the grid domain does not overlap the coverage. `read_cfradial` warns when a
+  file has no field variables at all (it reads 2-D `(time, range)` fields and
+  CfRadial 1's packed `n_points` layout); check `field_names(volume.sweeps[1])`
+  against your `[fields]` names.
 - **`NOBS_VR` is 0 or 1 at many points.** The stage-1 geometry there is
   degenerate (single look or near-baseline) — expected at range-fold edges
   or near a radar baseline; the mass-continuity term and the background

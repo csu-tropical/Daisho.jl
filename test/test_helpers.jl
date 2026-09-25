@@ -504,10 +504,18 @@ The file contains:
   * `field_names` fields over `(range, time)`. The first field embeds a
     `-32768` fill (→ NaN, true-missing) and a `-9999` value (clear-air; stays
     finite) so the fill/sentinel distinction is exercised.
+
+`packed = true` writes the fields in CfRadial 1's **packed** ("n_points")
+layout instead: 1-D `short` variables over an `n_points` dimension with
+`scale_factor`/`add_offset`, indexed per ray by `ray_n_gates(time)` /
+`ray_start_index(time)`, as LROSE/Radx and soloii write them. The LAST ray of
+every sweep stores one gate fewer than `n_gates`, so readers must pad. The
+stored (scaled) values equal the 2-D layout's values gate for gate.
 """
 function build_synthetic_cfradial_v1(path;
         n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
-        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false)
+        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false,
+        packed::Bool = false)
 
     n_rays = n_sweeps * rays_per_sweep
     slen = 32
@@ -662,7 +670,50 @@ function build_synthetic_cfradial_v1(path;
     defVar(ds, "range_correction", Float32, ())[:]     = 0.0
     defVar(ds, "roll_correction", Float32, ())[:]      = 0.1
 
-    # Field variables over (range, time). First field embeds fill/sentinels.
+    # Field variables. First field embeds fill/sentinels.
+    if packed
+        # Packed layout: the last ray of each sweep is one gate short.
+        ray_ngates = fill(Int32(n_gates), n_rays)
+        for j in 1:n_sweeps
+            ray_ngates[j * rays_per_sweep] = Int32(n_gates - 1)
+        end
+        ray_start = Vector{Int32}(undef, n_rays)
+        acc = Int32(0)
+        for r in 1:n_rays
+            ray_start[r] = acc          # 0-based start index
+            acc += ray_ngates[r]
+        end
+        n_points = Int(acc)
+        ds.dim["n_points"] = n_points
+        defVar(ds, "ray_n_gates", Int32, ("time",),
+               attrib = DataStructures.OrderedDict("long_name" => "number_of_gates",
+                                                   "_FillValue" => Int32(-9999)))[:] = ray_ngates
+        defVar(ds, "ray_start_index", Int32, ("time",),
+               attrib = DataStructures.OrderedDict(
+                   "long_name" => "array_index_to_start_of_ray"))[:] = ray_start
+        for (fi, name) in enumerate(field_names)
+            attrib = DataStructures.OrderedDict{String,Any}(
+                "_FillValue"   => Int16(-32768),
+                "scale_factor" => Float32(0.5),
+                "add_offset"   => Float32(0.0),
+                "long_name"    => name,
+                "units"        => name == "DBZ" ? "dBZ" : name == "VEL" ? "m/s" : "",
+            )
+            v = defVar(ds, name, Int16, ("n_points",), attrib = attrib)
+            data = Float32.(reshape(1:(n_gates * n_rays), n_gates, n_rays)) .+ Float32(fi * 0.5)
+            if fi == 1
+                data[1, 1] = -32768.0f0
+                data[2, 1] = -9999.0f0
+            end
+            raw = Vector{Int16}(undef, n_points)
+            for r in 1:n_rays, g in 1:Int(ray_ngates[r])
+                x = data[g, r]
+                raw[Int(ray_start[r]) + g] = x == -32768.0f0 ? Int16(-32768) :
+                                             Int16(round(x / 0.5f0))   # scaled storage
+            end
+            v.var[:] = raw
+        end
+    else
     for (fi, name) in enumerate(field_names)
         attrib = DataStructures.OrderedDict{String,Any}(
             "_FillValue" => Float32(-32768),
@@ -676,6 +727,7 @@ function build_synthetic_cfradial_v1(path;
             data[2, 1] = -9999.0f0    # clear-air/undetect → stays finite
         end
         v[:, :] = data
+    end
     end
 
     close(ds)

@@ -65,6 +65,15 @@ function analyze_radar_volumes_variational(volumes::AbstractVector{<:Volume},
         "which requires a [fields] entry tagged `velocity` (the radial velocity); " *
         "none of $(join(sort([fs.name for fs in p.moments.fields]), ", ")) carries it"))
     _grid_volumes!(acc, sgrid, volumes, p; heading = heading)
+    if sum(acc.gate_count) == 0
+        velname = field_with_tag(p, :velocity; for_op = for_op)
+        throw(ArgumentError(
+            "$(for_op): no gate of the velocity field `$(velname)` was gridded, so " *
+            "there are no radial-velocity observations. Check that the volumes " *
+            "carry a field named `$(velname)` (read_cfradial warns when a file has " *
+            "no fields), that its values are not all missing, and that the " *
+            "[grid.springsteel] domain overlaps the radar coverage."))
+    end
 
     radar_grid = finalize_grid(acc.scalar)
     _scalar_spectral_products!(sgrid, radar_grid, p)

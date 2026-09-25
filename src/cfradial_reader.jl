@@ -355,6 +355,36 @@ function _normalize_field_layout(var, raw, n_rays, n_gates)
     return raw
 end
 
+# Gather the rays `idx` of a packed (`n_points`) field into a raw
+# `(n_rays, n_gates)` matrix. Gates a ray does not store (`ray_n_gates[r] <
+# n_gates`) are set to the field's `_FillValue` (true missing, → NaN in
+# `_unpack_field_data`); without a `_FillValue` they become `missing`.
+function _unpack_packed_rays(raw::AbstractVector, ray_n_gates::Vector{Int},
+                             ray_start::Vector{Int}, idx::AbstractUnitRange,
+                             n_gates::Int, fill_value, fname, file)
+    T = eltype(raw)
+    n_rays = length(idx)
+    if fill_value === nothing
+        out = Matrix{Union{Missing,T}}(missing, n_rays, n_gates)
+    else
+        out = fill(convert(T, fill_value), n_rays, n_gates)
+    end
+    n_points = length(raw)
+    @inbounds for (r, ray) in enumerate(idx)
+        ng = ray_n_gates[ray]
+        st = ray_start[ray]
+        ng >= 0 || continue                       # _FillValue'd count → all missing
+        ng = min(ng, n_gates)
+        st >= 0 && st + ng <= n_points || throw(ArgumentError(
+            "$file: field `$fname`: ray $(ray) starts at packed index $(st) with " *
+            "$(ng) gates, outside n_points = $(n_points)"))
+        for g in 1:ng
+            out[r, g] = raw[st + g]
+        end
+    end
+    return out
+end
+
 # Read calibration entries from a calibration group/dataset.
 function _read_calibration(grp)
     haskey(grp, "calib") || haskey(grp, "r_calib") || haskey(grp, "pulse_width") ||
@@ -1005,16 +1035,43 @@ function _read_cfradial1(ds, file)
     freq_raw = _readvar(ds, "frequency")
     frequency = freq_raw === nothing ? Float64[] : _to_f64vec(freq_raw)
 
-    # Identify field variables: 2-D vars over (time, range) or (range, time).
+    # Identify field variables: 2-D vars over (time, range) or (range, time),
+    # plus — in CfRadial 1's packed layout (LROSE/Radx, soloii) — 1-D vars
+    # over `n_points`, indexed per ray by `ray_n_gates` / `ray_start_index`.
     n_total_rays = length(time_vec)
     n_gates = length(range_vec)
     field_vars = String[]
+    packed_vars = String[]
+    packed_layout = ("n_points" in keys(ds.dim)) && haskey(ds, "ray_n_gates") &&
+                    haskey(ds, "ray_start_index")
     for varname in keys(ds)
         var = ds[varname]
-        ndims(var) == 2 || continue
-        dnames = String.(NCDatasets.dimnames(var))
-        if Set(dnames) == Set(["time", "range"])
+        dnames = collect(String.(NCDatasets.dimnames(var)))
+        if ndims(var) == 2 && Set(dnames) == Set(["time", "range"])
             push!(field_vars, varname)
+        elseif packed_layout && ndims(var) == 1 && dnames == ["n_points"] &&
+               !(varname in ("ray_n_gates", "ray_start_index"))
+            push!(packed_vars, varname)
+        end
+    end
+    if isempty(field_vars) && isempty(packed_vars)
+        @warn "$file: no field variables found (expected 2-D (time, range) " *
+              "variables or packed 1-D (n_points) variables with " *
+              "ray_n_gates/ray_start_index); every sweep will have no fields"
+    end
+    # Packed layout: per-ray gate counts and 0-based start indices, and each
+    # packed field's raw stored values (read once; sliced per sweep below).
+    ray_n_gates = Int[]
+    ray_start = Int[]
+    packed_raw = Dict{String,Any}()
+    if !isempty(packed_vars)
+        ray_n_gates = Int.(_to_f64vec(ds["ray_n_gates"].var[:]))
+        ray_start = Int.(_to_f64vec(ds["ray_start_index"].var[:]))
+        length(ray_n_gates) == n_total_rays && length(ray_start) == n_total_rays ||
+            throw(ArgumentError("$file: ray_n_gates/ray_start_index must have one " *
+                                "entry per ray ($(n_total_rays))"))
+        for fname in packed_vars
+            packed_raw[fname] = ds[fname].var[:]
         end
     end
 
@@ -1086,6 +1143,15 @@ function _read_cfradial1(ds, file)
             raw = _normalize_field_layout(var, raw, n_total_rays, n_gates)
             # Slice the (time, range) matrix to this sweep.
             sliced = raw[idx, :]
+            data = _unpack_field_data(sliced, metadata.scale_factor,
+                                      metadata.add_offset, metadata.fill_value)
+            fields_i[fname] = Field(data, metadata)
+        end
+        for fname in packed_vars
+            var = ds[fname]
+            metadata = _read_field_metadata(var)
+            sliced = _unpack_packed_rays(packed_raw[fname], ray_n_gates, ray_start,
+                                         idx, n_gates, metadata.fill_value, fname, file)
             data = _unpack_field_data(sliced, metadata.scale_factor,
                                       metadata.add_offset, metadata.fill_value)
             fields_i[fname] = Field(data, metadata)

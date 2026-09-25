@@ -343,6 +343,56 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         rm(tmp)
     end
 
+    @testset "packed n_points layout reads like the 2-D layout" begin
+        tmp2d = tempname() * ".nc"
+        tmpp  = tempname() * ".nc"
+        build_synthetic_cfradial_v1(tmp2d; n_sweeps = 2, rays_per_sweep = 4,
+                                    n_gates = 5, field_names = ["DBZ", "VEL"])
+        build_synthetic_cfradial_v1(tmpp; n_sweeps = 2, rays_per_sweep = 4,
+                                    n_gates = 5, field_names = ["DBZ", "VEL"],
+                                    packed = true)
+        v2 = read_cfradial(tmp2d)
+        vp = read_cfradial(tmpp)
+        @test length(vp.sweeps) == 2
+        for (s2, sp) in zip(v2.sweeps, vp.sweeps)
+            @test field_names(sp) == field_names(s2)
+            @test length(sp.range) == 5
+            for name in ("DBZ", "VEL")
+                a = s2.fields[name].data
+                b = sp.fields[name].data
+                @test size(b) == size(a) == (4, 5)
+                # Every stored gate matches (the packed file stores the same
+                # scaled values); the last ray's missing 5th gate is padded
+                # with true-missing (NaN).
+                for r in 1:4, g in 1:5
+                    if r == 4 && g == 5
+                        @test isnan(b[r, g])
+                    elseif isnan(a[r, g])
+                        @test isnan(b[r, g])
+                    else
+                        @test b[r, g] ≈ a[r, g] atol = 1e-5
+                    end
+                end
+                @test sp.fields[name].metadata.units == s2.fields[name].metadata.units
+            end
+        end
+        # Fill/sentinel distinction survives the packed path: DBZ[1,1] is
+        # true-missing (NaN) and DBZ[1,2] is the finite clear-air sentinel.
+        d = vp.sweeps[1].fields["DBZ"].data
+        @test isnan(d[1, 1])
+        @test d[1, 2] ≈ -9999.0 atol = 1e-5
+        rm(tmp2d); rm(tmpp)
+    end
+
+    @testset "a file with no field variables warns" begin
+        tmp = tempname() * ".nc"
+        build_synthetic_cfradial_v1(tmp; n_sweeps = 1, rays_per_sweep = 2,
+                                    n_gates = 3, field_names = String[])
+        v = @test_logs (:warn, r"no field variables") read_cfradial(tmp)
+        @test isempty(field_names(v.sweeps[1]))
+        rm(tmp)
+    end
+
     @testset "missing-valued volume_number reads without error" begin
         # Regression: LROSE aircraft files (e.g. NOAA P-3 tail radar) write
         # `volume_number` with a `_FillValue` and never set it, so NCDatasets

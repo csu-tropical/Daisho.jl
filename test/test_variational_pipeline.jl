@@ -315,6 +315,23 @@ end
         @test err isa ArgumentError
         @test occursin("velocity", err.msg)
 
+        # Volumes without any gate of the velocity field (here: the field is
+        # renamed so the volumes' VEL never matches) → a clear error instead
+        # of a silent zero analysis.
+        p_nogate = _pipe_load(b -> begin
+            b["fields"]["VU"] = b["fields"]["VEL"]
+            delete!(b["fields"], "VEL")
+        end)
+        err = try
+            analyze_radar_volumes_variational(vols, tempname() * ".nc", index_time,
+                Daisho.create_radar_grid(p_nogate), p_nogate)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("no gate of the velocity field `VU`", err.msg)
+
         # A hand-built grid whose vars do not match [fields] is refused.
         bad = Daisho.create_radar_grid(p.grid.springsteel, Dict("DBZ" => 1);
                                        allowed = Set(["DBZ", "W"]))
