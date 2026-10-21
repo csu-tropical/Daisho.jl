@@ -100,7 +100,7 @@ end
                     @test haskey(ds, name)
                 end
                 for name in ("U_BACKGROUND", "U_INCREMENT", "U_x", "U_MISH", "USTD",
-                             "QFLAG", "NOBS_VR", "RHOBAR", "x_mish")
+                             "QFLAG_MISH", "NOBS_VR", "RHOBAR", "x_mish")
                     @test !haskey(ds, name)
                 end
                 @test ds["time"][1] == index_time
@@ -123,6 +123,19 @@ end
                 @test ds.attrib["variational_outer_iterations"] == result.stats.outer_iterations
                 @test ds.attrib["variational_cg_iterations"] == sum(result.stats.inner_iterations)
                 @test ds.attrib["variational_converged"] == 1
+                @test ds.attrib["variational_quality_flag_map"] == "nearest"
+                @test ds.attrib["variational_mask_quality_flags"] == ""
+
+                # Stage-1 quality flag resampled to the regular grid.
+                @test haskey(ds, "QFLAG")
+                @test dimnames(ds["QFLAG"]) == dimnames(ds["DBZ"])
+                @test eltype(ds["QFLAG"].var) == Int8
+                @test !haskey(ds["QFLAG"].attrib, "_FillValue")
+                @test ds["QFLAG"].attrib["flag_masks"] == Int8[1, 2, 4, 8]
+                @test ds["QFLAG"].attrib["flag_meanings"] ==
+                      "sigma1_above_threshold sigma2_above_threshold singular_geometry no_data"
+                @test ds["QFLAG"].attrib["grid_mapping"] == "grid_mapping"
+                @test occursin("nearest", ds["QFLAG"].attrib["comment"])
 
                 x = Float64.(ds["x"][:]); y = Float64.(ds["y"][:]); z = Float64.(ds["z"][:])
                 gp = sgrid.params
@@ -133,6 +146,15 @@ end
 
                 U = _pipe_read(ds, "U"); V = _pipe_read(ds, "V"); W = _pipe_read(ds, "W")
                 @test size(U) == (nx, ny, nz)
+                # QFLAG = the nearest-mish resampling of stage 1's flag; with
+                # no mask the winds stay finite at flagged points too.
+                gzq = Daisho.get_springsteel_gridpoints_zyx(sgrid)
+                halfq = (sgrid.ibasis.data[1, 1, 1].params.DX, sgrid.jbasis.data[1, 1, 1].params.DX,
+                         sgrid.kbasis.data[1, 1, 1].params.DX) ./ 2
+                Q = _pipe_read(ds, "QFLAG")
+                @test Q == Daisho.regular_quality_flag(prob.stage1.quality_flag,
+                    (gzq[1, 1, :, 3], gzq[1, :, 1, 2], gzq[:, 1, 1, 1]), (x, y, z), halfq, :nearest)
+                @test all(isfinite, U) && all(isfinite, V) && all(isfinite, W)
 
                 # Parity with Springsteel's regular-grid transform of the
                 # analysis coefficients.
@@ -251,7 +273,7 @@ end
                     @test ds["y_mish"][:] == gz[1, :, 1, 2]
                     @test ds["z_mish"][:] == gz[:, 1, 1, 1]
                     for name in ("U_MISH", "V_MISH", "W_MISH", "U_STAGE1", "V_STAGE1",
-                                 "USTD", "VSTD", "DET", "NGATES", "QFLAG", "NOBS_VR")
+                                 "USTD", "VSTD", "DET", "NGATES", "QFLAG_MISH", "NOBS_VR")
                         @test haskey(ds, name)
                         @test dimnames(ds[name]) == ("time", "x_mish", "y_mish", "z_mish")
                     end
@@ -261,8 +283,10 @@ end
                     @test _pipe_read(ds, "W_MISH") == permutedims(analysis_field(result, "W"), (3, 2, 1))
                     @test eltype(ds["NOBS_VR"].var) == Int8
                     @test _pipe_read(ds, "NOBS_VR") == permutedims(result.nobs_vr, (3, 2, 1))
-                    @test eltype(ds["QFLAG"].var) == Int8
-                    @test _pipe_read(ds, "QFLAG") == permutedims(prob.stage1.quality_flag, (3, 2, 1))
+                    @test eltype(ds["QFLAG_MISH"].var) == Int8
+                    @test _pipe_read(ds, "QFLAG_MISH") == permutedims(prob.stage1.quality_flag, (3, 2, 1))
+                    # The regular-grid QFLAG coexists with the mish one.
+                    @test dimnames(ds["QFLAG"]) == dimnames(ds["DBZ"])
                     # Stage-1 diagnostics: QC'd (blanked where QFLAG != 0) with the [io] fill.
                     @test ds["USTD"].attrib["_FillValue"] == Float32(p.io.fill_value)
                     ok = permutedims(prob.stage1.quality_flag, (3, 2, 1)) .== 0
@@ -276,6 +300,85 @@ end
                 end
             finally
                 rm(file3; force = true)
+            end
+        end
+
+        @testset "quality-flag masking (writer on the same solve)" begin
+            ref = Daisho._volumes_reference_position(vols)
+            q1 = prob.stage1.quality_flag
+            @info "Stage-1 QFLAG bit counts" sigma1 = count(!iszero, q1 .& Int8(1)) sigma2 = count(!iszero, q1 .& Int8(2)) singular = count(!iszero, q1 .& Int8(4)) no_data = count(!iszero, q1 .& Int8(8)) n = length(q1)
+            function _write_masked(mapname, flags; kw...)
+                pm = _pipe_load() do b
+                    b["variational"]["quality_flag_map"] = mapname
+                    b["variational"]["mask_quality_flags"] = flags
+                    for (k, v) in kw; b["variational"][String(k)] = v; end
+                end
+                f = tempname() * ".nc"
+                write_variational_netcdf(f, sgrid, prob, result, volA, pm;
+                    index_time = index_time, ref_lat = ref[1], ref_lon = ref[2],
+                    include_derivatives = true)
+                return f
+            end
+            # NCDatasets reads the NaN fill back as `missing`.
+            blank(A) = map(a -> ismissing(a) || isnan(a), A)
+            winds = ("U", "V", "W", "VORT", "DIV", "MCRESIDUAL", "U_x", "W_zz",
+                     "U_BACKGROUND", "V_INCREMENT")
+            files = String[]
+            try
+                # Explicit empty list: bit-identical to the default writer.
+                f0 = _write_masked("nearest", String[]; output_background = true,
+                                   output_increment = true)
+                push!(files, f0)
+                fm = _write_masked("nearest", ["no_data"]; output_background = true,
+                                   output_increment = true)
+                push!(files, fm)
+                NCDataset(file) do ds_ref
+                    NCDataset(f0) do ds0
+                        for name in ("U", "V", "W", "VORT", "DIV", "MCRESIDUAL", "QFLAG", "DBZ")
+                            @test isequal(_pipe_read(ds0, name), _pipe_read(ds_ref, name))
+                        end
+                    end
+                end
+                NCDataset(fm) do ds
+                    @test ds.attrib["variational_mask_quality_flags"] == "no_data"
+                    Q = _pipe_read(ds, "QFLAG")
+                    masked = (Q .& Int8(8)) .!= 0
+                    @test any(masked)
+                    @test !all(masked)
+                    for name in winds
+                        A = _pipe_read(ds, name)
+                        @test blank(A) == masked
+                    end
+                    NCDataset(f0) do ds0
+                        @test isequal(_pipe_read(ds, "DBZ"), _pipe_read(ds0, "DBZ"))
+                        @test isequal(_pipe_read(ds, "DBZ_x"), _pipe_read(ds0, "DBZ_x"))
+                        @test isequal(_pipe_read(ds, "QFLAG"), _pipe_read(ds0, "QFLAG"))
+                        U0 = _pipe_read(ds0, "U")
+                        @test _pipe_read(ds, "U")[.!masked] == U0[.!masked]
+                    end
+                end
+
+                # worst ⊇ nearest ⊇ best, in masked points.
+                all_flags = [m for (m, _) in Daisho.QFLAG_MEANINGS]
+                nmask = Dict{String,Int}()
+                Q0 = NCDataset(ds -> _pipe_read(ds, "QFLAG"), f0)
+                dbz0 = NCDataset(ds -> _pipe_read(ds, "DBZ"), f0)
+                for mapname in ("worst", "nearest", "best")
+                    f = _write_masked(mapname, all_flags)
+                    push!(files, f)
+                    NCDataset(f) do ds
+                        @test ds.attrib["variational_quality_flag_map"] == mapname
+                        @test occursin(mapname, ds["QFLAG"].attrib["comment"])
+                        nmask[mapname] = count(blank(_pipe_read(ds, "U")))
+                        @test blank(_pipe_read(ds, "U")) == (_pipe_read(ds, "QFLAG") .!= 0)
+                        @test isequal(_pipe_read(ds, "DBZ"), dbz0)
+                    end
+                end
+                @info "Masked regular points per quality_flag_map" worst = nmask["worst"] nearest = nmask["nearest"] best = nmask["best"] n = length(Q0)
+                @test nmask["worst"] >= nmask["nearest"] >= nmask["best"]
+                @test nmask["worst"] > nmask["best"]
+            finally
+                foreach(f -> rm(f; force = true), files)
             end
         end
     finally
@@ -340,5 +443,74 @@ end
             vols, tempname() * ".nc", index_time, bad, p)
         @test_throws ArgumentError analyze_radar_volumes_variational(
             Volume[], tempname() * ".nc", index_time, sgrid, p)
+    end
+
+    @testset "regular_quality_flag" begin
+        # 3 × 1 × 1 cells, mubar 3 Gauss points → 9 × 3 × 3 mish; the regular
+        # output points are the 4 × 2 × 2 cell nodes.
+        pq = _pipe_load() do b
+            for (ax, c) in (("i", 3), ("j", 1), ("k", 1))
+                b["grid"]["springsteel"][ax]["min"] = 0.0
+                b["grid"]["springsteel"][ax]["max"] = 3000.0 * c
+                b["grid"]["springsteel"][ax]["cells"] = c
+            end
+        end
+        g = Daisho.create_radar_grid(pq)
+        gz = Daisho.get_springsteel_gridpoints_zyx(g)
+        xm, ym, zm = gz[1, 1, :, 3], gz[1, :, 1, 2], gz[:, 1, 1, 1]
+        @test (length(xm), length(ym), length(zm)) == (9, 3, 3)
+        gp = g.params
+        x = collect(LinRange(gp.iMin, gp.iMax, gp.i_regular_out))
+        y = collect(LinRange(gp.jMin, gp.jMax, gp.j_regular_out))
+        z = collect(LinRange(gp.kMin, gp.kMax, gp.k_regular_out))
+        @test x ≈ [0.0, 3000.0, 6000.0, 9000.0]
+        half = (1500.0, 1500.0, 1500.0)
+        rq(q, m) = Daisho.regular_quality_flag(q, (xm, ym, zm), (x, y, z), half, m)
+
+        # Nearest: the flag encodes the mish x index. Boundary nodes take the
+        # first/last mish point; an interior node sits midway between two
+        # Gauss points, and the tie goes to the lower index.
+        qi = Int8[i for k in 1:3, j in 1:3, i in 1:9]
+        out = rq(qi, :nearest)
+        @test size(out) == (4, 2, 2)
+        @test out[:, 1, 1] == Int8[1, 3, 6, 9]
+        @test all(out[:, j, k] == out[:, 1, 1] for j in 1:2, k in 1:2)
+        @test rq(qi, "nearest") == out                   # string method accepted
+
+        # A flag at one mish x column (all y, z). Index 3 (0.887·DX) is the
+        # nearest of node 2 and within half a cell of no other node.
+        q3 = zeros(Int8, 3, 3, 9); q3[:, :, 3] .= Int8(8)
+        @test rq(q3, :nearest)[:, 1, 1] == Int8[0, 8, 0, 0]
+        @test rq(q3, :worst)[:, 1, 1] == Int8[0, 8, 0, 0]
+        @test all(iszero, rq(q3, :best))                 # node 2 also sees indices 2, 4, 5
+        # Index 2 (the cell-1 midpoint, exactly half a cell from nodes 1 and
+        # 2) is nobody's nearest, but within half a cell of both.
+        q2 = zeros(Int8, 3, 3, 9); q2[:, :, 2] .= Int8(4)
+        @test all(iszero, rq(q2, :nearest))
+        @test rq(q2, :worst)[:, 1, 1] == Int8[4, 4, 0, 0]
+        @test all(iszero, rq(q2, :best))
+        # Best keeps a bit only when every neighbour carries it: node 1's
+        # neighbourhood is mish x indices {1, 2}.
+        q12 = zeros(Int8, 3, 3, 9); q12[:, :, 1:2] .= Int8(1)
+        @test rq(q12, :best)[:, 1, 1] == Int8[1, 0, 0, 0]
+        @test rq(q12, :worst)[:, 1, 1] == Int8[1, 1, 0, 0]
+        # A single mish point flagged (not a whole column): worst spreads it
+        # to the y/z nodes within half a cell too.
+        qp = zeros(Int8, 3, 3, 9); qp[1, 1, 1] = Int8(2)
+        @test rq(qp, :nearest)[1, 1, 1] == Int8(2)
+        @test count(!iszero, rq(qp, :nearest)) == 1
+        @test count(!iszero, rq(qp, :worst)) == 1
+        @test all(iszero, rq(qp, :best))
+
+        # best ⊆ nearest ⊆ worst, bitwise, on a random field.
+        qr = rand(Int8(0):Int8(15), 3, 3, 9)
+        b, n, w = rq(qr, :best), rq(qr, :nearest), rq(qr, :worst)
+        @test all(iszero, b .& .~n)
+        @test all(iszero, n .& .~w)
+
+        @test_throws ArgumentError rq(qi, :median)
+        @test_throws ArgumentError rq(qi, "any")
+        @test_throws DimensionMismatch Daisho.regular_quality_flag(qi, (ym, ym, zm),
+            (x, y, z), half, :nearest)
     end
 end

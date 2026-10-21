@@ -114,6 +114,83 @@ function _state_regular(grid, a::AbstractVector{Float64}, names, x, y, z)
 end
 
 """
+    regular_quality_flag(qflag, mish, regular, half_cell, method) -> Array{Int8,3}
+
+Resample the stage-1 bitwise quality flag `qflag` (`(nz, ny, nx)`, on the
+quadrature lattice) onto the regular output points.
+
+`mish = (x_mish, y_mish, z_mish)` and `regular = (x, y, z)` are the
+ascending coordinates per axis; `half_cell = (DX, DY, DZ) ./ 2`. `method`
+(`Symbol` or string) selects the rule, per regular point:
+
+- `:nearest` — the flag of the nearest mish point (per axis; an exact tie
+  goes to the lower index);
+- `:worst` — the bitwise OR over every mish point within half a cell
+  (`|x_mish − x| ≤ DX/2` on each axis, inclusive), so any flagged neighbour
+  flags the point;
+- `:best` — the bitwise AND over the same neighbourhood, so a bit survives
+  only if every neighbour carries it.
+
+An axis whose neighbourhood is empty falls back to the nearest index, so
+`best ⊆ nearest ⊆ worst` bitwise. Returns `(nx, ny, nz)` (the writer's
+layout). Any other `method` throws `ArgumentError`.
+"""
+function regular_quality_flag(qflag::AbstractArray{Int8,3},
+                              mish::NTuple{3,AbstractVector{<:Real}},
+                              regular::NTuple{3,AbstractVector{<:Real}},
+                              half_cell::NTuple{3,Real}, method::Union{Symbol,AbstractString})
+    m = Symbol(method)
+    m in (:nearest, :worst, :best) || throw(ArgumentError(
+        "regular_quality_flag: method must be :nearest, :worst or :best, got $(repr(method))"))
+    nzm, nym, nxm = size(qflag)
+    map(length, mish) == (nxm, nym, nzm) || throw(DimensionMismatch(
+        "regular_quality_flag: mish coordinate lengths $(map(length, mish)) do not match " *
+        "the flag's (nx, ny, nz) = $((nxm, nym, nzm))"))
+    sx, sy, sz = (_qflag_index_sets(mish[a], regular[a], half_cell[a], m) for a in 1:3)
+    out = Array{Int8,3}(undef, length(sx), length(sy), length(sz))
+    for k in eachindex(sz), j in eachindex(sy), i in eachindex(sx)
+        if m === :nearest
+            out[i, j, k] = qflag[sz[k][1], sy[j][1], sx[i][1]]
+        else
+            acc = m === :worst ? Int8(0) : Int8(-1)       # OR identity / AND identity (all bits)
+            for kk in sz[k], jj in sy[j], ii in sx[i]
+                f = qflag[kk, jj, ii]
+                acc = m === :worst ? (acc | f) : (acc & f)
+            end
+            out[i, j, k] = acc
+        end
+    end
+    return out
+end
+
+# Per regular coordinate on one axis, the mish indices it draws its flag
+# from: the nearest (ties → lower index) for :nearest; all within half a cell
+# (inclusive, with a small relative tolerance) for :worst/:best, falling back
+# to the nearest when none is.
+function _qflag_index_sets(xm::AbstractVector{<:Real}, xr::AbstractVector{<:Real},
+                           half::Real, method::Symbol)
+    isempty(xm) && throw(ArgumentError("regular_quality_flag: empty mish axis"))
+    tol = 1e-9 * abs(half)
+    sets = Vector{Vector{Int}}(undef, length(xr))
+    for (r, x) in enumerate(xr)
+        dmin, inear = Inf, 1
+        for (i, xi) in enumerate(xm)
+            d = abs(xi - x)
+            if d < dmin - tol
+                dmin, inear = d, i
+            end
+        end
+        if method === :nearest
+            sets[r] = [inear]
+        else
+            s = [i for (i, xi) in enumerate(xm) if abs(xi - x) <= half + tol]
+            sets[r] = isempty(s) ? [inear] : s
+        end
+    end
+    return sets
+end
+
+"""
     write_variational_netcdf(output_file, sgrid, prob::VariationalProblem,
         result::VariationalResult, volume::Volume, p::DaishoParameters;
         index_time = nothing, ref_lat, ref_lon, institution = "", source = "",
@@ -150,18 +227,36 @@ fill on `("time", "x", "y", "z")` (Julia order; `("x", "y", "z")` without
 - `output_background`: `<name>_BACKGROUND` (the background coefficients
   `a_g`); `output_increment`: `<name>_INCREMENT` (analysis − background
   coefficients), so `BACKGROUND + INCREMENT = analysis`.
+- `QFLAG` (when the problem carries a stage-1 product, `prob.stage1`): the
+  stage-1 bitwise quality flag (CF `flag_masks`/`flag_meanings`, see
+  `Daisho.QFLAG_MEANINGS`) resampled from the quadrature lattice to the
+  regular points by `Daisho.regular_quality_flag` with the rule
+  `[variational] quality_flag_map` (`"nearest"`, `"worst"`, `"best"`);
+  `Int8`, no fill, on the regular dims. It is stage 1's diagnosis of the
+  per-point dual-Doppler geometry, not of the variational analysis: the
+  solve can recover winds at points stage 1 flagged (baseline, a single σ
+  above threshold) but has nothing to fit where there was no data.
+- Masking: when `[variational] mask_quality_flags` is non-empty, every
+  regular-grid wind-derived field — the wind-role analysis variables (all
+  derivative suffixes), their `_BACKGROUND`/`_INCREMENT`, `VORT`, `DIV`,
+  `MCRESIDUAL` — is set to `NaN` where `QFLAG` carries any listed bit.
+  Gridded scalars and `<name>_ANALYSIS` of scalar state variables are never
+  masked. With the default empty list nothing is masked.
 - `output_mish`: dims `x_mish, y_mish, z_mish` (the quadrature coordinates)
   with `<name>_MISH` (`Float64`, the mish analysis `result.analysis`, exact),
   the stage-1 product (`U_STAGE1`, `V_STAGE1`, `USTD`, `VSTD`, `DET`,
-  `NGATES`, `QFLAG` — the QC'd product blanked where `QFLAG != 0`, `Float32`
-  with the `[io]` fill, as in [`write_wind_synthesis`](@ref)), `NOBS_VR`
+  `NGATES`, and the flag itself as `QFLAG_MISH` — the QC'd product blanked
+  where the flag `!= 0`, `Float32` with the `[io]` fill, as in
+  [`write_wind_synthesis`](@ref)), `NOBS_VR`
   (`Int8`), all on `("time", "x_mish", "y_mish", "z_mish")`, and `RHOBAR` on
   `("z_mish",)` (the ρ̄ the continuity constraint used).
 
 Global attributes: those of [`write_radar_netcdf`](@ref) plus
 `variational_background`, `variational_outer_iterations`,
-`variational_cg_iterations` (total CG iterations) and `variational_converged`
-(`1`/`0`).
+`variational_cg_iterations` (total CG iterations), `variational_converged`
+(`1`/`0`), `variational_quality_flag_map` (the resampling rule) and
+`variational_mask_quality_flags` (the masked flag meanings, space-separated;
+empty when none).
 
 Mutates `prob.state_grid.spectral` (it holds the analysis coefficients on
 return); call from a single thread.
@@ -202,6 +297,22 @@ function write_variational_netcdf(output_file::AbstractString, sgrid::RRR_Grid,
     fidx = field_index_dict(p)
     outname(v) = haskey(fidx, names[v]) ? names[v] * "_ANALYSIS" : names[v]
 
+    # Stage-1 quality flag resampled to the regular points, and the optional
+    # wind mask it drives (computed before any wind field is written).
+    qmap = p.variational.quality_flag_map
+    qreg = nothing
+    if prob.stage1 !== nothing
+        gz = get_springsteel_gridpoints_zyx(sgrid)      # (kDim, jDim, iDim, 3): [z, y, x]
+        half = (sgrid.ibasis.data[1, 1, 1].params.DX, sgrid.jbasis.data[1, 1, 1].params.DX,
+                sgrid.kbasis.data[1, 1, 1].params.DX) ./ 2
+        qreg = regular_quality_flag(prob.stage1.quality_flag,
+            (gz[1, 1, :, 3], gz[1, :, 1, 2], gz[:, 1, 1, 1]), (x, y, z), half, Symbol(qmap))
+    end
+    mbits = qflag_bits(p.variational.mask_quality_flags)
+    mask = (qreg === nothing || mbits == 0) ? nothing : (qreg .& mbits) .!= 0
+    _masked(data) = mask === nothing ? data : (d = copy(data); d[mask] .= NaN; d)
+    _maybe_masked(v, data) = v in wind_vars ? _masked(data) : data
+
     NCDataset(output_file, "a") do ds
         has_time = haskey(ds.dim, "time")
         dims = has_time ? ("time", "x", "y", "z") : ("x", "y", "z")
@@ -233,7 +344,8 @@ function write_variational_netcdf(output_file::AbstractString, sgrid::RRR_Grid,
         nslots = include_derivatives ? 7 : 1
         for v in 1:nvars(state), slot in 1:nslots
             sfx = _VAR_REGULAR_SUFFIXES[slot]
-            _defreg!(outname(v) * sfx, _regular_xyz(reg[:, col(names[v]), slot], nx, ny, nz),
+            _defreg!(outname(v) * sfx,
+                     _maybe_masked(v, _regular_xyz(reg[:, col(names[v]), slot], nx, ny, nz)),
                      _var_attrs(v, sfx))
         end
         for (tag, R) in (("_BACKGROUND", reg_bg), ("_INCREMENT", reg_inc))
@@ -241,24 +353,31 @@ function write_variational_netcdf(output_file::AbstractString, sgrid::RRR_Grid,
             for v in 1:nvars(state)
                 a = _var_attrs(v, "")
                 a["long_name"] *= tag == "_BACKGROUND" ? " background" : " analysis increment"
-                _defreg!(names[v] * tag, _regular_xyz(R[:, col(names[v]), 1], nx, ny, nz), a)
+                _defreg!(names[v] * tag, _maybe_masked(v, _regular_xyz(R[:, col(names[v]), 1], nx, ny, nz)), a)
             end
         end
 
         cu, cv = col(names[iu]), col(names[iv])
         div = reg[:, cu, 2] .+ reg[:, cv, 4]
         vort = reg[:, cv, 2] .- reg[:, cu, 4]
-        _defreg!("VORT", _regular_xyz(vort, nx, ny, nz),
+        _defreg!("VORT", _masked(_regular_xyz(vort, nx, ny, nz)),
                  _attrs("VORT", variable_attrib_dict["VORT"]))
-        _defreg!("DIV", _regular_xyz(div, nx, ny, nz),
+        _defreg!("DIV", _masked(_regular_xyz(div, nx, ny, nz)),
                  _attrs("DIV", variable_attrib_dict["DIV"]))
         if iw !== nothing
             cw = col(names[iw])
             dl = [Float64(dlnrho_dz(prob.reference, zz)) for zz in z]
             mc = _regular_xyz(div .+ reg[:, cw, 6], nx, ny, nz) .+
                  _regular_xyz(reg[:, cw, 1], nx, ny, nz) .* reshape(dl, 1, 1, :)
-            _defreg!("MCRESIDUAL", mc,
+            _defreg!("MCRESIDUAL", _masked(mc),
                      _attrs("MCRESIDUAL", variable_attrib_dict["MCRESIDUAL"]))
+        end
+        if qreg !== nothing
+            qv = defVar(ds, "QFLAG", Int8, dims; attrib = _qflag_attrs(
+                "grid_mapping" => "grid_mapping",
+                "comment" => "stage-1 quality flag resampled from the quadrature " *
+                             "lattice to the output grid: $(qmap)"))
+            _put_xyz!(qv, dims, qreg)
         end
 
         # 3. Mish-lattice diagnostics.
@@ -271,6 +390,8 @@ function write_variational_netcdf(output_file::AbstractString, sgrid::RRR_Grid,
         ds.attrib["variational_outer_iterations"] = Int32(result.stats.outer_iterations)
         ds.attrib["variational_cg_iterations"] = Int32(sum(result.stats.inner_iterations; init = 0))
         ds.attrib["variational_converged"] = Int32(result.converged)
+        ds.attrib["variational_quality_flag_map"] = qmap
+        ds.attrib["variational_mask_quality_flags"] = join(p.variational.mask_quality_flags, " ")
     end
     return output_file
 end
@@ -312,7 +433,8 @@ function _write_variational_mish!(ds, sgrid, prob::VariationalProblem,
 
     if prob.stage1 !== nothing
         _write_wind_data_vars!(ds, _quality_masked(prob.stage1); dims = dims,
-                               component_suffix = "_STAGE1", coordinates = nothing)
+                               component_suffix = "_STAGE1", coordinates = nothing,
+                               qflag_name = "QFLAG_MISH")
     end
     if result.nobs_vr !== nothing
         attrs = OrderedDict{String,Any}()
