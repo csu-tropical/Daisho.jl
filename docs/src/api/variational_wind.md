@@ -73,6 +73,7 @@ Daisho.ScalarValueObs
 Daisho.PointObs
 Daisho.WindSpeedObs
 Daisho.MishIndex
+Daisho.NodeIndex
 Daisho.XYZ
 Daisho.ObsTerm
 Daisho.ObsGroup

@@ -8,8 +8,9 @@
 #
 #     h_m(a) = Σ_t w_t · [slot_t of var_t](location_m)        (linear obs)
 #
-# - `MishObsBackend`: observations located at mish (quadrature) points. The
-#   forward operator is one shared `SplineEvaluation` pass (owned by the
+# - `MishObsBackend`: observations located on an evaluation lattice — the
+#   mish (quadrature points) or the B-spline nodes (`lattice = :nodes`). The
+#   forward operator is one shared `SplineEvaluation` pass per lattice (owned by the
 #   `ObsSet`) to the union of the requested (var, slot) slabs, followed by
 #   per-obs weighted sums; the adjoint scatters into the slabs and applies the
 #   evaluation adjoint once. Optional nonlinear `model` hook.
@@ -113,14 +114,17 @@ end
 """
     MishObsBackend(kind::Symbol, dims::Tuple{Integer,Integer}, points, y, rinv,
                    terms::AbstractVector{<:AbstractVector{<:Tuple{Integer,Integer,Real}}};
-                   model = nothing)
-    MishObsBackend(kind, grid, varnames, points, y, rinv, terms; model = nothing)
+                   model = nothing, lattice = :mish)
+    MishObsBackend(kind, grid, varnames, points, y, rinv, terms; model = nothing, lattice = :mish)
 
-Observations located at mish points, stored structure-of-arrays and sorted
-(stably) by point. `dims = (nvars, nmish)` gives the number of state variables
-and of mish points per variable (the second form takes them from the RRR
-`grid` and `varnames`, as for [`SplineProjection`](@ref)). For observation
-`m`: `points[m] ∈ 1:nmish` is the mish flat index (k fastest), `y[m]` the
+Observations located on an evaluation lattice of the state grid — the mish
+(`lattice = :mish`, the quadrature points) or the B-spline nodes
+(`lattice = :nodes`, see [`SplineEvaluation`](@ref)) — stored
+structure-of-arrays and sorted (stably) by point. `dims = (nvars, npoints)`
+gives the number of state variables and of lattice points per variable (the
+second form takes them from the RRR `grid` and `varnames`, as for
+[`SplineProjection`](@ref)). For observation
+`m`: `points[m] ∈ 1:npoints` is the lattice flat index (k fastest), `y[m]` the
 value, `rinv[m] = 1/σ²` (> 0, see [`inverse_variance`](@ref)), and `terms[m]`
 a non-empty list of `(var, slot, weight)` with `var ∈ 1:nvars` and
 `slot ∈ 1:4` (`1 = value, 2 = ∂x, 3 = ∂y, 4 = ∂z`). A linear observation is
@@ -141,7 +145,8 @@ ORIGINAL (construction-order) observation index. Linearisation (through the
 Fields (sorted order): `point`, `y`, `rinv`, `term_ptr` (CSR, length
 `nobs+1`), `term_slab` (index into `slots`), `term_w`, `slots`, `model`,
 `kind`, `perm` (`perm[m]` = original index of sorted observation `m`),
-`nvars`, `nmish`.
+`nvars`, `nmish` (lattice points per variable), `lattice`. Nonlinear
+models are supported on the mish lattice only.
 """
 struct MishObsBackend <: AbstractObsBackend
     kind::Symbol
@@ -156,16 +161,21 @@ struct MishObsBackend <: AbstractObsBackend
     slots::Vector{Tuple{Int,Int}}
     model::Any
     perm::Vector{Int}
+    lattice::Symbol
 end
 
 function MishObsBackend(kind::Symbol, dims::Tuple{Integer,Integer},
                         points::AbstractVector{<:Integer}, y::AbstractVector{<:Real},
                         rinv::AbstractVector{<:Real},
                         terms::AbstractVector{<:AbstractVector{<:Tuple{Integer,Integer,Real}}};
-                        model = nothing)
+                        model = nothing, lattice::Symbol = :mish)
     nvars, nmish = Int(dims[1]), Int(dims[2])
     (nvars >= 1 && nmish >= 1) || throw(ArgumentError("MishObsBackend: dims must be ≥ 1, got $(dims)"))
     what = "MishObsBackend(:$(kind))"
+    lattice in (:mish, :nodes) || throw(ArgumentError(
+        "$(what): lattice must be :mish or :nodes, got :$(lattice)"))
+    (lattice === :mish || model === nothing) || throw(ArgumentError(
+        "$(what): nonlinear observations (a model hook) are supported on the mish lattice only"))
     n = length(points)
     length(terms) == n || throw(DimensionMismatch("$(what): $(n) points but $(length(terms)) term lists"))
     _check_obs_vectors(what, n, y, rinv)
@@ -204,13 +214,14 @@ function MishObsBackend(kind::Symbol, dims::Tuple{Integer,Integer},
         term_ptr[m + 1] = length(term_w) + 1
     end
     return MishObsBackend(kind, nvars, nmish, point, ys, rs, term_ptr, term_slab, term_w,
-                          slots, model, perm)
+                          slots, model, perm, lattice)
 end
 
 function MishObsBackend(kind::Symbol, grid, varnames::AbstractVector{<:AbstractString},
-                        points, y, rinv, terms; model = nothing)
-    g = _spline_grid_geometry(grid, varnames)
-    return MishObsBackend(kind, (_nvars(g), _nmish(g)), points, y, rinv, terms; model = model)
+                        points, y, rinv, terms; model = nothing, lattice::Symbol = :mish)
+    g = _spline_grid_geometry(grid, varnames; lattice = lattice)
+    return MishObsBackend(kind, (_nvars(g), _nmish(g)), points, y, rinv, terms;
+                          model = model, lattice = lattice)
 end
 
 nobs(b::MishObsBackend) = length(b.point)
@@ -316,14 +327,26 @@ is_linear(::ScatteredObsBackend) = true
 # ObsSet
 # ─────────────────────────────────────────────────────────────────────────────
 
-# A mish backend bound to an ObsSet's shared slab workspace.
+# One evaluation lattice of an ObsSet: the shared SplineEvaluation over the
+# union of the slots its backends need, and the forward/adjoint slab buffers.
+struct _LatticeEval
+    lattice::Symbol
+    ev::SplineEvaluation
+    slots::Vector{Tuple{Int,Int}}
+    slabs::Vector{Float64}
+    slabs_adj::Vector{Float64}
+end
+
+# A lattice backend bound to an ObsSet's shared slab workspace.
 struct _MishBinding
     backend::MishObsBackend
     offset::Int                       # obs offset in the concatenated vectors
-    term_idx::Vector{Int}             # per term: absolute index into set.slabs
-    sample_idx::Vector{Int}           # per backend slot: slab offset (0-based) into set.slabs
+    term_idx::Vector{Int}             # per term: absolute index into `slabs`
+    sample_idx::Vector{Int}           # per backend slot: slab offset (0-based) into `slabs`
     chunks::Vector{UnitRange{Int}}    # obs chunks that never split a point
     sample::Vector{Float64}           # model sample buffer
+    slabs::Vector{Float64}            # the lattice's forward slabs (aliases _LatticeEval.slabs)
+    slabs_adj::Vector{Float64}        # the lattice's adjoint slabs
 end
 
 """
@@ -336,8 +359,10 @@ order (`ranges[b]` is backend `b`'s block); `y` and `rinv` hold the
 concatenated values and inverse variances.
 
 One [`SplineEvaluation`](@ref) `ev` is built for the union `ev_slots` of the
-`(var, slot)` pairs used by all mish backends (`nothing` if there are none);
-`slab_map[b]` maps backend `b`'s slots to indices in `ev_slots` (empty for
+`(var, slot)` pairs used by all mish-lattice backends (`nothing` if there are
+none), and a second one (`ev_nodes`, `ev_nodes_slots`) for the node-lattice
+backends (`MishObsBackend` with `lattice = :nodes`); `slab_map[b]` maps
+backend `b`'s slots to indices in its lattice's slot list (empty for
 scattered backends).
 
 `ObsSet <: AbstractLinearOp` of size `(nobs, nvars·ncoef)`:
@@ -351,17 +376,21 @@ See also: [`evaluate!`](@ref), [`linearize!`](@ref), [`cost_by_backend`](@ref)
 struct ObsSet <: AbstractLinearOp
     backends::Vector{AbstractObsBackend}
     ranges::Vector{UnitRange{Int}}
-    ev::Union{Nothing,SplineEvaluation}
+    ev::Union{Nothing,SplineEvaluation}             # mish lattice
     ev_slots::Vector{Tuple{Int,Int}}
+    ev_nodes::Union{Nothing,SplineEvaluation}       # node lattice
+    ev_nodes_slots::Vector{Tuple{Int,Int}}
+    lattices::Vector{_LatticeEval}                  # the lattices present, mish first
     slab_map::Vector{Vector{Int}}
-    slabs::Vector{Float64}
+    slabs::Vector{Float64}                          # mish forward slabs
     slabs_adj::Vector{Float64}
     a_tmp::Vector{Float64}
     y::Vector{Float64}
     rinv::Vector{Float64}
-    mish::Vector{_MishBinding}
+    mish::Vector{_MishBinding}                      # every lattice backend (mish and nodes)
     scattered::Vector{Tuple{Int,ScatteredObsBackend}}   # (obs offset, backend)
     nmish::Int
+    nnodes::Int
     ncoef_total::Int
 end
 
@@ -392,13 +421,17 @@ function ObsSet(grid, varnames::AbstractVector{<:AbstractString},
     g = _spline_grid_geometry(grid, varnames)
     nv, nm, nc = _nvars(g), _nmish(g), _ncoef(g)
     ncoef_total = nv * nc
-    ev_slots = Tuple{Int,Int}[]
+    gn = _spline_grid_geometry(grid, varnames; lattice = :nodes)
+    nn = _nmish(gn)
+    npts = Dict(:mish => nm, :nodes => nn)
+    slots_of = Dict(:mish => Tuple{Int,Int}[], :nodes => Tuple{Int,Int}[])
     for b in backends
         if b isa MishObsBackend
-            (b.nvars, b.nmish) == (nv, nm) || throw(DimensionMismatch(
-                "ObsSet: mish backend :$(b.kind) has dims $((b.nvars, b.nmish)), grid has $((nv, nm))"))
+            (b.nvars, b.nmish) == (nv, npts[b.lattice]) || throw(DimensionMismatch(
+                "ObsSet: $(b.lattice) backend :$(b.kind) has dims $((b.nvars, b.nmish)), grid has $((nv, npts[b.lattice]))"))
+            sl = slots_of[b.lattice]
             for s in b.slots
-                s in ev_slots || push!(ev_slots, s)
+                s in sl || push!(sl, s)
             end
         elseif b isa ScatteredObsBackend
             size(b.H, 2) == ncoef_total || throw(DimensionMismatch(
@@ -407,7 +440,15 @@ function ObsSet(grid, varnames::AbstractVector{<:AbstractString},
             throw(ArgumentError("ObsSet: unsupported backend type $(typeof(b))"))
         end
     end
-    ev = isempty(ev_slots) ? nothing : SplineEvaluation(grid, varnames, ev_slots; nchunks = nchunks)
+    lattices = _LatticeEval[]
+    for lat in (:mish, :nodes)
+        sl = slots_of[lat]
+        isempty(sl) && continue
+        ev = SplineEvaluation(grid, varnames, sl; lattice = lat, nchunks = nchunks)
+        ns = length(sl) * npts[lat]
+        push!(lattices, _LatticeEval(lat, ev, sl, zeros(ns), zeros(ns)))
+    end
+    lat_index = Dict(L.lattice => k for (k, L) in enumerate(lattices))
     ranges = UnitRange{Int}[]
     slab_map = Vector{Int}[]
     mish = _MishBinding[]
@@ -417,15 +458,25 @@ function ObsSet(grid, varnames::AbstractVector{<:AbstractString},
         n = nobs(b)
         push!(ranges, (off + 1):(off + n))
         if b isa MishObsBackend
-            map = [findfirst(==(s), ev_slots) for s in b.slots]
+            if n == 0
+                # No observations ⇒ no slots ⇒ possibly no lattice built; bind nothing.
+                push!(slab_map, Int[])
+                push!(mish, _MishBinding(b, off, Int[], Int[], UnitRange{Int}[], Float64[],
+                                         Float64[], Float64[]))
+                continue
+            end
+            L = lattices[lat_index[b.lattice]]
+            np = npts[b.lattice]
+            map = [findfirst(==(s), L.slots) for s in b.slots]
             push!(slab_map, map)
             term_idx = Vector{Int}(undef, length(b.term_w))
             for m in 1:n, t in b.term_ptr[m]:(b.term_ptr[m + 1] - 1)
-                term_idx[t] = (map[b.term_slab[t]] - 1) * nm + Int(b.point[m])
+                term_idx[t] = (map[b.term_slab[t]] - 1) * np + Int(b.point[m])
             end
-            sample_idx = [(k - 1) * nm for k in map]
+            sample_idx = [(k - 1) * np for k in map]
             push!(mish, _MishBinding(b, off, term_idx, sample_idx,
-                                     _point_chunks(b.point, Int(nchunks)), zeros(length(b.slots))))
+                                     _point_chunks(b.point, Int(nchunks)), zeros(length(b.slots)),
+                                     L.slabs, L.slabs_adj))
         else
             push!(slab_map, Int[])
             push!(scattered, (off, b))
@@ -437,9 +488,17 @@ function ObsSet(grid, varnames::AbstractVector{<:AbstractString},
         y[r] .= obs_values(b)
         rinv[r] .= obs_rinv(b)
     end
-    ns = length(ev_slots) * nm
-    return ObsSet(collect(AbstractObsBackend, backends), ranges, ev, ev_slots, slab_map,
-                  zeros(ns), zeros(ns), zeros(ncoef_total), y, rinv, mish, scattered, nm, ncoef_total)
+    km = get(lat_index, :mish, 0)
+    kn = get(lat_index, :nodes, 0)
+    ev = km == 0 ? nothing : lattices[km].ev
+    ev_slots = km == 0 ? Tuple{Int,Int}[] : lattices[km].slots
+    ev_nodes = kn == 0 ? nothing : lattices[kn].ev
+    ev_nodes_slots = kn == 0 ? Tuple{Int,Int}[] : lattices[kn].slots
+    slabs = km == 0 ? Float64[] : lattices[km].slabs
+    slabs_adj = km == 0 ? Float64[] : lattices[km].slabs_adj
+    return ObsSet(collect(AbstractObsBackend, backends), ranges, ev, ev_slots, ev_nodes,
+                  ev_nodes_slots, lattices, slab_map, slabs, slabs_adj, zeros(ncoef_total),
+                  y, rinv, mish, scattered, nm, nn, ncoef_total)
 end
 
 nobs(set::ObsSet) = length(set.y)
@@ -469,12 +528,11 @@ end
 struct _MishHKernel
     y::Vector{Float64}
     b::_MishBinding
-    slabs::Vector{Float64}
 end
 function (k::_MishHKernel)(r::UnitRange{Int})
     be = k.b.backend
     ptr = be.term_ptr; w = be.term_w; idx = k.b.term_idx
-    slabs = k.slabs; y = k.y; off = k.b.offset
+    slabs = k.b.slabs; y = k.y; off = k.b.offset
     @inbounds for m in r
         s = 0.0
         for t in ptr[m]:(ptr[m + 1] - 1)
@@ -486,14 +544,13 @@ function (k::_MishHKernel)(r::UnitRange{Int})
 end
 
 struct _MishHtKernel
-    slabs_adj::Vector{Float64}
     b::_MishBinding
     y::Vector{Float64}
 end
 function (k::_MishHtKernel)(r::UnitRange{Int})
     be = k.b.backend
     ptr = be.term_ptr; w = be.term_w; idx = k.b.term_idx
-    sa = k.slabs_adj; y = k.y; off = k.b.offset
+    sa = k.b.slabs_adj; y = k.y; off = k.b.offset
     @inbounds for m in r
         ym = y[off + m]
         for t in ptr[m]:(ptr[m + 1] - 1)
@@ -513,15 +570,17 @@ end
     apply_H!(y, set::ObsSet, a) -> y
 
 Tangent-linear observation operator at the last linearisation: `y = H·a`
-(one evaluation pass to the shared slabs, per-obs weighted sums for mish
-backends, sparse products for scattered backends). For linear backends this
-is the observation operator itself.
+(one evaluation pass per lattice to its shared slabs, per-obs weighted sums
+for lattice backends, sparse products for scattered backends). For linear
+backends this is the observation operator itself.
 """
 function apply_H!(y::AbstractVector{Float64}, set::ObsSet, a::AbstractVector{Float64})
     _check_obs_sizes(set, y, a, "apply_H!")
-    set.ev === nothing || apply!(set.slabs, set.ev, a)
+    for L in set.lattices
+        apply!(L.slabs, L.ev, a)
+    end
     for b in set.mish
-        _run_chunks(_MishHKernel(y, b, set.slabs), b.chunks)
+        _run_chunks(_MishHKernel(y, b), b.chunks)
     end
     for (off, b) in set.scattered
         nobs(b) == 0 && continue
@@ -534,19 +593,28 @@ end
     apply_Ht!(a, set::ObsSet, y) -> a
 
 Exact transpose of [`apply_H!`](@ref): OVERWRITES `a` with `Hᵀ·y` (scatter
-into the shared adjoint slabs, one evaluation-adjoint pass, then the
-scattered backends accumulate `Htᵀ·y`).
+into each lattice's adjoint slabs, one evaluation-adjoint pass per lattice,
+then the scattered backends accumulate `Htᵀ·y`).
 """
 function apply_Ht!(a::AbstractVector{Float64}, set::ObsSet, y::AbstractVector{Float64})
     _check_obs_sizes(set, y, a, "apply_Ht!")
-    if set.ev === nothing
+    for L in set.lattices
+        fill!(L.slabs_adj, 0.0)
+    end
+    for b in set.mish
+        _run_chunks(_MishHtKernel(b, y), b.chunks)
+    end
+    if isempty(set.lattices)
         fill!(a, 0.0)
     else
-        fill!(set.slabs_adj, 0.0)
-        for b in set.mish
-            _run_chunks(_MishHtKernel(set.slabs_adj, b, y), b.chunks)
+        for (k, L) in enumerate(set.lattices)
+            if k == 1
+                apply_adjoint!(a, L.ev, L.slabs_adj)
+            else
+                apply_adjoint!(set.a_tmp, L.ev, L.slabs_adj)
+                a .+= set.a_tmp
+            end
         end
-        apply_adjoint!(a, set.ev, set.slabs_adj)
     end
     for (off, b) in set.scattered
         nobs(b) == 0 && continue
@@ -561,11 +629,12 @@ apply_adjoint!(a::AbstractVector{Float64}, set::ObsSet, y::AbstractVector{Float6
 # Nonlinear mish backend: evaluate the model at every observation (serial;
 # models may allocate). Writes values into y (if `values`) and tangent
 # weights into the backend (if `weights`). Function barrier on the model type.
-function _mish_model_pass!(y, b::_MishBinding, slabs, values::Bool, weights::Bool)
-    return _mish_model_pass!(y, b, b.backend.model, slabs, values, weights)
+function _mish_model_pass!(y, b::_MishBinding, values::Bool, weights::Bool)
+    return _mish_model_pass!(y, b, b.backend.model, values, weights)
 end
-function _mish_model_pass!(y, b::_MishBinding, model::M, slabs, values::Bool, weights::Bool) where {M}
+function _mish_model_pass!(y, b::_MishBinding, model::M, values::Bool, weights::Bool) where {M}
     be = b.backend
+    slabs = b.slabs
     sample = b.sample
     sidx = b.sample_idx
     ptr = be.term_ptr
@@ -600,12 +669,14 @@ weights are also updated at `a` in the same pass (see [`linearize!`](@ref)).
 function evaluate!(y::AbstractVector{Float64}, set::ObsSet, a::AbstractVector{Float64};
                    linearize::Bool = false)
     _check_obs_sizes(set, y, a, "evaluate!")
-    set.ev === nothing || apply!(set.slabs, set.ev, a)
+    for L in set.lattices
+        apply!(L.slabs, L.ev, a)
+    end
     for b in set.mish
         if b.backend.model === nothing
-            _run_chunks(_MishHKernel(y, b, set.slabs), b.chunks)
+            _run_chunks(_MishHKernel(y, b), b.chunks)
         else
-            _mish_model_pass!(y, b, set.slabs, true, linearize)
+            _mish_model_pass!(y, b, true, linearize)
         end
     end
     for (off, b) in set.scattered
@@ -625,9 +696,9 @@ function linearize!(set::ObsSet, a::AbstractVector{Float64})
     length(a) == set.ncoef_total || throw(DimensionMismatch(
         "ObsSet linearize!: $(length(a)) coefficients, expected $(set.ncoef_total)"))
     any(b -> b.backend.model !== nothing, set.mish) || return set
-    apply!(set.slabs, set.ev, a)
+    apply!(set.slabs, set.ev, a)          # nonlinear models live on the mish lattice only
     for b in set.mish
-        b.backend.model === nothing || _mish_model_pass!(nothing, b, set.slabs, false, true)
+        b.backend.model === nothing || _mish_model_pass!(nothing, b, false, true)
     end
     return set
 end

@@ -8,6 +8,7 @@
 # converted to the Phase-4 backends:
 #
 #   MishIndex locations → MishObsBackend  (linear, or nonlinear via its model hook)
+#   NodeIndex locations → MishObsBackend on the node lattice (linear only)
 #   XYZ locations       → ScatteredObsBackend (linear only)
 #
 # The backend slot of a term is `deriv + 1` (backend slots: 1 = value,
@@ -19,7 +20,8 @@
     ObsLocation
 
 Supertype of observation locations: [`MishIndex`](@ref) (a mish/quadrature
-point of the state grid) or [`XYZ`](@ref) (an arbitrary point in metres).
+point of the state grid), [`NodeIndex`](@ref) (a B-spline node of the state
+grid) or [`XYZ`](@ref) (an arbitrary point in metres).
 """
 abstract type ObsLocation end
 
@@ -31,6 +33,21 @@ A mish point of the state's `(nz, ny, nx)` lattice (1-based; `k` vertical,
 `[:, k, j, i]`. See [`mish_flat`](@ref).
 """
 struct MishIndex <: ObsLocation
+    k::Int
+    j::Int
+    i::Int
+end
+
+"""
+    NodeIndex(k, j, i)
+
+A B-spline node of the state grid's `(cells_k+1, cells_j+1, cells_i+1)` node
+lattice (1-based; `k` vertical, `j` y, `i` x; node `n` of an axis sits at
+`min + (n−1)·DX`, so the lattice is the default regular output grid). See
+[`node_flat`](@ref) and `StateVector.node_dims`. Supported for linear
+observations only.
+"""
+struct NodeIndex <: ObsLocation
     k::Int
     j::Int
     i::Int
@@ -59,6 +76,20 @@ function mish_flat(loc::MishIndex, dims::NTuple{3,Int})
     nz, ny, nx = dims
     (1 <= loc.k <= nz && 1 <= loc.j <= ny && 1 <= loc.i <= nx) || throw(ArgumentError(
         "mish_flat: MishIndex($(loc.k), $(loc.j), $(loc.i)) outside the $(dims) (nz, ny, nx) lattice"))
+    return loc.k + (loc.j - 1) * nz + (loc.i - 1) * nz * ny
+end
+
+"""
+    node_flat(loc::NodeIndex, node_dims::NTuple{3,Int}) -> Int
+
+The k-fastest flat index of `loc` on the `node_dims = (nz, ny, nx)` node
+lattice (`StateVector.node_dims`) — the point index of a node-lattice
+[`MishObsBackend`](@ref). Out-of-range indices throw `ArgumentError`.
+"""
+function node_flat(loc::NodeIndex, dims::NTuple{3,Int})
+    nz, ny, nx = dims
+    (1 <= loc.k <= nz && 1 <= loc.j <= ny && 1 <= loc.i <= nx) || throw(ArgumentError(
+        "node_flat: NodeIndex($(loc.k), $(loc.j), $(loc.i)) outside the $(dims) (nz, ny, nx) node lattice"))
     return loc.k + (loc.j - 1) * nz + (loc.i - 1) * nz * ny
 end
 
@@ -95,7 +126,7 @@ required; the rest have defaults):
 - `obs_value(o) -> Float64`: the observed value.
 - `obs_sigma(o) -> Float64`: its standard deviation (> 0);
   `obs_inverse_variance(o) = 1/σ²` by default.
-- `obs_location(o) -> ObsLocation`: a [`MishIndex`](@ref) or [`XYZ`](@ref).
+- `obs_location(o) -> ObsLocation`: a [`MishIndex`](@ref), [`NodeIndex`](@ref) or [`XYZ`](@ref).
 - `obs_terms(o, state::StateVector) -> Vector{ObsTerm}`: the linear operator
   row (for nonlinear types, the initial linearisation).
 - `obs_kind(o) -> Symbol`: the group label (default: a per-type constant).
@@ -249,19 +280,19 @@ function obs_terms(o::RadialVelocitySuperObs, state::StateVector)
 end
 
 """
-    MassContinuityObs(loc::MishIndex, sigma, dlnrho_dz)
+    MassContinuityObs(loc::Union{MishIndex,NodeIndex}, sigma, dlnrho_dz)
 
-Anelastic mass-continuity pseudo-observation at a mish point: value 0,
+Anelastic mass-continuity pseudo-observation at a mish point or a B-spline node (`loc`): value 0,
 operator `∂u/∂x + ∂v/∂y + ∂w/∂z + w·d(ln ρ̄)/dz` (terms `(u,∂x,1)`,
 `(v,∂y,1)`, `(w,∂z,1)`, and `(w,val,dlnrho_dz)` unless `dlnrho_dz == 0`).
 `sigma` is in s⁻¹ (`[variational] mass_continuity_sigma_per_s`). Requires a
 `:wind_w` state variable. Kind `:mass_continuity`.
 """
 struct MassContinuityObs <: AbstractObservation
-    loc::MishIndex
+    loc::Union{MishIndex,NodeIndex}
     sigma::Float64
     dlnrho_dz::Float64
-    function MassContinuityObs(loc::MishIndex, sigma::Real, dlnrho_dz::Real)
+    function MassContinuityObs(loc::Union{MishIndex,NodeIndex}, sigma::Real, dlnrho_dz::Real)
         _check_value_sigma("MassContinuityObs", 0.0, sigma)
         isfinite(dlnrho_dz) || throw(ArgumentError("MassContinuityObs: dlnrho_dz must be finite"))
         return new(loc, Float64(sigma), Float64(dlnrho_dz))
@@ -428,9 +459,9 @@ function _group_location_type(g::ObsGroup)
     for o in g.obs
         obs_location(o) isa L || throw(ArgumentError(
             "ObsGroup :$(g.kind): mixed location types ($(L) and $(typeof(obs_location(o)))); " *
-            "a group must be all MishIndex or all XYZ"))
+            "a group must be all MishIndex, all NodeIndex or all XYZ"))
     end
-    L <: MishIndex || L <: XYZ || throw(ArgumentError(
+    L <: MishIndex || L <: NodeIndex || L <: XYZ || throw(ArgumentError(
         "ObsGroup :$(g.kind): unsupported location type $(L)"))
     return L
 end
@@ -458,9 +489,11 @@ function _check_nonlinear_group(g::ObsGroup, state::StateVector)
     return sl
 end
 
-function _mish_backend(g::ObsGroup, state::StateVector)
+function _mish_backend(g::ObsGroup, state::StateVector; lattice::Symbol = :mish)
     n = nobs(g)
-    points = [mish_flat(obs_location(o), state.dims) for o in g.obs]
+    dims = (nvars(state), lattice === :nodes ? state.n_nodes : state.n_mish)
+    points = lattice === :nodes ? [node_flat(obs_location(o), state.node_dims) for o in g.obs] :
+                                  [mish_flat(obs_location(o), state.dims) for o in g.obs]
     y = [obs_value(o) for o in g.obs]
     rinv = [obs_inverse_variance(o) for o in g.obs]
     terms = [[_backend_term(t) for t in obs_terms(o, state)] for o in g.obs]
@@ -468,12 +501,15 @@ function _mish_backend(g::ObsGroup, state::StateVector)
     all(o -> is_linear(o) == linear, g.obs) || throw(ArgumentError(
         "ObsGroup :$(g.kind): mixes linear and nonlinear observations"))
     if linear
-        return MishObsBackend(g.kind, (nvars(state), state.n_mish), points, y, rinv, terms)
+        return MishObsBackend(g.kind, dims, points, y, rinv, terms; lattice = lattice)
     end
+    lattice === :mish || throw(ArgumentError(
+        "ObsGroup :$(g.kind): nonlinear observations at NodeIndex locations are not supported " *
+        "(nonlinear observations need MishIndex locations)"))
     sl = _check_nonlinear_group(g, state)
     obs = g.obs
     model = (sample, m) -> (model_value(obs[m], sample, state), linearize(obs[m], sample, state))
-    b = MishObsBackend(g.kind, (nvars(state), state.n_mish), points, y, rinv, terms; model = model)
+    b = MishObsBackend(g.kind, dims, points, y, rinv, terms; model = model)
     b.slots == sl || error("ObsGroup :$(g.kind): backend slot order $(b.slots) != obs_slots $(sl) " *
                            "(internal invariant violated)")
     n == nobs(b) || error("internal: backend size mismatch")
@@ -501,16 +537,19 @@ end
 One backend per non-empty group, in group order: [`MishIndex`](@ref)
 groups → [`MishObsBackend`](@ref) (nonlinear groups get the model hook
 `(sample, m) -> (model_value(obs[m], …), linearize(obs[m], …))`, with the
-backend's slot order checked equal to `obs_slots`); [`XYZ`](@ref) groups →
-[`ScatteredObsBackend`](@ref) on `state_grid` (linear only; nonlinear →
-`ArgumentError`).
+backend's slot order checked equal to `obs_slots`); [`NodeIndex`](@ref)
+groups → [`MishObsBackend`](@ref) with `lattice = :nodes` (linear only);
+[`XYZ`](@ref) groups → [`ScatteredObsBackend`](@ref) on `state_grid` (linear
+only; nonlinear → `ArgumentError`).
 """
 function build_backends(set::ObservationSet, state::StateVector, state_grid)
     out = AbstractObsBackend[]
     for g in set.groups
         nobs(g) == 0 && continue
         L = _group_location_type(g)
-        push!(out, L <: MishIndex ? _mish_backend(g, state) : _scattered_backend(g, state, state_grid))
+        push!(out, L <: MishIndex ? _mish_backend(g, state) :
+                   L <: NodeIndex ? _mish_backend(g, state; lattice = :nodes) :
+                                    _scattered_backend(g, state, state_grid))
     end
     return out
 end

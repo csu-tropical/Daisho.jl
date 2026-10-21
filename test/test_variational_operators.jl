@@ -199,6 +199,71 @@ const _SS_SLOT = (1, 2, 4, 6)
             end
         end
 
+        @testset "Node lattice evaluation" begin
+            ic = templates[:i][1].params.num_cells
+            jc = templates[:j][1].params.num_cells
+            kc = templates[:k][1].params.num_cells
+            En = Daisho.SplineEvaluation(grid, _VAR_NAMES, all_slots; lattice = :nodes)
+            nn = (kc + 1) * (jc + 1) * (ic + 1)
+            @test En.lattice == :nodes && E.lattice == :mish
+            @test Daisho.lattice_dims(En) == (kc + 1, jc + 1, ic + 1)
+            @test Daisho.lattice_dims(E) == (gp.kDim, gp.jDim, gp.iDim)
+            @test size(En) == (12nn, 3nc)
+            @test Daisho.adjoint_relative_error(En; rng = rng) < 1e-12
+            xn = Daisho.node_coordinates(templates[:i][1])
+            yn = Daisho.node_coordinates(templates[:j][1])
+            zn = Daisho.node_coordinates(templates[:k][1])
+            @test xn ≈ collect(LinRange(-2000.0, 2000.0, ic + 1))
+            @test zn[1] == 0.0 && zn[end] == 5000.0
+            # The node axis tables: every node incl. x = xmax has its four
+            # coefficients inside 1:bDim, and the tables match the basis.
+            for (axname, xs) in ((:i, xn), (:j, yn), (:k, zn)), spline in templates[axname]
+                ax = Daisho.AxisSpline(spline; points = xs)
+                @test ax.Dim == length(xs) && all(1 .<= ax.first_coef .<= ax.bDim - 3)
+                M = CubicBSpline.SItransform_matrix(spline, xs, 0)
+                Mt = zeros(ax.Dim, ax.bDim)
+                for i in 1:ax.Dim, s in 1:4
+                    Mt[i, ax.first_coef[i] + s - 1] = ax.Φ0[s, i]
+                end
+                @test Mt ≈ M atol = 1e-14
+                @test_throws DomainError Daisho.AxisSpline(spline; points = [xs[end] + 1.0])
+            end
+            # Parity with Springsteel's regularGridTransform on the node lattice.
+            ar = zeros(3nc)
+            Daisho.apply!(ar, S, randn(rng, 3nm))
+            Daisho.coefficients_to_springsteel_spectral!(grid, ar, _VAR_NAMES)
+            reg = Springsteel.regularGridTransform(grid, xn, yn, zn)
+            yN = zeros(size(En, 1))
+            Daisho.apply!(yN, En, ar)
+            for n in 1:3, s in 1:4
+                k = (n - 1) * 4 + s
+                mine = vec(Daisho.slab_view(yN, En, k))
+                ref = reg[:, gp.vars[_VAR_NAMES[n]], _SS_SLOT[s]]
+                @test _relerr(mine, ref) < 1e-12
+            end
+            @test size(Daisho.slab_view(yN, En, 1)) == (kc + 1, jc + 1, ic + 1)
+            # Partition of unity at every node (boundary nodes included):
+            # unit coefficients give value 1 and zero derivatives.
+            y1 = zeros(size(En, 1))
+            Daisho.apply!(y1, En, ones(3nc))
+            for n in 1:3
+                @test maximum(abs.(Daisho.slab_view(y1, En, (n - 1) * 4 + 1) .- 1.0)) < 1e-12
+                for s in 2:4
+                    @test maximum(abs.(Daisho.slab_view(y1, En, (n - 1) * 4 + s))) < 1e-12
+                end
+            end
+            # Threading determinism on the node lattice.
+            En1 = Daisho.SplineEvaluation(grid, _VAR_NAMES, all_slots; lattice = :nodes, nchunks = 1)
+            y2 = zeros(size(En, 1))
+            Daisho.apply!(y2, En1, ar)
+            @test y2 == yN
+            a1 = zeros(3nc); a2 = zeros(3nc)
+            Daisho.apply_adjoint!(a1, En, yN)
+            Daisho.apply_adjoint!(a2, En1, yN)
+            @test a1 == a2
+            @test_throws ArgumentError Daisho.SplineEvaluation(grid, _VAR_NAMES, all_slots; lattice = :cells)
+        end
+
         @testset "Threading determinism" begin
             nc_multi = max(Threads.nthreads(), 3)
             S1 = Daisho.SplineProjection(grid, _VAR_NAMES; nchunks = 1)

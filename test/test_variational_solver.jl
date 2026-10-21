@@ -228,6 +228,55 @@ _rms(x) = sqrt(sum(abs2, x) / length(x))
     end
 
     # ── 4. Gradient checks ──────────────────────────────────────────────────
+    @testset "Mish + node lattices in one ObsSet" begin
+        rng = MersenneTwister(11)
+        grid = _tiny_grid()
+        gm = Daisho._spline_grid_geometry(grid, _SOLV_VARS)
+        gn = Daisho._spline_grid_geometry(grid, _SOLV_VARS; lattice = :nodes)
+        nm, nn, nc = Daisho._nmish(gm), Daisho._nmish(gn), Daisho._ncoef(gm)
+        @test nn == prod(ax.sp.num_cells + 1 for ax in (gm.axes[1, 1], gm.axes[2, 1], gm.axes[3, 1]))
+        # U value obs at every mish point; continuity at every node.
+        bm = Daisho.MishObsBackend(:value, (3, nm), collect(1:nm), randn(rng, nm), fill(2.0, nm),
+                                   [[(1, 1, 1.0)] for _ in 1:nm])
+        bn = Daisho.MishObsBackend(:mass_continuity, (3, nn), collect(1:nn), zeros(nn), fill(3.0, nn),
+                                   [[(1, 2, 1.0), (2, 3, 1.0), (3, 4, 1.0), (3, 1, -1e-4)] for _ in 1:nn];
+                                   lattice = :nodes)
+        @test bm.lattice == :mish && bn.lattice == :nodes
+        @test_throws ArgumentError Daisho.MishObsBackend(:x, (3, nn), [1], [0.0], [1.0], [[(1, 1, 1.0)]]; lattice = :cells)
+        @test_throws ArgumentError Daisho.MishObsBackend(:x, (3, nn), [1], [0.0], [1.0], [[(1, 1, 1.0)]];
+                                                         lattice = :nodes, model = (s, m) -> (0.0, [1.0]))
+        # A node backend sized for the mish is rejected (and vice versa).
+        @test_throws DimensionMismatch Daisho.ObsSet(grid, _SOLV_VARS, [Daisho.MishObsBackend(:x, (3, nm), [1], [0.0], [1.0], [[(1, 1, 1.0)]]; lattice = :nodes)])
+        for nch in (1, 3)
+            set = Daisho.ObsSet(grid, _SOLV_VARS, Daisho.AbstractObsBackend[bm, bn]; nchunks = nch)
+            @test Daisho.nobs(set) == nm + nn
+            @test set.ev !== nothing && set.ev_nodes !== nothing
+            @test length(set.lattices) == 2 && set.nnodes == nn
+            @test Daisho.adjoint_relative_error(set; rng = rng) < 1e-12
+            # H rows of the node backend equal a direct node-lattice evaluation.
+            a = randn(rng, 3nc)
+            y = zeros(nm + nn)
+            Daisho.apply_H!(y, set, a)
+            En = Daisho.SplineEvaluation(grid, _SOLV_VARS, [(1, 2), (2, 3), (3, 4), (3, 1)]; lattice = :nodes)
+            yn = zeros(size(En, 1))
+            Daisho.apply!(yn, En, a)
+            direct = [yn[q] + yn[nn + q] + yn[2nn + q] - 1e-4 * yn[3nn + q] for q in 1:nn]
+            @test _srelerr(y[nm + 1:end], direct) < 1e-12
+            Em = Daisho.SplineEvaluation(grid, _SOLV_VARS, [(1, 1)])
+            ym = zeros(nm)
+            Daisho.apply!(ym, Em, a)
+            @test _srelerr(y[1:nm], ym) < 1e-12
+            # evaluate! (linear) == apply_H!
+            y2 = zeros(nm + nn)
+            Daisho.evaluate!(y2, set, a)
+            @test y2 == y
+        end
+        # Node-only set: no mish evaluation is built.
+        setn = Daisho.ObsSet(grid, _SOLV_VARS, [bn])
+        @test setn.ev === nothing && setn.ev_nodes !== nothing
+        @test Daisho.adjoint_relative_error(setn; rng = rng) < 1e-12
+    end
+
     @testset "Gradient checks" begin
         rng = MersenneTwister(3)
         grid = _tiny_grid()

@@ -110,9 +110,13 @@ radial_velocity_superobs_count(acc::WindGridAccumulator, state::StateVector, p::
     build_mass_continuity_obs(state::StateVector, reference::AbstractReferenceProfile,
                               p::DaishoParameters) -> ObsGroup{MassContinuityObs}
 
-One [`MassContinuityObs`](@ref) per mish point with σ =
-`[variational] mass_continuity_sigma_per_s` and
-`dlnrho_dz(reference, state.z_mish[k])`; an empty group when
+One [`MassContinuityObs`](@ref) per point of the
+`[variational] mass_continuity_lattice` — the B-spline nodes (`"nodes"`,
+`state.node_dims`, [`NodeIndex`](@ref) locations; samurai's placement and
+the default regular output grid) or every mish point (`"mish"`,
+`state.dims`, [`MishIndex`](@ref) locations) — with σ =
+`[variational] mass_continuity_sigma_per_s` and `dlnrho_dz(reference, z)`
+at the point's altitude; an empty group when
 `[variational] mass_continuity = false`.
 """
 function build_mass_continuity_obs(state::StateVector, reference::AbstractReferenceProfile,
@@ -120,11 +124,23 @@ function build_mass_continuity_obs(state::StateVector, reference::AbstractRefere
     obs = MassContinuityObs[]
     p.variational.mass_continuity || return ObsGroup(:mass_continuity, obs)
     σ = p.variational.mass_continuity_sigma_per_s
-    nz, ny, nx = state.dims
-    dl = [Float64(dlnrho_dz(reference, z)) for z in state.z_mish]
-    sizehint!(obs, state.n_mish)
-    for i in 1:nx, j in 1:ny, k in 1:nz
-        push!(obs, MassContinuityObs(MishIndex(k, j, i), σ, dl[k]))
+    lattice = p.variational.mass_continuity_lattice
+    if lattice == "nodes"
+        nz, ny, nx = state.node_dims
+        dl = [Float64(dlnrho_dz(reference, z)) for z in state.z_nodes]
+        sizehint!(obs, state.n_nodes)
+        for i in 1:nx, j in 1:ny, k in 1:nz
+            push!(obs, MassContinuityObs(NodeIndex(k, j, i), σ, dl[k]))
+        end
+    elseif lattice == "mish"
+        nz, ny, nx = state.dims
+        dl = [Float64(dlnrho_dz(reference, z)) for z in state.z_mish]
+        sizehint!(obs, state.n_mish)
+        for i in 1:nx, j in 1:ny, k in 1:nz
+            push!(obs, MassContinuityObs(MishIndex(k, j, i), σ, dl[k]))
+        end
+    else
+        throw(ArgumentError("build_mass_continuity_obs: unknown mass_continuity_lattice \"$(lattice)\""))
     end
     return ObsGroup(:mass_continuity, obs)
 end

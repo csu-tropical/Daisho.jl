@@ -14,6 +14,8 @@ Daisho.DiagonalScaling
 Daisho.PencilScratch
 Daisho.SplineProjection
 Daisho.SplineEvaluation
+Daisho.lattice_dims
+Daisho.node_coordinates
 Daisho.slab_view
 Daisho.coefficients_to_springsteel_spectral!
 Daisho.sa!
@@ -40,6 +42,7 @@ Daisho.obs_values
 Daisho.obs_rinv
 Daisho.slots_needed
 Daisho.mish_flat
+Daisho.node_flat
 Daisho.IncrementalCostFunction
 Daisho.HessianOperator
 Daisho.hessian_mul!

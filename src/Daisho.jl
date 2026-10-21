@@ -106,7 +106,7 @@ export evaluate_analysis!, solver_options, VarSolverOptions, VarSolverStats
 export StateVector, StateVariable, create_state_grid, state_view, wind_indices
 export AbstractObservation, RadialVelocitySuperObs, MassContinuityObs
 export ScalarValueObs, PointObs, WindSpeedObs, ObsGroup, ObservationSet
-export MishIndex, ObsTerm
+export MishIndex, NodeIndex, ObsTerm
 export build_observation_set, build_radial_velocity_superobs
 export build_mass_continuity_obs, build_scalar_value_obs
 # Stage-1 extensions used by the variational stage (fall speed, gate error)

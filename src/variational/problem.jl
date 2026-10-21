@@ -613,18 +613,22 @@ function evaluate_analysis!(state_grid, r::VariationalResult)
 end
 
 """
-    analysis_derivatives(prob::VariationalProblem, r::VariationalResult)
+    analysis_derivatives(prob::VariationalProblem, r::VariationalResult; lattice = :mish)
         -> Dict{String,NamedTuple{(:value, :dx, :dy, :dz)}}
 
 The analysis value and first derivatives `∂/∂x, ∂/∂y, ∂/∂z` (per metre) of
-every state variable on the mish, each `(nz, ny, nx)`, from one
-[`SplineEvaluation`](@ref) pass over all four slots of every variable.
+every state variable on the mish (`lattice = :mish`, each `(nz, ny, nx)` =
+`prob.state.dims`) or on the B-spline nodes (`lattice = :nodes`, each
+`prob.state.node_dims`), from one [`SplineEvaluation`](@ref) pass over all
+four slots of every variable.
 """
-function analysis_derivatives(prob::VariationalProblem, r::VariationalResult)
+function analysis_derivatives(prob::VariationalProblem, r::VariationalResult;
+                              lattice::Symbol = :mish)
     state = prob.state
     names = variable_names(state)
     nv = nvars(state)
-    E = SplineEvaluation(prob.state_grid, names, [(v, s) for v in 1:nv for s in 1:4])
+    E = SplineEvaluation(prob.state_grid, names, [(v, s) for v in 1:nv for s in 1:4];
+                         lattice = lattice)
     y = zeros(size(E, 1))
     apply!(y, E, r.coefficients)
     out = Dict{String,NamedTuple{(:value, :dx, :dy, :dz),NTuple{4,Array{Float64,3}}}}()
@@ -643,40 +647,51 @@ function _wind_derivatives(prob::VariationalProblem, der)
 end
 
 """
-    horizontal_divergence(prob, r; derivatives = analysis_derivatives(prob, r)) -> Array{Float64,3}
+    horizontal_divergence(prob, r; lattice = :mish,
+                          derivatives = analysis_derivatives(prob, r; lattice)) -> Array{Float64,3}
 
-`∂u/∂x + ∂v/∂y` of the analysis on the mish (`:wind_u`/`:wind_v` roles).
+`∂u/∂x + ∂v/∂y` of the analysis on the mish or (`lattice = :nodes`) the
+B-spline nodes (`:wind_u`/`:wind_v` roles).
 """
 function horizontal_divergence(prob::VariationalProblem, r::VariationalResult;
-                               derivatives = analysis_derivatives(prob, r))
+                               lattice::Symbol = :mish,
+                               derivatives = analysis_derivatives(prob, r; lattice = lattice))
     du, dv, _ = _wind_derivatives(prob, derivatives)
     return du.dx .+ dv.dy
 end
 
 """
-    vertical_vorticity(prob, r; derivatives = analysis_derivatives(prob, r)) -> Array{Float64,3}
+    vertical_vorticity(prob, r; lattice = :mish,
+                       derivatives = analysis_derivatives(prob, r; lattice)) -> Array{Float64,3}
 
-`∂v/∂x − ∂u/∂y` of the analysis on the mish.
+`∂v/∂x − ∂u/∂y` of the analysis on the mish or (`lattice = :nodes`) the
+B-spline nodes.
 """
 function vertical_vorticity(prob::VariationalProblem, r::VariationalResult;
-                            derivatives = analysis_derivatives(prob, r))
+                            lattice::Symbol = :mish,
+                            derivatives = analysis_derivatives(prob, r; lattice = lattice))
     du, dv, _ = _wind_derivatives(prob, derivatives)
     return dv.dx .- du.dy
 end
 
 """
-    mass_continuity_residual(prob, r; derivatives = analysis_derivatives(prob, r)) -> Array{Float64,3}
+    mass_continuity_residual(prob, r; lattice = :mish,
+                             derivatives = analysis_derivatives(prob, r; lattice)) -> Array{Float64,3}
 
-The anelastic mass-continuity residual of the analysis on the mish,
+The anelastic mass-continuity residual of the analysis,
 `∂u/∂x + ∂v/∂y + ∂w/∂z + w·d(ln ρ̄)/dz` (s⁻¹), with ρ̄ from
-`prob.reference`. Requires a `:wind_w` state variable (`ArgumentError`
-otherwise).
+`prob.reference`, on the mish (`lattice = :mish`, `prob.state.dims`) or on
+the B-spline nodes (`lattice = :nodes`, `prob.state.node_dims` — where
+`mass_continuity_lattice = "nodes"` enforces it). Requires a `:wind_w`
+state variable (`ArgumentError` otherwise).
 """
 function mass_continuity_residual(prob::VariationalProblem, r::VariationalResult;
-                                  derivatives = analysis_derivatives(prob, r))
+                                  lattice::Symbol = :mish,
+                                  derivatives = analysis_derivatives(prob, r; lattice = lattice))
     du, dv, dw = _wind_derivatives(prob, derivatives)
     dw === nothing && throw(ArgumentError(
         "mass_continuity_residual: the state has no `wind_w` variable"))
-    dl = [Float64(dlnrho_dz(prob.reference, z)) for z in prob.state.z_mish]
+    zs = lattice === :nodes ? prob.state.z_nodes : prob.state.z_mish
+    dl = [Float64(dlnrho_dz(prob.reference, z)) for z in zs]
     return du.dx .+ dv.dy .+ dw.dz .+ dw.value .* reshape(dl, :, 1, 1)
 end

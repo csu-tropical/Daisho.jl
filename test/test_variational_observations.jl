@@ -225,15 +225,24 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
     @testset "Mass continuity" begin
         ref = Daisho.ExponentialReferenceProfile(1.2, 8500.0, NaN, NaN)
         grp = Daisho.build_mass_continuity_obs(state, ref, p)
+        @test p.variational.mass_continuity_lattice == "nodes"
         @test grp isa Daisho.ObsGroup{Daisho.MassContinuityObs}
         @test grp.kind == :mass_continuity
-        @test Daisho.nobs(grp) == state.n_mish
+        # Default lattice: the B-spline nodes (cells + 1 per axis).
+        @test state.node_dims == (3 + 1, 4 + 1, 4 + 1)
+        @test state.n_nodes == prod(state.node_dims)
+        @test Daisho.nobs(grp) == state.n_nodes
+        @test all(o -> o.loc isa Daisho.NodeIndex, grp.obs)
         @test all(o -> Daisho.obs_value(o) == 0.0, grp.obs)
         @test all(o -> Daisho.obs_sigma(o) == p.variational.mass_continuity_sigma_per_s, grp.obs)
         # Analytic anelastic field: u = −(x/2)(w' + w·dlnρ), v = −(y/2)(…).
+        @test state.z_nodes ≈ collect(LinRange(0.0, 3000.0, 4))
         H = 8500.0; Htop = 3000.0; w0 = 5.0
         dl = -1 / H
-        xs = spec.x_axis; ys = spec.y_axis; zs = state.z_mish
+        xs = Daisho.node_coordinates(sgrid.ibasis.data[1, 1, 1])
+        ys = Daisho.node_coordinates(sgrid.jbasis.data[1, 1, 1])
+        zs = state.z_nodes
+        @test xs ≈ collect(LinRange(0.0, 4000.0, 5))
         maxres = 0.0
         for o in grp.obs[rand(rng, 1:length(grp.obs), 12)]
             k, j, i = o.loc.k, o.loc.j, o.loc.i
@@ -246,10 +255,35 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
             @test o.dlnrho_dz == dl
         end
         @test maxres < 1e-12
-        # dlnρ = 0 drops the w value term.
+        # NodeIndex flat indexing (k fastest on node_dims).
+        nzn, nyn, nxn = state.node_dims
+        @test Daisho.node_flat(Daisho.NodeIndex(1, 1, 1), state.node_dims) == 1
+        @test Daisho.node_flat(Daisho.NodeIndex(2, 3, 4), state.node_dims) == 2 + 2nzn + 3nzn * nyn
+        @test Daisho.node_flat(Daisho.NodeIndex(nzn, nyn, nxn), state.node_dims) == state.n_nodes
+        @test_throws ArgumentError Daisho.node_flat(Daisho.NodeIndex(nzn + 1, 1, 1), state.node_dims)
+        @test_throws ArgumentError Daisho.node_flat(Daisho.NodeIndex(1, 0, 1), state.node_dims)
+        # Node groups become node-lattice MishObsBackends.
+        bk = Daisho.build_backends(Daisho.ObservationSet([grp]), state, state_grid)
+        @test length(bk) == 1 && bk[1] isa Daisho.MishObsBackend
+        @test bk[1].lattice == :nodes && bk[1].nmish == state.n_nodes
+        @test Daisho.nobs(bk[1]) == state.n_nodes
+        # The "mish" lattice: one constraint per quadrature point.
+        pm = _obs_load(b -> (b["variational"]["mass_continuity_lattice"] = "mish"))
+        gm = Daisho.build_mass_continuity_obs(state, ref, pm)
+        @test Daisho.nobs(gm) == state.n_mish
+        @test all(o -> o.loc isa Daisho.MishIndex, gm.obs)
+        bm = Daisho.build_backends(Daisho.ObservationSet([gm]), state, state_grid)
+        @test bm[1].lattice == :mish && bm[1].nmish == state.n_mish
+        # A group may not mix the two lattices.
+        mixed = Daisho.ObsGroup(:mass_continuity, [grp.obs[1], gm.obs[1]])
+        @test_throws ArgumentError Daisho.build_backends(Daisho.ObservationSet([mixed]), state, state_grid)
+        # dlnρ = 0 drops the w value term (either location type).
         o0 = Daisho.MassContinuityObs(Daisho.MishIndex(1, 1, 1), 1e-4, 0.0)
         @test length(Daisho.obs_terms(o0, state)) == 3
         # Disabled → empty; state without W → error.
+        on = Daisho.MassContinuityObs(Daisho.NodeIndex(1, 1, 1), 1e-4, 0.0)
+        @test length(Daisho.obs_terms(on, state)) == 3
+        @test Daisho.obs_location(on) == Daisho.NodeIndex(1, 1, 1)
         pmc = _obs_load(b -> (b["variational"]["mass_continuity"] = false))
         @test Daisho.nobs(Daisho.build_mass_continuity_obs(state, ref, pmc)) == 0
         pnw = _obs_load(; state = ["U", "V"]) do b
@@ -416,7 +450,7 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
         end
         oset = Daisho.build_observation_set(acc, nothing, st, ref, pe)
         @test Daisho.kinds(oset) == [:radial_velocity, :mass_continuity]
-        @test Daisho.nobs(oset.groups[2]) == st.n_mish
+        @test Daisho.nobs(oset.groups[2]) == st.n_nodes
         @test Daisho.nobs(oset.groups[1]) == 3 * st.n_mish
         obsset = Daisho.build_obsset(oset, st, stg)
         names = Daisho.variable_names(st)

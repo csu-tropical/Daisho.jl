@@ -29,8 +29,9 @@ function _solve_load(mutate! = identity)
         "state" => ["U", "V", "W"],
         "background" => "zero",
         "mass_continuity_sigma_per_s" => 1.0e-4,
-        # The weak-background (inflation 10) solves below need ≈ 3.8k–5.3k
-        # CG iterations; the others ≈ 0.6k.
+        # The weak-background (inflation 10) solves below need ≈ 2.2k–3.7k
+        # CG iterations with continuity at the nodes (3.8k–5.3k on the mish);
+        # the others ≈ 0.3k.
         "max_inner_iterations" => 10000,
         "inner_tolerance" => 1.0e-6,
         # Filter lengths ≈ 1 cell (4 km horizontal, 1 km vertical) and the
@@ -154,11 +155,21 @@ end
         eW = maximum(abs.(Wa[ok .| filled]))
         @test eW < 0.5
         mc = Daisho.mass_continuity_residual(prob, r)
+        # Continuity is enforced at the nodes (the default lattice): the
+        # residual there is at the solver tolerance; on the mish, between the
+        # constraint points, it is only as small as the spline makes it.
+        @test p.variational.mass_continuity_lattice == "nodes"
+        @test Daisho.nobs(prob.observations.groups[2]) == state.n_nodes
+        mcn = Daisho.mass_continuity_residual(prob, r; lattice = :nodes)
+        @test size(mcn) == state.node_dims
+        mcn_rms = sqrt(sum(abs2, mcn) / length(mcn))
+        @test mcn_rms < 1e-5
         mc_rms = sqrt(sum(abs2, mc) / length(mc))
-        @test mc_rms < 1e-5
+        @test size(mc) == state.dims
+        @test mc_rms < 1e-4
         @test Set(keys(r.cost_by_group)) == Set([:radial_velocity, :mass_continuity])
         @test all(>=(0.0), values(r.cost_by_group))
-        @info "Phase 9 zero-background solve" cg = repr(r.stats.inner_iterations) solve_seconds = t_solve max_err_U_ok = eU_ok max_err_V_ok = eV_ok n_filled = nfill n_filled_singular = nsing max_err_U_filled = eU_f max_err_V_filled = eV_f max_abs_W = eW mc_rms = mc_rms cost_by_group = repr(r.cost_by_group)
+        @info "Phase 9 zero-background solve" cg = repr(r.stats.inner_iterations) solve_seconds = t_solve max_err_U_ok = eU_ok max_err_V_ok = eV_ok n_filled = nfill n_filled_singular = nsing max_err_U_filled = eU_f max_err_V_filled = eV_f max_abs_W = eW mc_rms_nodes = mcn_rms mc_rms_mish = mc_rms cost_by_group = repr(r.cost_by_group)
     end
 
     @testset "evaluate_analysis! parity and derivative diagnostics" begin
@@ -277,8 +288,14 @@ end
         Ui = Daisho.analysis_field(r_inf, "U"); Vi = Daisho.analysis_field(r_inf, "V")
         d_inf = max(maxdiff(Ui, Ua, obs_region), maxdiff(Vi, Va, obs_region))
         e_inf = max(maxdiff(Ui, Ut, obs_region), maxdiff(Vi, Vt, obs_region))
-        @test d_inf < 0.3     # measured 0.24
-        @test e_inf < 0.3     # measured 0.11
+        # 2026-10-20, continuity at the nodes (one constraint per cell instead
+        # of 27 on the mish): the weaker coupling lets the prior matter more
+        # at the data edges, so the two analyses differ by 0.36 m/s (was 0.24
+        # with mish continuity) while BOTH move closer to the truth (0.15 m/s
+        # here vs 0.26 for the zero background at filled points). CG: 2.2k
+        # iterations (was 3.8k).
+        @test d_inf < 0.45    # measured 0.36 (nodes), 0.24 (mish)
+        @test e_inf < 0.3     # measured 0.15 (nodes), 0.11 (mish)
         @info "Phase 9b synthesis background" build_seconds = t_bg fit_max_err_U = fitU fit_max_err_V = fitV max_jump_U = jU max_jump_V = jV sigma_U_range = extrema(su) sigma_jump_smoothed = maxjump(su) sigma_jump_raw = maxjump(rawc) inflation1_max_err = e1 inflation10_max_diff_vs_zero = d_inf inflation10_max_err = e_inf cg_1 = repr(r1.stats.inner_iterations) cg_inf = repr(r_inf.stats.inner_iterations)
     end
 
@@ -308,8 +325,8 @@ end
         Ui = Daisho.analysis_field(r_inf, "U"); Vi = Daisho.analysis_field(r_inf, "V")
         d_inf = max(maxdiff(Ui, Ua, obs_region), maxdiff(Vi, Va, obs_region))
         e_inf = max(maxdiff(Ui, Ut, obs_region), maxdiff(Vi, Vt, obs_region))
-        @test d_inf < 0.3     # measured 0.26
-        @test e_inf < 0.3     # measured 0.13
+        @test d_inf < 0.45    # measured 0.38 (nodes, see the note above), 0.26 (mish)
+        @test e_inf < 0.3     # measured 0.17 (nodes), 0.13 (mish)
         @info "Phase 9b synthesis_uniform_sigma background" inflation1_max_err = e1 inflation10_max_diff_vs_zero = d_inf inflation10_max_err = e_inf cg_inf = repr(r_inf.stats.inner_iterations)
     end
 

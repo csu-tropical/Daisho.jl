@@ -254,6 +254,10 @@ The configured control-variable composition: an ordered list of
   `v`.
 - `z_mish::Vector{Float64}`: vertical mish coordinates (length `dims[1]`),
   ascending, shared by every `(i, j)` column of the grid.
+- `node_dims::NTuple{3,Int}`: `(nz, ny, nx)` of the B-spline node lattice
+  (`cells .+ 1` per axis — the default regular output grid and the
+  `mass_continuity_lattice = "nodes"` constraint points); `n_nodes` its
+  size; `z_nodes` the vertical node coordinates (length `node_dims[1]`).
 
 See also: [`state_view`](@ref), [`wind_indices`](@ref), [`has_role`](@ref),
 [`role_index`](@ref), [`filter_lengths_m`](@ref),
@@ -267,6 +271,9 @@ struct StateVector
     index::Dict{String,Int}
     roles::Dict{Symbol,Int}
     z_mish::Vector{Float64}
+    node_dims::NTuple{3,Int}
+    n_nodes::Int
+    z_nodes::Vector{Float64}
 end
 
 """
@@ -292,6 +299,11 @@ function StateVector(p::DaishoParameters, sgrid::RRR_Grid;
         "StateVector: grid k mish length $(length(z_mish)) != kDim $(dims[1])"))
     issorted(z_mish) || throw(ArgumentError(
         "StateVector: grid k mish points are not ascending"))
+    node_dims = (sgrid.kbasis.data[1, 1, 1].params.num_cells + 1,
+                 sgrid.jbasis.data[1, 1, 1].params.num_cells + 1,
+                 sgrid.ibasis.data[1, 1, 1].params.num_cells + 1)
+    n_nodes = node_dims[1] * node_dims[2] * node_dims[3]
+    z_nodes = node_coordinates(sgrid.kbasis.data[1, 1, 1])
 
     vars = Vector{StateVariable}(undef, length(names))
     index = Dict{String,Int}()
@@ -346,7 +358,7 @@ function StateVector(p::DaishoParameters, sgrid::RRR_Grid;
         "role `wind_w`."))
 
     offsets = [(v - 1) * n_mish for v in 1:length(vars)]
-    return StateVector(vars, dims, n_mish, offsets, index, roles, z_mish)
+    return StateVector(vars, dims, n_mish, offsets, index, roles, z_mish, node_dims, n_nodes, z_nodes)
 end
 
 _state_range(s::StateVector, v::Int) = (s.offsets[v] + 1):(s.offsets[v] + s.n_mish)

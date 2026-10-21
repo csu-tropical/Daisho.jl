@@ -12,14 +12,20 @@
 const _SC = Springsteel.CubicBSpline
 
 """
-    AxisSpline(spline::Springsteel.CubicBSpline.Spline1D)
+    AxisSpline(spline::Springsteel.CubicBSpline.Spline1D; points = nothing)
 
 Read-only, allocation-free 1-D cubic B-spline tables for one axis of one
 variable, built from a template `Spline1D` of a Springsteel grid. Holds, per
-mish point `i`, the first of the four coefficient indices with support
+evaluation point `i`, the first of the four coefficient indices with support
 (`first_coef[i]`), the basis values `Φ0[s, i]` and first derivatives
 `Φ1[s, i]` (`s = 1:4`), the SB quadrature weights `w`, and shared references
 to the spline's Γ (`γ`), `(Γ(P+Q)Γᵀ)` factor, and full `(P+Q)` matrix (`pq`).
+
+By default the evaluation points are the spline's mish (quadrature) points.
+`points` (any coordinates inside `[xmin, xmax]`, e.g.
+[`node_coordinates`](@ref)) builds the tables at those locations instead;
+such an axis supports [`eval!`](@ref)/[`scatter!`](@ref) (evaluation and its
+adjoint) but not the quadrature transforms (`w` is zero).
 
 Throws `ArgumentError` for inhomogeneous boundary conditions (R3X, R1T1X),
 whose boundary data live in `ahat` and are not supported by the variational
@@ -42,37 +48,64 @@ struct AxisSpline
     mishPoints::Vector{Float64}
 end
 
-function AxisSpline(spline::_SC.Spline1D)
+function AxisSpline(spline::_SC.Spline1D;
+                    points::Union{Nothing,AbstractVector{<:Real}} = nothing)
     sp = spline.params
     _SC._has_ahat(sp) && throw(ArgumentError(
         "AxisSpline: inhomogeneous boundary conditions (R3X / R1T1X, BCL=$(sp.BCL), " *
         "BCR=$(sp.BCR)) carry boundary data in `ahat` and are not supported by the " *
         "variational spline operators"))
-    Dim = sp.mishDim
     bDim = sp.bDim
-    mubar = sp.mubar
-    length(spline.mishPoints) == Dim || throw(DimensionMismatch(
-        "AxisSpline: spline has $(length(spline.mishPoints)) mish points, expected $(Dim)"))
+    if points === nothing
+        Dim = sp.mishDim
+        mubar = sp.mubar
+        length(spline.mishPoints) == Dim || throw(DimensionMismatch(
+            "AxisSpline: spline has $(length(spline.mishPoints)) mish points, expected $(Dim)"))
+        pts = Vector{Float64}(spline.mishPoints)
+    else
+        Dim = length(points)
+        Dim >= 1 || throw(ArgumentError("AxisSpline: `points` must be non-empty"))
+        mubar = 0
+        pts = Vector{Float64}(points)
+    end
     first_coef = Vector{Int32}(undef, Dim)
     Φ0 = zeros(4, Dim)
     Φ1 = zeros(4, Dim)
     w = zeros(Dim)
     for i in 1:Dim
-        mc = (i - 1) ÷ mubar          # 0-based cell
-        mu = (i - 1) % mubar + 1      # quadrature point within the cell
-        x = spline.mishPoints[i]
+        x = pts[i]
+        if points === nothing
+            mc = (i - 1) ÷ mubar          # 0-based cell
+            mu = (i - 1) % mubar + 1      # quadrature point within the cell
+            w[i] = sp.DX * spline.quadweights[mu]
+        else
+            (sp.xmin <= x <= sp.xmax) || throw(DomainError(x,
+                "AxisSpline: point $(i) lies outside the spline domain [$(sp.xmin), $(sp.xmax)]"))
+            # The last node (x == xmax) belongs to the final cell, so its four
+            # coefficients stay inside 1:bDim.
+            mc = min(floor(Int, (x - sp.xmin) * sp.DXrecip), sp.num_cells - 1)
+        end
         first_coef[i] = mc + 1        # coefficient index of node m = mc - 1
         for s in 1:4
             m = mc + s - 2
             Φ0[s, i] = _SC.basis(sp, m, x, 0)
             Φ1[s, i] = _SC.basis(sp, m, x, 1)
         end
-        w[i] = sp.DX * spline.quadweights[mu]
     end
     γ = spline.gammaBC
     return AxisSpline(sp, Dim, bDim, size(γ, 1), first_coef, Φ0, Φ1, w, γ,
-                      spline.pqFactor, spline.pq, Vector{Float64}(spline.mishPoints))
+                      spline.pqFactor, spline.pq, pts)
 end
+
+"""
+    node_coordinates(spline::Spline1D) -> Vector{Float64}
+
+The B-spline node (cell-edge) coordinates of a Springsteel axis,
+`LinRange(xmin, xmax, num_cells + 1)` — the `:nodes` evaluation lattice of
+[`SplineEvaluation`](@ref) and the default regular output grid.
+"""
+node_coordinates(spline::_SC.Spline1D) =
+    collect(LinRange(spline.params.xmin, spline.params.xmax, spline.params.num_cells + 1))
 
 """
     eval!(u, ax::AxisSpline, a, Φ) -> u
@@ -202,6 +235,9 @@ struct _PQKernel; ax::AxisSpline; end
 
 # Dimensions of an RRR state grid plus the per-(axis, var) AxisSplines.
 # axes[1, v] = k-axis, axes[2, v] = j-axis, axes[3, v] = i-axis (sweep order).
+# `iDim/jDim/kDim` are the EVALUATION lattice sizes: the mish (`lattice =
+# :mish`, the grid's quadrature points) or the B-spline nodes (`:nodes`,
+# `cells + 1` per axis); the coefficient sizes `b_*` are the same for both.
 struct _SplineGridGeometry
     iDim::Int; jDim::Int; kDim::Int
     b_iDim::Int; b_jDim::Int; b_kDim::Int
@@ -209,7 +245,10 @@ struct _SplineGridGeometry
     axes::Matrix{AxisSpline}
 end
 
-function _spline_grid_geometry(grid, varnames::AbstractVector{<:AbstractString})
+function _spline_grid_geometry(grid, varnames::AbstractVector{<:AbstractString};
+                               lattice::Symbol = :mish)
+    lattice in (:mish, :nodes) || throw(ArgumentError(
+        "variational spline operators: lattice must be :mish or :nodes, got :$(lattice)"))
     gp = grid.params
     gp.geometry == "RRR" || throw(ArgumentError(
         "variational spline operators need an RRR Springsteel grid, got geometry $(gp.geometry)"))
@@ -223,20 +262,24 @@ function _spline_grid_geometry(grid, varnames::AbstractVector{<:AbstractString})
     end
     nv = length(varnames)
     axes = Matrix{AxisSpline}(undef, 3, nv)
+    mk(spline) = lattice === :mish ? AxisSpline(spline) :
+                                     AxisSpline(spline; points = node_coordinates(spline))
     for (v, col) in enumerate(columns)
-        axes[1, v] = AxisSpline(grid.kbasis.data[1, 1, col])
-        axes[2, v] = AxisSpline(grid.jbasis.data[1, 1, col])
-        axes[3, v] = AxisSpline(grid.ibasis.data[1, 1, col])
-        (axes[1, v].Dim, axes[1, v].bDim) == (gp.kDim, gp.b_kDim) &&
-        (axes[2, v].Dim, axes[2, v].bDim) == (gp.jDim, gp.b_jDim) &&
-        (axes[3, v].Dim, axes[3, v].bDim) == (gp.iDim, gp.b_iDim) || throw(DimensionMismatch(
+        axes[1, v] = mk(grid.kbasis.data[1, 1, col])
+        axes[2, v] = mk(grid.jbasis.data[1, 1, col])
+        axes[3, v] = mk(grid.ibasis.data[1, 1, col])
+        (axes[1, v].bDim, axes[2, v].bDim, axes[3, v].bDim) == (gp.b_kDim, gp.b_jDim, gp.b_iDim) &&
+        (lattice === :nodes || (axes[1, v].Dim, axes[2, v].Dim, axes[3, v].Dim) == (gp.kDim, gp.jDim, gp.iDim)) &&
+        (axes[1, v].Dim, axes[2, v].Dim, axes[3, v].Dim) == (axes[1, 1].Dim, axes[2, 1].Dim, axes[3, 1].Dim) ||
+            throw(DimensionMismatch(
             "variational spline operators: template spline sizes for `$(varnames[v])` disagree with the grid"))
     end
-    return _SplineGridGeometry(gp.iDim, gp.jDim, gp.kDim, gp.b_iDim, gp.b_jDim, gp.b_kDim,
-                               columns, axes)
+    return _SplineGridGeometry(axes[3, 1].Dim, axes[2, 1].Dim, axes[1, 1].Dim,
+                               gp.b_iDim, gp.b_jDim, gp.b_kDim, columns, axes)
 end
 
-_nmish(g::_SplineGridGeometry) = g.iDim * g.jDim * g.kDim
+_nmish(g::_SplineGridGeometry) = g.iDim * g.jDim * g.kDim   # lattice points (mish or nodes)
+const _npoints = _nmish
 _ncoef(g::_SplineGridGeometry) = g.b_iDim * g.b_jDim * g.b_kDim
 _nvars(g::_SplineGridGeometry) = size(g.axes, 2)
 
@@ -325,20 +368,29 @@ end
 
 """
     SplineEvaluation(grid, varnames::Vector{String}, slots::Vector{Tuple{Int,Int}};
-                     nchunks = Threads.nthreads())
+                     lattice = :mish, nchunks = Threads.nthreads())
 
 Tensor-product spline evaluation from a variable-major coefficient vector (as
 produced by [`SplineProjection`](@ref) for the same `varnames`) to the
-requested `(var_index, slot)` mish slabs, concatenated in the order given
-(each slab has `iDim·jDim·kDim` entries in the mish layout). `var_index`
-indexes `varnames`; `slot` is `1 = value, 2 = ∂/∂i (x), 3 = ∂/∂j (y),
-4 = ∂/∂k (z)`. `apply_adjoint!` scatters the slabs back through the same
-branches and accumulates into the (zeroed) coefficient vector.
+requested `(var_index, slot)` slabs on the evaluation `lattice`,
+concatenated in the order given. `var_index` indexes `varnames`; `slot` is
+`1 = value, 2 = ∂/∂i (x), 3 = ∂/∂j (y), 4 = ∂/∂k (z)`. `apply_adjoint!`
+scatters the slabs back through the same branches and accumulates into the
+(zeroed) coefficient vector.
+
+`lattice = :mish` evaluates at the grid's quadrature points (each slab has
+`iDim·jDim·kDim` entries in the mish layout, k fastest); `lattice = :nodes`
+evaluates at the B-spline nodes `LinRange(min, max, cells + 1)` of every
+axis ([`node_coordinates`](@ref); `(cells_k+1)·(cells_j+1)·(cells_i+1)`
+entries per slab, same k-fastest layout) — the default regular output grid
+and the mass-continuity lattice of `mass_continuity_lattice = "nodes"`.
+[`lattice_dims`](@ref) gives the slab shape.
 
 See also: [`slab_view`](@ref)
 """
 struct SplineEvaluation <: AbstractLinearOp
     geom::_SplineGridGeometry
+    lattice::Symbol
     slots::Vector{Tuple{Int,Int}}
     slotpos::Matrix{Int}      # (4, nvars): slab index of (slot, var), 0 if not requested
     A0::Vector{Float64}       # (b_kDim, b_jDim, iDim)  i-axis value branch
@@ -352,8 +404,8 @@ end
 
 function SplineEvaluation(grid, varnames::AbstractVector{<:AbstractString},
                           slots::AbstractVector{<:Tuple{Integer,Integer}};
-                          nchunks::Integer = Threads.nthreads())
-    g = _spline_grid_geometry(grid, varnames)
+                          lattice::Symbol = :mish, nchunks::Integer = Threads.nthreads())
+    g = _spline_grid_geometry(grid, varnames; lattice = lattice)
     nv = _nvars(g)
     isempty(slots) && throw(ArgumentError("SplineEvaluation: no slots requested"))
     slotpos = zeros(Int, 4, nv)
@@ -369,12 +421,20 @@ function SplineEvaluation(grid, varnames::AbstractVector{<:AbstractString},
     nA = g.b_kDim * g.b_jDim * g.iDim
     nB = g.b_kDim * g.jDim * g.iDim
     nT = max(nA, nB, _ncoef(g))
-    return SplineEvaluation(g, [(Int(v), Int(s)) for (v, s) in slots], slotpos,
+    return SplineEvaluation(g, lattice, [(Int(v), Int(s)) for (v, s) in slots], slotpos,
                             zeros(nA), zeros(nA), zeros(nB), zeros(nB), zeros(nB),
                             zeros(nT), _geometry_pool(g, nchunks))
 end
 
 Base.size(E::SplineEvaluation) = (length(E.slots) * _nmish(E.geom), _nvars(E.geom) * _ncoef(E.geom))
+
+"""
+    lattice_dims(E::SplineEvaluation) -> (nk, nj, ni)
+
+The `(kDim, jDim, iDim)` shape of one slab of `E` (the mish dims, or
+`cells .+ 1` for `lattice = :nodes`).
+"""
+lattice_dims(E::SplineEvaluation) = (E.geom.kDim, E.geom.jDim, E.geom.iDim)
 
 """
     slab_view(y, E::SplineEvaluation, k) -> AbstractArray{Float64,3}
