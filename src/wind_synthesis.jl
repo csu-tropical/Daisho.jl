@@ -575,6 +575,53 @@ const QFLAG_SIGMA2   = Int8(0x02)
 const QFLAG_SINGULAR = Int8(0x04)
 const QFLAG_NODATA   = Int8(0x08)
 
+"""
+    QFLAG_MEANINGS
+
+The `QFLAG` bits in CF `flag_masks` order, as `(flag_meaning, bit)` pairs:
+`("sigma1_above_threshold", QFLAG_SIGMA1)`, `("sigma2_above_threshold",
+QFLAG_SIGMA2)`, `("singular_geometry", QFLAG_SINGULAR)`, `("no_data",
+QFLAG_NODATA)`. The meanings are the vocabulary of
+`[variational] mask_quality_flags`; [`qflag_bits`](@ref) converts a list
+of them to a bit mask.
+"""
+const QFLAG_MEANINGS = (("sigma1_above_threshold", QFLAG_SIGMA1),
+                        ("sigma2_above_threshold", QFLAG_SIGMA2),
+                        ("singular_geometry", QFLAG_SINGULAR),
+                        ("no_data", QFLAG_NODATA))
+
+"""
+    qflag_bits(meanings) -> Int8
+
+Bitwise OR of the `QFLAG` bits named by `meanings` (entries of
+[`QFLAG_MEANINGS`](@ref)); `Int8(0)` for an empty list. Unknown names throw
+`ArgumentError`.
+"""
+function qflag_bits(meanings)
+    bits = Int8(0)
+    for m in meanings
+        k = findfirst(x -> x[1] == String(m), QFLAG_MEANINGS)
+        k === nothing && throw(ArgumentError(
+            "qflag_bits: \"$(m)\" is not a QFLAG meaning; allowed: " *
+            join(("\"$(x[1])\"" for x in QFLAG_MEANINGS), ", ")))
+        bits |= QFLAG_MEANINGS[k][2]
+    end
+    return bits
+end
+
+# CF attributes of the bitwise QFLAG variable (shared by the stage-1 and
+# variational writers); `extra` pairs are appended.
+function _qflag_attrs(extra::Pair{String,<:Any}...)
+    a = OrderedDict{String,Any}(
+        "long_name" => "Quality flag (bitwise)",
+        "flag_masks" => Int8[b for (_, b) in QFLAG_MEANINGS],
+        "flag_meanings" => join((m for (m, _) in QFLAG_MEANINGS), " "))
+    for (k, v) in extra
+        a[k] = v
+    end
+    return a
+end
+
 # ── Streaming accumulation ───────────────────────────────────────────────────
 
 # Fill the per-gate Cartesian coefficient vector `g` from effective angles.
@@ -940,7 +987,8 @@ end
 function _write_wind_data_vars!(ds, out::SynthesisOutput;
                                 dims::Tuple{Vararg{String}} = ("X", "Y", "Z", "time"),
                                 component_suffix::AbstractString = "",
-                                coordinates::Union{Nothing,AbstractString} = "longitude latitude")
+                                coordinates::Union{Nothing,AbstractString} = "longitude latitude",
+                                qflag_name::AbstractString = "QFLAG")
     _xyz(A) = permutedims(A, (3, 2, 1))
     c1, c2 = out.component_names
     s1, s2 = c1 * "STD", c2 * "STD"
@@ -974,11 +1022,8 @@ function _write_wind_data_vars!(ds, out::SynthesisOutput;
     _put!(defVar(ds, "NGATES", Int32, dims; attrib = _common(OrderedDict{String,Any}(
         "long_name" => "Number of contributing gates"))), _xyz(out.n_gates))
 
-    _put!(defVar(ds, "QFLAG", Int8, dims; attrib = _common(OrderedDict{String,Any}(
-        "long_name" => "Quality flag (bitwise)",
-        "flag_masks" => Int8[QFLAG_SIGMA1, QFLAG_SIGMA2, QFLAG_SINGULAR, QFLAG_NODATA],
-        "flag_meanings" => "sigma1_above_threshold sigma2_above_threshold " *
-                           "singular_geometry no_data"))), _xyz(out.quality_flag))
+    _put!(defVar(ds, qflag_name, Int8, dims; attrib = _common(_qflag_attrs())),
+          _xyz(out.quality_flag))
     return ds
 end
 

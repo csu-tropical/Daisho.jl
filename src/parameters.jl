@@ -650,6 +650,27 @@ const VARIATIONAL_BACKGROUND_VOCAB = ("zero", "synthesis", "synthesis_uniform_si
                                       "synthesis_profile")
 
 """
+    VARIATIONAL_CONTINUITY_LATTICE_VOCAB
+
+Allowed values of `[variational] mass_continuity_lattice`: `"nodes"` (the
+B-spline nodes `x = xmin + n·DX`, `n = 0:cells`, per axis — the default
+regular output grid; samurai's placement) or `"mish"` (every quadrature
+point, `mubar` per cell per axis).
+"""
+const VARIATIONAL_CONTINUITY_LATTICE_VOCAB = ("nodes", "mish")
+
+"""
+    VARIATIONAL_QUALITY_FLAG_MAP_VOCAB
+
+Allowed values of `[variational] quality_flag_map`, how the stage-1 `QFLAG`
+on the mish is resampled to the regular output grid: `"nearest"` (the
+nearest mish point on each axis), `"worst"` (bitwise OR over the mish
+points within half a cell of the output point) or `"best"` (bitwise AND
+over the same neighbourhood).
+"""
+const VARIATIONAL_QUALITY_FLAG_MAP_VOCAB = ("nearest", "worst", "best")
+
+"""
     BackgroundErrorEntry
 
 One state variable's background-error specification for the variational
@@ -751,12 +772,18 @@ disabling the analysis does not relax the schema.
   radar data (the stage-1 background and the super-obs come from the same
   gates). Ignored for `"zero"`. Must be positive. Default `1.0`.
 - `mass_continuity::Bool`: enforce the anelastic mass-continuity pseudo-
-  observation at every mish point
-  (`∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz = 0`). Requires `"W"` in `state`.
-  Default `true`.
+  observation (`∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz = 0`) at every point of
+  the `mass_continuity_lattice`. Requires `"W"` in `state`. Default `true`.
+- `mass_continuity_lattice::String`: where the continuity pseudo-observations
+  sit, one of [`VARIATIONAL_CONTINUITY_LATTICE_VOCAB`](@ref): `"nodes"`
+  (the B-spline nodes, `cells + 1` per axis — the default regular output
+  grid and samurai's placement) or `"mish"` (every quadrature point,
+  `mubar³` constraints per cell). The per-point σ is the same in both;
+  `"mish"` therefore carries `mubar³` times the constraint weight per cell.
+  Default `"nodes"`.
 - `mass_continuity_sigma_per_s::Float64`: standard deviation σ of the
-  anelastic divergence residual (s⁻¹); inverse variance is `1/σ²`. Must be
-  positive. Default `1.0e-4`.
+  anelastic divergence residual (s⁻¹) at each constraint point; inverse
+  variance is `1/σ²`. Must be positive. Default `1.0e-4`.
 - `max_outer_iterations::Int`: outer Gauss–Newton iterations; only matters
   with nonlinear observations. Must be `≥ 1`. Default `1`.
 - `max_inner_iterations::Int`: inner conjugate-gradient iterations per
@@ -765,12 +792,28 @@ disabling the analysis does not relax the schema.
   lie in `(0, 1)`. Default `1.0e-4`.
 - `outer_tolerance::Float64`: relative increment-norm stopping tolerance
   between outer loops; must lie in `(0, 1)`. Default `1.0e-3`.
+- `cg_progress_interval::Int`: print one solver progress line (CG
+  iteration, residual norm, relative residual, cost) every this many inner
+  CG iterations, plus a header and a per-outer-iteration summary; `0`
+  silences the solver. Must be `≥ 0`. Default `10`.
 - `output_background::Bool`: write the `*_BACKGROUND` fields. Default
   `false`.
 - `output_increment::Bool`: write the `*_INCREMENT` fields. Default
   `false`.
 - `output_mish::Bool`: also write mish-lattice fields and stage-1/super-obs
   diagnostics. Default `false`.
+- `quality_flag_map::String`: how the stage-1 `QFLAG` (on the mish) is
+  resampled onto the regular output grid, one of
+  [`VARIATIONAL_QUALITY_FLAG_MAP_VOCAB`](@ref): `"nearest"`, `"worst"`
+  (bitwise OR within half a cell) or `"best"` (bitwise AND). Default
+  `"nearest"`.
+- `mask_quality_flags::Vector{String}`: flag meanings whose bits blank
+  (`NaN`) the regular-grid wind outputs (`U`, `V`, `W`, their derivative,
+  background and increment fields, `VORT`, `DIV`, `MCRESIDUAL`) where the
+  resampled `QFLAG` carries any of them. Entries are the CF `flag_meanings`
+  of `QFLAG`: `"sigma1_above_threshold"`, `"sigma2_above_threshold"`,
+  `"singular_geometry"`, `"no_data"`. Empty (the default) masks nothing;
+  `QFLAG` itself is always written.
 - `filter_type::String`: mish-space background-error filter kernel,
   `"gaussian"` or `"lanczos"` (Gaussian has no negative lobes; Lanczos
   does, documented in the theory guide). Default `"gaussian"`.
@@ -793,14 +836,18 @@ Base.@kwdef struct VariationalParameters
     background::String                     = "zero"
     background_error_inflation::Float64    = 1.0
     mass_continuity::Bool                  = true
+    mass_continuity_lattice::String        = "nodes"
     mass_continuity_sigma_per_s::Float64   = 1.0e-4
     max_outer_iterations::Int              = 1
     max_inner_iterations::Int              = 200
     inner_tolerance::Float64               = 1.0e-4
     outer_tolerance::Float64               = 1.0e-3
+    cg_progress_interval::Int              = 10
     output_background::Bool                = false
     output_increment::Bool                 = false
     output_mish::Bool                      = false
+    quality_flag_map::String               = "nearest"
+    mask_quality_flags::Vector{String}     = String[]
     filter_type::String                    = "gaussian"
     background_error::Dict{String,BackgroundErrorEntry} =
         Dict("default" => BackgroundErrorEntry(10.0, (2000.0, 2000.0, 500.0)))
@@ -1860,9 +1907,10 @@ function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
     _check_samurai_variational_keys(d, "variational")
 
     scalar_fields = (:enabled, :state, :background, :background_error_inflation,
-        :mass_continuity, :mass_continuity_sigma_per_s, :max_outer_iterations,
-        :max_inner_iterations, :inner_tolerance, :outer_tolerance,
-        :output_background, :output_increment, :output_mish, :filter_type)
+        :mass_continuity, :mass_continuity_lattice, :mass_continuity_sigma_per_s,
+        :max_outer_iterations, :max_inner_iterations, :inner_tolerance, :outer_tolerance,
+        :cg_progress_interval, :output_background, :output_increment, :output_mish,
+        :quality_flag_map, :mask_quality_flags, :filter_type)
     subtables = (:background_error, :radial_velocity, :scalar_obs, :roles)
     allowed = Set((scalar_fields..., subtables...))
     unknown = setdiff(Set(Symbol.(keys(d))), allowed)
@@ -1881,6 +1929,11 @@ function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
         sk = String(f)
         haskey(d, sk) || continue
         if f === :state
+            kw[f] = String.(d[sk])
+        elseif f === :mask_quality_flags
+            d[sk] isa AbstractVector || throw(ArgumentError(
+                "`[variational]` mask_quality_flags must be an array of flag meanings, " *
+                "got $(repr(d[sk]))."))
             kw[f] = String.(d[sk])
         else
             kw[f] = _coerce_field(VariationalParameters, f, d[sk])
@@ -1912,6 +1965,24 @@ function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
         "$(repr(mc))."))
     mc && !("W" in state) && throw(ArgumentError(
         "`[variational]` mass_continuity = true requires \"W\" in `state`."))
+    mcl = get(kw, :mass_continuity_lattice, VariationalParameters().mass_continuity_lattice)
+    mcl in VARIATIONAL_CONTINUITY_LATTICE_VOCAB || throw(ArgumentError(
+        "`[variational]` mass_continuity_lattice = \"$(mcl)\" is not valid; allowed: " *
+        join(("\"$(m)\"" for m in VARIATIONAL_CONTINUITY_LATTICE_VOCAB), ", ") * "."))
+
+    qmap = get(kw, :quality_flag_map, VariationalParameters().quality_flag_map)
+    qmap in VARIATIONAL_QUALITY_FLAG_MAP_VOCAB || throw(ArgumentError(
+        "`[variational]` quality_flag_map = \"$(qmap)\" is not valid; allowed: " *
+        join(("\"$(m)\"" for m in VARIATIONAL_QUALITY_FLAG_MAP_VOCAB), ", ") * "."))
+    mask_flags = get(kw, :mask_quality_flags, VariationalParameters().mask_quality_flags)
+    meanings = first.(QFLAG_MEANINGS)
+    for m in mask_flags
+        m in meanings || throw(ArgumentError(
+            "`[variational]` mask_quality_flags entry \"$(m)\" is not a QFLAG meaning; " *
+            "allowed: " * join(("\"$(x)\"" for x in meanings), ", ") * "."))
+    end
+    length(mask_flags) == length(Set(mask_flags)) || throw(ArgumentError(
+        "`[variational]` mask_quality_flags entries must be unique (got $(mask_flags))."))
 
     background = get(kw, :background, VariationalParameters().background)
     background in VARIATIONAL_BACKGROUND_VOCAB || throw(ArgumentError(
@@ -1946,6 +2017,9 @@ function _variational_from_dict(d::AbstractDict, moments::MomentParameters)
     outer_tol = get(kw, :outer_tolerance, VariationalParameters().outer_tolerance)
     (isfinite(outer_tol) && 0.0 < outer_tol < 1.0) || throw(ArgumentError(
         "`[variational]` outer_tolerance must lie in (0, 1) (got $(outer_tol))."))
+    cgpi = get(kw, :cg_progress_interval, VariationalParameters().cg_progress_interval)
+    cgpi >= 0 || throw(ArgumentError(
+        "`[variational]` cg_progress_interval must be ≥ 0 (0 = silent; got $(cgpi))."))
 
     if haskey(d, "background_error")
         kw[:background_error] = _variational_background_error_from_dict(d["background_error"], state)

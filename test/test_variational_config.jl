@@ -33,6 +33,10 @@ using TOML
         @test p.variational.state == ["U", "V", "W"]
         @test p.variational.background == "zero"
         @test p.variational.mass_continuity == true
+        @test p.variational.mass_continuity_lattice == "nodes"
+        @test p.variational.cg_progress_interval == 10
+        @test p.variational.quality_flag_map == "nearest"
+        @test p.variational.mask_quality_flags == String[]
         @test p.variational.filter_type == "gaussian"
         @test haskey(p.variational.background_error, "default")
         @test haskey(p.variational.background_error, "W")
@@ -62,14 +66,18 @@ using TOML
                 "background" => "synthesis",
                 "background_error_inflation" => 2.0,
                 "mass_continuity" => true,
+                "mass_continuity_lattice" => "mish",
                 "mass_continuity_sigma_per_s" => 2.0e-4,
                 "max_outer_iterations" => 3,
                 "max_inner_iterations" => 150,
                 "inner_tolerance" => 1.0e-5,
                 "outer_tolerance" => 1.0e-2,
+                "cg_progress_interval" => 25,
                 "output_background" => true,
                 "output_increment" => true,
                 "output_mish" => true,
+                "quality_flag_map" => "worst",
+                "mask_quality_flags" => ["no_data", "singular_geometry"],
                 "filter_type" => "lanczos",
                 "background_error" => Dict(
                     "default" => Dict("sigma" => 10.0, "filter_length_m" => [2000.0, 2000.0, 500.0]),
@@ -94,14 +102,18 @@ using TOML
         @test vp.background == "synthesis"
         @test vp.background_error_inflation == 2.0
         @test vp.mass_continuity == true
+        @test vp.mass_continuity_lattice == "mish"
         @test vp.mass_continuity_sigma_per_s == 2.0e-4
         @test vp.max_outer_iterations == 3
         @test vp.max_inner_iterations == 150
         @test vp.inner_tolerance == 1.0e-5
         @test vp.outer_tolerance == 1.0e-2
+        @test vp.cg_progress_interval == 25
         @test vp.output_background == true
         @test vp.output_increment == true
         @test vp.output_mish == true
+        @test vp.quality_flag_map == "worst"
+        @test vp.mask_quality_flags == ["no_data", "singular_geometry"]
         @test vp.filter_type == "lanczos"
         @test vp.background_error["default"] == BackgroundErrorEntry(10.0, (2000.0, 2000.0, 500.0))
         @test vp.background_error["W"] == BackgroundErrorEntry(2.0, (1500.0, 1500.0, 0.0))
@@ -267,6 +279,54 @@ using TOML
 
         p = _var_load(base -> base["variational"]["filter_type"] = "lanczos")
         @test p.variational.filter_type == "lanczos"
+    end
+
+    @testset "validation: continuity lattice / quality flag keys" begin
+        @test Daisho.VARIATIONAL_CONTINUITY_LATTICE_VOCAB == ("nodes", "mish")
+        for lat in Daisho.VARIATIONAL_CONTINUITY_LATTICE_VOCAB
+            p = _var_load(base -> base["variational"]["mass_continuity_lattice"] = lat)
+            @test p.variational.mass_continuity_lattice == lat
+        end
+        err = _var_err(base -> base["variational"]["mass_continuity_lattice"] = "node")
+        @test err isa ArgumentError
+        @test occursin("mass_continuity_lattice", err.msg) && occursin("\"nodes\"", err.msg)
+
+        @test Daisho.VARIATIONAL_QUALITY_FLAG_MAP_VOCAB == ("nearest", "worst", "best")
+        for m in Daisho.VARIATIONAL_QUALITY_FLAG_MAP_VOCAB
+            p = _var_load(base -> base["variational"]["quality_flag_map"] = m)
+            @test p.variational.quality_flag_map == m
+        end
+        err = _var_err(base -> base["variational"]["quality_flag_map"] = "closest")
+        @test err isa ArgumentError
+        @test occursin("quality_flag_map", err.msg) && occursin("\"nearest\"", err.msg)
+
+        # mask_quality_flags: the QFLAG flag_meanings vocabulary, any subset.
+        @test first.(Daisho.QFLAG_MEANINGS) == ("sigma1_above_threshold",
+            "sigma2_above_threshold", "singular_geometry", "no_data")
+        @test Daisho.qflag_bits(String[]) == Int8(0)
+        @test Daisho.qflag_bits(["no_data"]) == Daisho.QFLAG_NODATA
+        @test Daisho.qflag_bits(["singular_geometry", "no_data"]) ==
+              Daisho.QFLAG_SINGULAR | Daisho.QFLAG_NODATA
+        @test Daisho.qflag_bits(first.(Daisho.QFLAG_MEANINGS)) == Int8(0x0f)
+        @test_throws ArgumentError Daisho.qflag_bits(["nodata"])
+        p = _var_load(base -> base["variational"]["mask_quality_flags"] =
+            ["sigma1_above_threshold", "sigma2_above_threshold"])
+        @test p.variational.mask_quality_flags == ["sigma1_above_threshold", "sigma2_above_threshold"]
+        err = _var_err(base -> base["variational"]["mask_quality_flags"] = ["missing"])
+        @test err isa ArgumentError
+        @test occursin("mask_quality_flags", err.msg) && occursin("no_data", err.msg)
+        err = _var_err(base -> base["variational"]["mask_quality_flags"] = ["no_data", "no_data"])
+        @test err isa ArgumentError
+        @test occursin("unique", err.msg)
+        err = _var_err(base -> base["variational"]["mask_quality_flags"] = "no_data")
+        @test err isa ArgumentError
+        @test occursin("array", err.msg)
+
+        err = _var_err(base -> base["variational"]["cg_progress_interval"] = -1)
+        @test err isa ArgumentError
+        @test occursin("cg_progress_interval", err.msg)
+        p = _var_load(base -> base["variational"]["cg_progress_interval"] = 0)
+        @test p.variational.cg_progress_interval == 0
     end
 
     @testset "validation: scalar guards" begin

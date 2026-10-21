@@ -212,16 +212,38 @@ background = "zero"
 background_error_inflation = 1.0     # multiplies sigma_b in every "synthesis*" mode
                                       # (guards against double-counting the radar data)
 # Enforce anelastic mass continuity (div(u,v) + dw/dz + w*dlnrhobar/dz = 0) as
-# a pseudo-observation at every mish point. Requires "W" in state.
+# a pseudo-observation at every point of mass_continuity_lattice. Requires "W"
+# in state.
 mass_continuity = true
-mass_continuity_sigma_per_s = 1.0e-4 # sigma of the divergence residual (s^-1); 1/sigma^2 weight
+# Where the continuity pseudo-observations sit:
+#   "nodes"  the B-spline nodes (cells + 1 per axis = the default regular
+#            output grid; samurai's placement). One constraint per cell.
+#   "mish"   every quadrature point (mubar per cell per axis): mubar^3 times
+#            the constraint weight per cell and mubar^3 times the rows.
+mass_continuity_lattice = "nodes"
+mass_continuity_sigma_per_s = 1.0e-4 # sigma of the divergence residual (s^-1) per point; 1/sigma^2 weight
 max_outer_iterations = 1             # outer Gauss-Newton loops; >1 only matters with nonlinear obs
 max_inner_iterations = 200           # inner conjugate-gradient iterations per outer loop
 inner_tolerance = 1.0e-4             # relative CG residual stopping tolerance, in (0, 1)
 outer_tolerance = 1.0e-3             # relative increment-norm stopping tolerance, in (0, 1)
+# Solver progress: a header, one line every N inner CG iterations (iteration,
+# residual norm, residual relative to the start, cost J), and a summary per
+# outer iteration. 0 = silent.
+cg_progress_interval = 10
 output_background = false            # write *_BACKGROUND fields
 output_increment  = false            # write *_INCREMENT fields
 output_mish       = false            # also write mish-lattice fields + stage-1/super-obs diagnostics
+# Stage-1 QFLAG on the regular output grid, resampled from the mish:
+#   "nearest"  the nearest mish point on each axis
+#   "worst"    bitwise OR of the mish points within half a cell (most masking)
+#   "best"     bitwise AND of the same neighbourhood (least masking)
+quality_flag_map = "nearest"
+# Blank (NaN) the regular-grid winds (U, V, W, VORT, DIV, MCRESIDUAL, and their
+# derivative/background/increment fields) where QFLAG carries any listed bit.
+# Vocabulary = the QFLAG flag_meanings: "sigma1_above_threshold",
+# "sigma2_above_threshold", "singular_geometry", "no_data". Empty = no masking
+# (QFLAG is still written).
+mask_quality_flags = []
 filter_type = "gaussian"             # "gaussian" | "lanczos" (Lanczos has negative lobes near boundaries)
 
 # Per-state-variable background error: sigma (native units: m/s for winds)
