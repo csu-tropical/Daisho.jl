@@ -53,14 +53,16 @@ stage-1 product (`problem.stage1`), the observation set, and the state grid
 with the analysis loaded — and `write_output = false` to skip the file.
 
 A ready-to-use script for this path ships at
-`docs/examples/variational_demo.jl`: it builds the `[variational]`
+`docs/examples/variational_demo.jl`: it takes a directory of CfRadial files
+(volumes or single sweeps, one or many radars; one-sweep-per-file airborne
+archives are the intended use), builds the `[variational]`
 configuration from a base TOML, runs the analysis, prints the solver stats,
 cost-by-group, mass-continuity residual RMS, and `NOBS_VR` coverage, and (with
 CairoMakie installed) plots a horizontal `U`/`V` + `DBZ` cross-section and a
 vertical `W` cross-section read back from the written NetCDF.
 
 ```
-julia --project=. docs/examples/variational_demo.jl radarA.nc radarB.nc [out_basename [config.toml]]
+julia --project=. docs/examples/variational_demo.jl <cfradial_dir> [out_basename [config.toml]]
 ```
 
 ### In-memory API
@@ -84,7 +86,8 @@ prob = VariationalProblem(acc, radar_grid, sgrid, p)
 result = solve_variational(prob)                   # ::VariationalResult
 
 analysis_field(result, "U")                        # U on the mish, (nz, ny, nx)
-mass_continuity_residual(prob, result)             # ∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz
+mass_continuity_residual(prob, result)             # ∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz on the mish
+mass_continuity_residual(prob, result; lattice = :nodes)   # … at the nodes, where "nodes" enforces it
 evaluate_analysis!(prob.state_grid, result)        # load the analysis into the state grid
 ```
 
@@ -153,6 +156,7 @@ state = ["U", "V", "W"]              # append a [fields] name to analyse a scala
 background = "zero"                  # "zero" | "synthesis" | "synthesis_uniform_sigma" | "synthesis_profile"
 background_error_inflation = 1.0
 mass_continuity = true
+mass_continuity_lattice = "nodes"      # "nodes" (default) | "mish"
 mass_continuity_sigma_per_s = 1.0e-4
 max_outer_iterations = 1
 max_inner_iterations = 200
@@ -199,15 +203,19 @@ W = { min = "dirichlet" }
 | `state` | — | `["U","V","W"]` | State-vector names, in order. Each is `"U"`/`"V"`/`"W"` or a `[fields]` name (appended as a value-observed scalar). Must be non-empty, unique, and contain both `"U"` and `"V"`. |
 | `background` | — | `"zero"` | `"zero"`, `"synthesis"`, `"synthesis_uniform_sigma"`, or `"synthesis_profile"`. See "Choosing a background" below. |
 | `background_error_inflation` | — | `1.0` | Multiplies σ_b of every state variable in the three `synthesis*` modes (ignored for `"zero"`). Must be positive. |
-| `mass_continuity` | — | `true` | Enforce the anelastic continuity pseudo-observation at every mish point. Requires `"W"` in `state`. |
-| `mass_continuity_sigma_per_s` | s⁻¹ | `1.0e-4` | σ of the divergence residual; inverse-variance weight `1/σ²`. Must be positive. |
+| `mass_continuity` | — | `true` | Enforce the anelastic continuity pseudo-observation at every point of `mass_continuity_lattice`. Requires `"W"` in `state`. |
+| `mass_continuity_lattice` | — | `"nodes"` | `"nodes"` (the B-spline nodes, `cells + 1` per axis = the default regular output grid; samurai's placement) or `"mish"` (every quadrature point: `mubar³` constraints per cell, more CG iterations). |
+| `mass_continuity_sigma_per_s` | s⁻¹ | `1.0e-4` | σ of the divergence residual at each constraint point; inverse-variance weight `1/σ²`. Must be positive. |
 | `max_outer_iterations` | — | `1` | Gauss–Newton outer iterations. `1` is exact when every observation is linear; only matters with a nonlinear observation type. |
 | `max_inner_iterations` | — | `200` | CG iteration cap per outer iteration. |
 | `inner_tolerance` | — | `1.0e-4` | CG relative residual tolerance, in `(0, 1)`. |
 | `outer_tolerance` | — | `1.0e-3` | Relative increment-norm stopping tolerance between outer iterations, in `(0, 1)`. |
+| `cg_progress_interval` | — | `10` | Print a solver progress line to `stdout` at CG iteration 1 and every this many CG iterations (plus a header and a per-outer summary); `0` is silent. Must be `≥ 0`. See "Reading the solver progress lines" below. |
 | `output_background` | — | `false` | Write `*_BACKGROUND` fields. |
 | `output_increment` | — | `false` | Write `*_INCREMENT` fields. |
 | `output_mish` | — | `false` | Also write mish-lattice fields and stage-1/super-obs diagnostics (§ "Output variables"). |
+| `quality_flag_map` | — | `"nearest"` | How the stage-1 `QFLAG` is resampled from the mish lattice to the regular output grid: `"nearest"` (flag of the nearest mish point), `"worst"` (bitwise OR over the mish points within half a cell — most flagging), `"best"` (bitwise AND over the same points — least flagging). |
+| `mask_quality_flags` | — | `[]` | `QFLAG` meanings (`"sigma1_above_threshold"`, `"sigma2_above_threshold"`, `"singular_geometry"`, `"no_data"`) at which the regular-grid wind fields are set to `NaN`. Empty = no masking (`QFLAG` is still written). |
 | `filter_type` | — | `"gaussian"` | `"gaussian"` or `"lanczos"` mish-space background-error filter kernel. Gaussian has no negative lobes; Lanczos does, near boundaries. |
 | `[variational.background_error.<name>].sigma` | native (m/s for winds) | required | Background-error standard deviation σ_b of state variable `<name>` (or `"default"`) at every mish point: the mish filter is variance-normalised (`diag(F Fᵀ) = 1`), so filtered white noise scaled by σ_b has exactly this pointwise standard deviation, whatever the filter length. Must be positive. |
 | `[variational.background_error.<name>].filter_length_m` | m | required | Mish-space filter length along `[i, j, k]`. `0.0` on an axis disables filtering there. |
@@ -355,15 +363,35 @@ On the **regular output grid**:
 | `VORT` | s⁻¹ | `∂v/∂x − ∂u/∂y` |
 | `DIV` | s⁻¹ | `∂u/∂x + ∂v/∂y` |
 | `MCRESIDUAL` | s⁻¹ | `DIV + ∂w/∂z + w·dlnρ̄/dz` — the anelastic continuity residual, a direct check of solver convergence (only when `W` is in the state). |
+| `QFLAG` | — | Stage 1's bitwise quality flag (`Int8`, no fill; CF `flag_masks = 1, 2, 4, 8`, `flag_meanings = sigma1_above_threshold sigma2_above_threshold singular_geometry no_data`), resampled from the mish lattice by `quality_flag_map`. |
 | `U_x`, `U_xx`, `U_y`, … | | With `include_derivatives = true`: the derivative fields of every analysis variable, with the same suffixes as the scalars. |
 | `*_BACKGROUND` | | With `output_background`: the background, per state variable. |
 | `*_INCREMENT` | | With `output_increment`: analysis − background, so `BACKGROUND + INCREMENT = analysis`. |
+
+`QFLAG` is stage 1's per-point diagnosis of the dual-Doppler geometry,
+resampled to the output grid — not a property of the variational
+analysis. The regular points (the B-spline nodes, by default) sit between
+mish points, so `[variational] quality_flag_map` chooses how the
+neighbouring mish flags combine: `"nearest"` copies the nearest mish
+point's flag; `"worst"` ORs every mish point within half a cell on each
+axis, so a point is flagged if any neighbour is; `"best"` ANDs them, so a
+bit survives only if every neighbour carries it (`best ⊆ nearest ⊆ worst`).
+Nothing is masked by default: the variational solve can recover winds at
+points stage 1 flagged for a near-baseline geometry or a single σ above
+threshold (the spline and the continuity constraint carry information
+across them), but it has nothing to fit where there was no data, so
+whether to blank is the user's choice. List flag meanings in
+`[variational] mask_quality_flags` (e.g. `["no_data"]`) to set every
+regular-grid wind-derived field — `U`, `V`, `W`, their derivative,
+`_BACKGROUND` and `_INCREMENT` fields, `VORT`, `DIV`, `MCRESIDUAL` — to
+`NaN` where `QFLAG` carries any listed bit; gridded scalars and the
+`<name>_ANALYSIS` of scalar state variables are never masked.
 
 With `output_mish = true`, also on the **mish (quadrature) lattice**
 (`x_mish`, `y_mish`, `z_mish` dimensions): `U_MISH`, `V_MISH`, `W_MISH`
 (the analysis itself at the quadrature points, `Float64`), the stage-1
 per-point product `U_STAGE1`, `V_STAGE1`, `USTD`, `VSTD`, `DET`, `NGATES`,
-`QFLAG` (never resampled — these are properties of the accumulator, not the
+`QFLAG_MISH` (the flag at its native points; never resampled — these are properties of the accumulator, not the
 spline; written as the QC'd product with the `[io]` fill, as
 [`write_wind_synthesis`](@ref) does), the super-observation row count
 `NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)` (the reference-density
@@ -371,7 +399,9 @@ profile actually used).
 
 Global attributes add `variational_background`,
 `variational_outer_iterations`, `variational_cg_iterations` (total CG
-iterations) and `variational_converged` (`1`/`0`) to the usual radar set.
+iterations), `variational_converged` (`1`/`0`),
+`variational_quality_flag_map` and `variational_mask_quality_flags` (the
+masked meanings, space-separated; empty when none) to the usual radar set.
 
 ## Troubleshooting
 
@@ -408,6 +438,46 @@ iterations) and `variational_converged` (`1`/`0`) to the usual radar set.
   `result.stats.cost_by_backend`) — compare `:radial_velocity`,
   `:mass_continuity`, and `:scalar_value` (if present) to see which term the
   optimizer is spending its effort on.
+
+### Reading the solver progress lines
+
+With `cg_progress_interval > 0` (default `10`) the solver prints its
+progress while it runs, so a misconfigured or diverging solve is visible
+after a few iterations rather than at the end:
+
+```
+solve_incremental!: n=2916 controls, nobs=430 (point 400, point 30)
+  initial  J=1.6591703162e+04  J_b=0.000000e+00  J_o[point]=1.657565e+04  J_o[point]=1.605293e+01
+outer 1  ‖∇J‖=1.535e+02  J=1.659170e+04
+  cg     1  ‖r‖=7.490e+01  ‖r‖/‖r₀‖=4.881e-01  J=1.587020e+04  ΔJ=-7.215e+02  t=0.2s
+  cg     5  ‖r‖=2.990e+00  ‖r‖/‖r₀‖=1.949e-02  J=1.540822e+04  ΔJ=-4.620e+02  t=0.2s
+  cg    10  ‖r‖=1.044e-02  ‖r‖/‖r₀‖=6.806e-05  J=1.540663e+04  ΔJ=-1.588e+00  t=0.2s
+  outer 1 done: cg=18  status="solution good enough given atol and rtol"  ‖δξ‖=2.193e+01  ‖δξ‖/‖ξ‖=1.000e+00  t=0.3s
+  result   J=1.5406629496e+04  J_b=2.404350e+02  J_o[point]=1.514976e+04  J_o[point]=1.643833e+01
+```
+
+- The **header** gives the control-vector size, the observation count per
+  observation backend, and the initial cost split into the background term
+  `J_b = ½‖ξ‖²` and one `J_o[kind]` per backend.
+- Each **`outer`** line opens a Gauss–Newton iteration: `‖∇J‖` is the norm of
+  the cost gradient at the linearisation point (the CG right-hand side) and
+  `J` the cost there.
+- Each **`cg`** line: the CG iteration, the residual norm `‖r‖`, the residual
+  relative to its start `‖r‖/‖r₀‖` — this is the quantity compared against
+  `inner_tolerance`, so CG stops when it falls below it — the cost `J` at the
+  current CG iterate, its change `ΔJ` since the previous printed line, and
+  the time since the outer iteration started. `J` costs only two dot
+  products (no extra Hessian products); for linear observations (radial
+  velocity, mass continuity, scalar values) it is exactly the cost the
+  analysis would have if CG stopped there, so it should decrease
+  monotonically. A `J` that rises, or a `‖r‖/‖r₀‖` that stalls far above
+  `inner_tolerance` for hundreds of iterations, points at the conditioning
+  issues described above.
+- The **`done`/`result`** pair summarises the CG solve (iterations, Krylov
+  status, increment norm and relative increment, elapsed time) and the new
+  cost split at the updated state.
+
+Set `cg_progress_interval = 0` to silence all of it.
 
 ## Migrating from samurai
 

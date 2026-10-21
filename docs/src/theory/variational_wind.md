@@ -304,8 +304,9 @@ sandwich covariance formula valid: setting `σ_m² = σ_vr²` everywhere
 
 ## 6. Anelastic mass continuity
 
-Mass continuity is enforced as a **pseudo-observation** of value 0 at every
-mish point (`MassContinuityObs`):
+Mass continuity is enforced as a **pseudo-observation** of value 0
+(`MassContinuityObs`) at every point of the configured constraint lattice
+(`[variational] mass_continuity_lattice`):
 
 ```math
 \frac{\partial u}{\partial x} + \frac{\partial v}{\partial y} + \frac{\partial w}{\partial z}
@@ -316,11 +317,29 @@ terms `(u, ∂x, 1)`, `(v, ∂y, 1)`, `(w, ∂z, 1)`, and `(w, val, dlnρ̄/dz)`
 (omitted where `dlnρ̄/dz = 0`, e.g. a neutrally-stratified test profile).
 Because it is a pseudo-observation of a spline *derivative* rather than a
 finite-difference or vertically-integrated constraint, mass continuity
-couples every mish point through the same `H_k C` machinery as any other
+couples the whole analysis through the same `H_k C` machinery as any other
 observation — this is the advantage samurai gets from formulating continuity
 this way rather than integrating `w` from a divergence profile. `dlnρ̄/dz`
 comes from the configured `[reference_state]` profile
-([`dlnrho_dz`](@ref Daisho.dlnrho_dz)), evaluated once per k-level.
+([`dlnrho_dz`](@ref Daisho.dlnrho_dz)), evaluated once per constraint level.
+
+**Where the constraint sits.** The default lattice is the B-spline **nodes**
+(`"nodes"`: `x = x_min + n·Δx`, `n = 0…cells`, per axis — `NodeIndex`
+locations, one constraint per cell, boundary nodes included), which is
+samurai's placement and, by default, exactly the regular grid the analysis
+is written on: if continuity holds at the output points, the written
+`(u, v, w)` is anelastic where the user sees it. The alternative `"mish"`
+places one constraint at every quadrature point (`mubar` per cell per
+axis). The per-point σ means the same in both, so the mish lattice carries
+`mubar³` times the constraint weight per cell (27× at `mubar = 3`), `mubar³`
+times the rows in `H`, and a correspondingly larger Hessian condition
+number — hence more CG iterations for no gain in the written product. Node
+observations are evaluated by a second tensor-product `SplineEvaluation`
+on the node lattice (the same spline, the same exact derivatives; nothing
+is finite-differenced), so the only change between the two choices is the
+set of points. `mass_continuity_residual(prob, result; lattice = :nodes)`
+reports the residual where it is enforced; `MCRESIDUAL` on the regular
+output grid is the same quantity at the output points.
 
 ## 7. The Gauss–Newton outer loop
 
@@ -393,6 +412,19 @@ quadratic term relative to the identity); a preconditioner slot (`M =` in
 `VarSolverOptions`, Krylov's convention —
 `mul!` for an inverse-Hessian approximation, `ldiv!` for a
 `Factorization`) is exposed but untested and unset by default (`nothing`).
+
+**Progress reporting.** The solver's progress lines report the cost along
+the CG path without extra Hessian products. With `b` the CG right-hand side
+(`−∇J(ξ_k)`) and `r = b − Hess·x` the CG residual at iterate `x`,
+the quadratic model `q(x) = ½ xᵀ·Hess·x − bᵀx` equals `−½ xᵀ(b + r)`,
+so
+
+```math
+J(\xi_k + x) = J_k - \tfrac12\, x^\top (b + r),
+```
+
+with `J_k` the cost at the linearisation point — exact for linear
+observations, the Gauss–Newton model otherwise (`Daisho.cg_model_cost`).
 
 ## 9. Background modes
 
@@ -478,10 +510,13 @@ expect many more CG iterations.
   explicitly rather than folding it into a ρ-weighted state variable. A
   transform hook (`AbstractStateTransform`) is reserved for a future density-weighted
   or log-transformed state without touching the operator layer.
-- **Continuity on the mish, not at spline nodes.** The pseudo-observation is
-  evaluated at every quadrature point (via `H`, the same tensor-product
-  spline evaluation as every other observation), not at the coefficient
-  nodes samurai used.
+- **Continuity at the nodes by default, as in samurai — but as an exact
+  spline derivative on either lattice.** `mass_continuity_lattice = "nodes"`
+  reproduces samurai's one-constraint-per-node placement; `"mish"` puts the
+  constraint at every quadrature point (`mubar³` per cell), which
+  over-weights it relative to the data term and slows CG (§6). In both
+  cases the divergence is the analytic derivative of the spline through
+  `H`, not samurai's finite differences on the node values.
 - **Filter lengths in metres, and `√2` effective correlation length.** §2.1;
   samurai configured filter lengths in grid units and its recursive filter's
   effective correlation length equals its configured σ (a symmetric filter);

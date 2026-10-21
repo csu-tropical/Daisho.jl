@@ -2,8 +2,8 @@
 #
 # Variational (3DVAR) wind-solver demo.
 #
-# The stage-2 counterpart to dual_doppler_demo.jl. Grids a dual-Doppler radar
-# pair onto a Springsteel semi-spectral (RRR) grid through the stage-1
+# The stage-2 counterpart to dual_doppler_demo.jl. Grids a folder of radar
+# files onto a Springsteel semi-spectral (RRR) grid through the stage-1
 # `WindGridAccumulator`, then runs the incremental Gauss-Newton/CG 3DVAR
 # solver (`analyze_radar_volumes_variational`) to produce a coupled
 # `(u, v, w)` analysis that satisfies anelastic mass continuity — instead of
@@ -13,29 +13,29 @@
 # [theory page](../src/theory/variational_wind.md) for the mathematics.
 #
 # ── Input data ────────────────────────────────────────────────────────────
-# Edit VOLUME_A_FILE / VOLUME_B_FILE below (or pass two paths positionally —
-# see Usage) to point at a real dual-Doppler pair: two (or more) overlapping
-# CfRadial volumes with
+# A DIRECTORY of CfRadial files (`.nc` / `.cf`): full volumes or single
+# sweeps, from one radar or several. Airborne (e.g. tail-radar) archives are
+# typically stored one sweep per file, so a folder may hold dozens of files;
+# they are all welcome. No per-radar grouping is needed — every sweep of
+# every file accumulates into one shared accumulator. The files together need
 #   * a `velocity`-tagged field (dealiased, positive away from the radar) —
 #     required, it selects the `WindGridAccumulator`;
-#   * enough elevations to resolve the vertical structure (`w` needs beams
-#     at several tilts crossing, not just the lowest);
-#   * a `reflectivity`-tagged field if you want the DBZ overlay below to mean
-#     something (the bundled `config/defaults.toml` already tags `DBZ`).
+#   * enough viewing geometry to resolve the vertical structure (`w` needs
+#     beams crossing at several tilts/azimuths, not just the lowest tilt);
+#   * a `define_detection`-tagged field (reflectivity) if you want the overlay
+#     below to mean something (the bundled `config/defaults.toml` tags `DBZ`).
 # There is no bundled/synthetic fallback here — real radar fixtures are
 # gitignored in this repository (see `test/test_helpers.jl`'s
 # `make_synthetic_dual_doppler_field` for the synthetic stand-in the test
 # suite uses instead).
-const VOLUME_A_FILE = joinpath(@__DIR__, "..", "..", "data", "variational_demo_radarA.nc")
-const VOLUME_B_FILE = joinpath(@__DIR__, "..", "..", "data", "variational_demo_radarB.nc")
 #
 # Usage:
 #   julia --project=. docs/examples/variational_demo.jl \
-#       [radarA.nc radarB.nc [out_basename [config.toml]]]
+#       <cfradial_dir> [out_basename [config.toml]]
 #
-#   radarA.nc, radarB.nc  CfRadial volumes (default: the constants above)
-#   out_basename          NetCDF + plot basename (default: variational_demo)
-#   config.toml           parameter file (default: the bundled defaults.toml)
+#   cfradial_dir  directory of CfRadial files (required)
+#   out_basename  NetCDF + plot basename (default: variational_demo)
+#   config.toml   parameter file (default: the bundled defaults.toml)
 #
 # Notes:
 #   * `[variational] enabled`, `[synthesis] include_vertical_velocity`, and
@@ -44,6 +44,10 @@ const VOLUME_B_FILE = joinpath(@__DIR__, "..", "..", "data", "variational_demo_r
 #     (grid extent, `[variational.background_error]` sigma/filter lengths,
 #     radial-velocity/mass-continuity settings, ...) comes from that file, so
 #     point it at your own copy to change the domain or tune the analysis.
+#   * Because `include_vertical_velocity` is forced on, `[synthesis]
+#     max_elevation` does not apply: steep (airborne) beams are kept.
+#   * The analysis time (`index_time`) is the earliest `time_coverage_start`
+#     found across all files.
 #   * The bundled defaults use a 125 km / 50-cell horizontal domain (mubar 3
 #     -> 150x150 mish points per level); for a quick look pass a coarser
 #     config.toml, as in dual_doppler_demo.jl.
@@ -70,6 +74,16 @@ catch err
     @warn "CairoMakie not available; plotting will be skipped" exception = err
     false
 end
+
+"""Collect CfRadial files (.nc / .cf) in `dir`, sorted by name."""
+function find_cfradial_files(dir::AbstractString)
+    isdir(dir) || error("Not a directory: $dir")
+    files = filter(readdir(dir; join = true)) do f
+        isfile(f) && (endswith(lowercase(f), ".nc") || endswith(lowercase(f), ".cf"))
+    end
+    return sort(files)
+end
+
 
 """Build the `[variational]` configuration from `config_path` (or the bundled
 `config/defaults.toml` when `nothing`): force `[variational] enabled = true`,
@@ -119,6 +133,16 @@ function print_variational_diagnostics(result, prob)
     mc_rms = sqrt(sum(abs2, mc) / length(mc))
     @info @sprintf("Mass-continuity residual RMS = %.3e s⁻¹ (over %d mish points)", mc_rms, length(mc))
 
+    # Same residual at the spline nodes (keyword added separately; skip
+    # silently when this Daisho version does not have it yet).
+    try
+        mcn = mass_continuity_residual(prob, result; lattice = :nodes)
+        mcn_rms = sqrt(sum(abs2, mcn) / length(mcn))
+        @info @sprintf("Mass-continuity residual RMS = %.3e s⁻¹ (over %d spline nodes)", mcn_rms, length(mcn))
+    catch err
+        err isa MethodError || rethrow()
+    end
+
     if result.nobs_vr !== nothing
         frac = count(>=(2), result.nobs_vr) / length(result.nobs_vr)
         @info @sprintf("Mish points with NOBS_VR >= 2: %.1f%%", 100 * frac)
@@ -126,11 +150,12 @@ function print_variational_diagnostics(result, prob)
     return nothing
 end
 
-"""Grid `volA_file`/`volB_file` onto a Springsteel grid built from `config`
-(see `build_variational_config`), run the variational 3DVAR analysis, write
-it to `<out_basename>.nc`, and print the diagnostics. Returns
+"""Read every CfRadial file in `dir` (volumes or single sweeps, any number of
+radars), grid them all onto a Springsteel grid built from `config` (see
+`build_variational_config`), run the variational 3DVAR analysis, write it to
+`<out_basename>.nc`, and print the diagnostics. Returns
 `(result, problem, out_nc)`."""
-function run_variational_demo(volA_file::AbstractString, volB_file::AbstractString;
+function run_variational_demo(dir::AbstractString;
                               out_basename::AbstractString = "variational_demo",
                               config = nothing)
     p = build_variational_config(config)
@@ -142,14 +167,18 @@ function run_variational_demo(volA_file::AbstractString, volB_file::AbstractStri
         (p.grid.springsteel.j.max - p.grid.springsteel.j.min) / 1000,
         (p.grid.springsteel.k.max - p.grid.springsteel.k.min) / 1000)
 
-    @info "Reading $volA_file"
-    volA = read_cfradial(volA_file)
-    @info "Reading $volB_file"
-    volB = read_cfradial(volB_file)
-    vols = [volA, volB]
+    files = find_cfradial_files(dir)
+    isempty(files) && error("No CfRadial (.nc/.cf) files found in $dir")
+    @info "Found $(length(files)) CfRadial file(s)"
 
-    itime = volA.time_coverage_start
-    index_time = itime isa DateTime ? itime : DateTime(1970, 1, 1)
+    vols = [read_cfradial(f) for f in files]
+    for (f, vol) in zip(files, vols)
+        @info "Read $(basename(f)): $(vol.instrument_name), $(length(vol.sweeps)) sweep(s)"
+    end
+
+    # Earliest start time across all files (not necessarily the first file).
+    starts = [v.time_coverage_start for v in vols if v.time_coverage_start isa DateTime]
+    index_time = isempty(starts) ? DateTime(1970, 1, 1) : minimum(starts)
 
     out_nc = out_basename * ".nc"
     t_run = @elapsed (result, prob) = analyze_radar_volumes_variational(
@@ -160,7 +189,31 @@ function run_variational_demo(volA_file::AbstractString, volB_file::AbstractStri
 
     print_variational_diagnostics(result, prob)
     @info "Wrote $out_nc"
+    print_qflag_summary(out_nc, p)
     return result, prob, out_nc
+end
+
+"""Read `QFLAG` back from `out_nc` (when present) and print the fraction of
+regular-grid points with a nonzero flag and, if `[variational]
+mask_quality_flags` is non-empty, the fraction those flags blank."""
+function print_qflag_summary(out_nc::AbstractString, p)
+    NCDataset(out_nc) do ds
+        haskey(ds, "QFLAG") || return nothing
+        v = ds["QFLAG"]
+        d = dimnames(v)
+        q = length(d) == 4 && first(d) == "time" ? v[1, :, :, :] : v[:, :, :]
+        qi = Int.(coalesce.(q, 0))
+        n = length(qi)
+        n == 0 && return nothing
+        @info @sprintf("QFLAG != 0 at %.1f%% of regular-grid points", 100 * count(!=(0), qi) / n)
+        mf = p.variational.mask_quality_flags
+        if !isempty(mf)
+            bits = Int(Daisho.qflag_bits(mf))
+            @info @sprintf("Masked by mask_quality_flags %s: %.1f%% of regular-grid points",
+                           string(mf), 100 * count(x -> (x & bits) != 0, qi) / n)
+        end
+    end
+    return nothing
 end
 
 # ── Plotting (optional; needs CairoMakie) ───────────────────────────────────
@@ -236,18 +289,20 @@ function plot_vertical_cross_section(x, z, y_level::Real, W_xz; out_path)
     return out_path
 end
 
-"""Read `U, V, W, DBZ` back from `out_nc` (`write_variational_netcdf`'s
+"""Read `U, V, W` and the reflectivity field `refl_field` (the
+`define_detection`-tagged field) back from `out_nc` (`write_variational_netcdf`'s
 regular-grid output, dims `time, x, y, z`) and produce the two cross-section
 plots above. Returns `(horizontal_path, vertical_path)`."""
 function plot_variational_demo(out_nc::AbstractString; out_basename = "variational_demo",
-                               z_index = nothing, y_index = nothing)
+                               z_index = nothing, y_index = nothing,
+                               refl_field::AbstractString = "DBZ")
     horiz_path = out_basename * "_horizontal.png"
     vert_path = out_basename * "_vertical.png"
     NCDataset(out_nc) do ds
         x = Float64.(ds["x"][:]); y = Float64.(ds["y"][:]); z = Float64.(ds["z"][:])
         nx, ny, nz = length(x), length(y), length(z)
         U = _read_xyz(ds, "U"); V = _read_xyz(ds, "V")
-        W = _read_xyz(ds, "W"); DBZ = _read_xyz(ds, "DBZ")
+        W = _read_xyz(ds, "W"); DBZ = _read_xyz(ds, refl_field)
 
         k = z_index === nothing ? cld(nz, 2) : clamp(Int(z_index), 1, nz)
         j = y_index === nothing ? cld(ny, 2) : clamp(Int(y_index), 1, ny)
@@ -261,24 +316,21 @@ end
 
 # ── CLI entry point ──────────────────────────────────────────────────────────
 if abspath(PROGRAM_FILE) == @__FILE__
-    volA_file = length(ARGS) >= 1 ? ARGS[1] : VOLUME_A_FILE
-    volB_file = length(ARGS) >= 2 ? ARGS[2] : VOLUME_B_FILE
-    out_base  = length(ARGS) >= 3 ? ARGS[3] : "variational_demo"
-    cfg       = length(ARGS) >= 4 ? ARGS[4] : nothing
+    isempty(ARGS) && error(
+        "usage: julia --project=. docs/examples/variational_demo.jl " *
+        "<cfradial_dir> [out_basename [config.toml]]")
+    dir      = ARGS[1]
+    out_base = length(ARGS) >= 2 ? ARGS[2] : "variational_demo"
+    cfg      = length(ARGS) >= 3 ? ARGS[3] : nothing
 
-    for f in (volA_file, volB_file)
-        isfile(f) || error(
-            "Not found: $f\n" *
-            "Edit VOLUME_A_FILE / VOLUME_B_FILE at the top of this script, or pass two " *
-            "CfRadial paths positionally:\n" *
-            "  julia --project=. docs/examples/variational_demo.jl radarA.nc radarB.nc")
-    end
-
-    result, prob, out_nc = run_variational_demo(volA_file, volB_file;
-        out_basename = out_base, config = cfg)
+    result, prob, out_nc = run_variational_demo(dir; out_basename = out_base, config = cfg)
 
     if HAVE_CAIROMAKIE
-        horiz, vert = plot_variational_demo(out_nc; out_basename = out_base)
+        # Reflectivity = whatever field carries the `define_detection` tag.
+        refl_field = Daisho.field_with_tag(build_variational_config(cfg), :define_detection;
+                                           for_op = "variational_demo reflectivity plot")
+        horiz, vert = plot_variational_demo(out_nc; out_basename = out_base,
+                                            refl_field = refl_field)
         @info "Wrote $horiz and $vert"
     else
         @info "CairoMakie not installed; skipping plots (the NetCDF above has everything " *

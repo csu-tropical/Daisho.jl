@@ -68,6 +68,28 @@ keep loading and behaving bit-identically.
   problem.
 - New direct dependencies: `LinearAlgebra`, `SparseArrays`, `Krylov`
   (compat `0.10`).
+- Mass continuity is enforced at the **B-spline nodes** by default
+  (`[variational] mass_continuity_lattice = "nodes"`, new `NodeIndex`
+  observation location and node-lattice `SplineEvaluation`): one constraint
+  per cell at the points the analysis is written on (samurai's placement),
+  instead of `mubar³` per cell on the quadrature mish — far fewer rows in
+  `H`, a better-conditioned Hessian, fewer CG iterations. `"mish"` keeps the
+  previous placement. `analysis_derivatives`, `mass_continuity_residual`,
+  `horizontal_divergence` and `vertical_vorticity` take `lattice = :nodes`.
+- Solver progress: `[variational] cg_progress_interval` (default `10`, `0`
+  silent) prints a header, one line per N inner CG iterations (iteration,
+  `‖r‖`, `‖r‖/‖r₀‖`, the exact cost `J` along the CG path) and a per-outer
+  summary with the cost by observation kind (`VarSolverOptions`
+  `report_interval`/`io` replace `verbose`).
+- The variational NetCDF carries the stage-1 `QFLAG` on the regular output
+  grid, resampled from the mish by `[variational] quality_flag_map`
+  (`"nearest"` default, `"worst"`, `"best"`), and `mask_quality_flags` (a
+  list of `QFLAG` flag meanings, empty by default) blanks the wind outputs
+  where the flag carries any listed bit. `QFLAG_MEANINGS`/`qflag_bits`
+  expose the bit vocabulary.
+- `docs/examples/variational_demo.jl` takes a directory of CfRadial files
+  (volumes or one-sweep-per-file airborne archives), like
+  `dual_doppler_demo.jl`.
 - **Wind-accumulator JLD2 schema v2** (`WIND_ACCUMULATOR_SCHEMA_VERSION`
   1 → 2, adding the per-gate model): v1 `*.jld2` wind-accumulator files no
   longer load with `load_wind_accumulator`; regenerate them.
