@@ -23,6 +23,7 @@ function _obs_load(mutate! = identity; cells = (4, 4, 3), extent = (4000.0, 4000
     base["synthesis"]["velocity_variance"] = velocity_variance
     var = Dict{String,Any}(
         "enabled" => true,
+        "cg_progress_interval" => 0,
         "state" => state,
         "background_error" => Dict{String,Any}(
             "default" => Dict("sigma" => 10.0, "filter_length_m" => [1000.0, 1000.0, 1000.0])))
@@ -224,8 +225,8 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
     # ── 4. Mass continuity ─────────────────────────────────────────────────
     @testset "Mass continuity" begin
         ref = Daisho.ExponentialReferenceProfile(1.2, 8500.0, NaN, NaN)
-        grp = Daisho.build_mass_continuity_obs(state, ref, p)
         @test p.variational.mass_continuity_lattice == "nodes"
+        grp = Daisho.build_mass_continuity_obs(state, ref, p)
         @test grp isa Daisho.ObsGroup{Daisho.MassContinuityObs}
         @test grp.kind == :mass_continuity
         # Default lattice: the B-spline nodes (cells + 1 per axis).
@@ -235,8 +236,8 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
         @test all(o -> o.loc isa Daisho.NodeIndex, grp.obs)
         @test all(o -> Daisho.obs_value(o) == 0.0, grp.obs)
         @test all(o -> Daisho.obs_sigma(o) == p.variational.mass_continuity_sigma_per_s, grp.obs)
-        # Analytic anelastic field: u = −(x/2)(w' + w·dlnρ), v = −(y/2)(…).
         @test state.z_nodes ≈ collect(LinRange(0.0, 3000.0, 4))
+        # Analytic anelastic field: u = −(x/2)(w' + w·dlnρ), v = −(y/2)(…).
         H = 8500.0; Htop = 3000.0; w0 = 5.0
         dl = -1 / H
         xs = Daisho.node_coordinates(sgrid.ibasis.data[1, 1, 1])
@@ -280,10 +281,10 @@ _ovars(o, state) = [t.var for t in Daisho.obs_terms(o, state)]
         # dlnρ = 0 drops the w value term (either location type).
         o0 = Daisho.MassContinuityObs(Daisho.MishIndex(1, 1, 1), 1e-4, 0.0)
         @test length(Daisho.obs_terms(o0, state)) == 3
-        # Disabled → empty; state without W → error.
         on = Daisho.MassContinuityObs(Daisho.NodeIndex(1, 1, 1), 1e-4, 0.0)
         @test length(Daisho.obs_terms(on, state)) == 3
         @test Daisho.obs_location(on) == Daisho.NodeIndex(1, 1, 1)
+        # Disabled → empty; state without W → error.
         pmc = _obs_load(b -> (b["variational"]["mass_continuity"] = false))
         @test Daisho.nobs(Daisho.build_mass_continuity_obs(state, ref, pmc)) == 0
         pnw = _obs_load(; state = ["U", "V"]) do b

@@ -35,6 +35,7 @@ function _pipe_load(mutate! = identity)
     base["synthesis"]["max_elevation"] = 90.0
     base["variational"] = Dict{String,Any}(
         "enabled" => true,
+        "cg_progress_interval" => 0,
         "state" => ["U", "V", "W"],
         "background" => "zero",
         "mass_continuity_sigma_per_s" => 1.0e-4,

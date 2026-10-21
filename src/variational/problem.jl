@@ -484,14 +484,16 @@ end
     solver_options(p::DaishoParameters) -> VarSolverOptions
 
 [`VarSolverOptions`](@ref) from `[variational]`: `max_outer_iterations`,
-`max_inner_iterations`, `inner_tolerance`, `outer_tolerance` (other options
-at their defaults).
+`max_inner_iterations`, `inner_tolerance`, `outer_tolerance`, and
+`cg_progress_interval` → `report_interval` (progress lines to `stdout`; 0 =
+silent). Other options at their defaults.
 """
 solver_options(p::DaishoParameters) = VarSolverOptions(
     max_outer = p.variational.max_outer_iterations,
     max_inner = p.variational.max_inner_iterations,
     inner_tolerance = p.variational.inner_tolerance,
-    outer_tolerance = p.variational.outer_tolerance)
+    outer_tolerance = p.variational.outer_tolerance,
+    report_interval = p.variational.cg_progress_interval)
 
 # ── Result ────────────────────────────────────────────────────────────────────
 

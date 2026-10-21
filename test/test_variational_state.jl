@@ -26,6 +26,7 @@ Daisho.rotation_at(::_StateFrame, x::Real, y::Real, z::Real) = [1.0 0.0; 0.0 1.0
         base["grid"]["springsteel"]["k"]["cells"] = 3
         base["variational"] = Dict(
             "enabled" => true,
+            "cg_progress_interval" => 0,
             "state" => ["U", "V", "W", "DBZ", "WIDTH"],
             "scalar_obs" => Dict(
                 "DBZ"   => Dict("sigma" => 5.0, "undetect_value" => -10.0),

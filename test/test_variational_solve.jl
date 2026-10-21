@@ -26,6 +26,7 @@ function _solve_load(mutate! = identity)
     base["synthesis"]["max_elevation"] = 90.0
     base["variational"] = Dict{String,Any}(
         "enabled" => true,
+        "cg_progress_interval" => 0,
         "state" => ["U", "V", "W"],
         "background" => "zero",
         "mass_continuity_sigma_per_s" => 1.0e-4,
@@ -154,7 +155,6 @@ end
         # Truth has w = 0 everywhere.
         eW = maximum(abs.(Wa[ok .| filled]))
         @test eW < 0.5
-        mc = Daisho.mass_continuity_residual(prob, r)
         # Continuity is enforced at the nodes (the default lattice): the
         # residual there is at the solver tolerance; on the mish, between the
         # constraint points, it is only as small as the spline makes it.
@@ -164,8 +164,9 @@ end
         @test size(mcn) == state.node_dims
         mcn_rms = sqrt(sum(abs2, mcn) / length(mcn))
         @test mcn_rms < 1e-5
-        mc_rms = sqrt(sum(abs2, mc) / length(mc))
+        mc = Daisho.mass_continuity_residual(prob, r)
         @test size(mc) == state.dims
+        mc_rms = sqrt(sum(abs2, mc) / length(mc))
         @test mc_rms < 1e-4
         @test Set(keys(r.cost_by_group)) == Set([:radial_velocity, :mass_continuity])
         @test all(>=(0.0), values(r.cost_by_group))

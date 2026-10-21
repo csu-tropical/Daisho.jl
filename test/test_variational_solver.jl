@@ -588,5 +588,72 @@ _rms(x) = sqrt(sum(abs2, x) / length(x))
         @test all(err .< 1e-3)
     end
 
+    # ── CG progress reporting ──────────────────────────────────────────────
+    @testset "CG progress reporting" begin
+        rng = MersenneTwister(11)
+        grid = _tiny_grid()
+        gp = grid.params
+        nm = gp.iDim * gp.jDim * gp.kDim
+        nc = gp.b_iDim * gp.b_jDim * gp.b_kDim
+        n = 3nm
+        C, = _solv_chain(grid, [2.0, 1.5, 0.7], fill(1.5, 3, 3))
+        # Many precise observations so CG needs well over 10 iterations.
+        pts = rand(rng, 1:nm, 400)
+        terms = [[(rand(rng, 1:3), rand(rng, 1:4), randn(rng)) for _ in 1:rand(rng, 1:4)] for _ in 1:400]
+        bm = Daisho.MishObsBackend(:point, (3, nm), pts, randn(rng, 400), 50.0 .+ 50.0 .* rand(rng, 400), terms)
+        backends = Daisho.AbstractObsBackend[bm,
+            _rand_scattered_backend(rng, grid, 30; ext = (4000.0, 3000.0, 3000.0))]
+        set = Daisho.ObsSet(grid, _SOLV_VARS, backends)
+        a_g = randn(rng, 3nc)
+
+        @testset "Model-cost identity" begin
+            cf = Daisho.IncrementalCostFunction(C, set, a_g)
+            J_k = Daisho.cost_nonlinear(cf)
+            x = randn(rng, n)
+            r = copy(cf.rhs); Hx = zeros(n)
+            mul!(Hx, Daisho.HessianOperator(cf), x)
+            r .-= Hx
+            Jm = Daisho.cg_model_cost(J_k, cf.rhs, x, r)
+            Jt = Daisho.cost_nonlinear(cf, cf.ξ_total .+ x)
+            @test abs(Jm - Jt) / abs(Jt) < 1e-10
+        end
+
+        @testset "Printed lines" begin
+            opts(ri, io) = Daisho.VarSolverOptions(max_inner = 400, inner_tolerance = 1e-10,
+                                                   report_interval = ri, io = io)
+            cf_on = Daisho.IncrementalCostFunction(C, set, a_g)
+            buf = IOBuffer()
+            st_on = Daisho.solve_incremental!(cf_on, opts(5, buf))
+            out = String(take!(buf))
+            @test st_on.inner_iterations[1] >= 10
+            lines = split(out, '\n'; keepempty = false)
+            @test startswith(lines[1], "solve_incremental!: n=$(n) controls, nobs=430 (point 400, point 30)")
+            @test any(l -> startswith(l, "  initial  J="), lines)
+            @test any(l -> startswith(l, "outer 1  ‖∇J‖="), lines)
+            cglines = filter(l -> startswith(l, "  cg "), lines)
+            @test length(cglines) >= 2
+            @test occursin(r"^  cg +1  ", cglines[1])
+            @test any(l -> startswith(l, "  outer 1 done: cg="), lines)
+            res = filter(l -> startswith(l, "  result   J="), lines)
+            @test length(res) == st_on.outer_iterations
+            Jprint = parse(Float64, match(r"result   J=(\S+)", res[end]).captures[1])
+            @test abs(Jprint - st_on.cost_history[end]) / abs(st_on.cost_history[end]) < 1e-8
+            # For linear obs the last CG line's model cost approaches the final cost.
+            Jcg = parse(Float64, match(r"  J=(\S+)", cglines[end]).captures[1])
+            @test Jcg >= st_on.cost_history[end] * (1 - 1e-8)
+
+            cf_off = Daisho.IncrementalCostFunction(C, set, a_g)
+            buf0 = IOBuffer()
+            st_off = Daisho.solve_incremental!(cf_off, opts(0, buf0))
+            @test isempty(take!(buf0))
+            @test Daisho.control_increment(cf_on) == Daisho.control_increment(cf_off)
+            @test st_on.cost_history == st_off.cost_history
+            @test st_on.inner_iterations == st_off.inner_iterations
+        end
+
+        @test_throws ArgumentError Daisho.solve_incremental!(
+            Daisho.IncrementalCostFunction(C, set, a_g), Daisho.VarSolverOptions(report_interval = -1))
+    end
+
     @info "test_variational_solver.jl runtime" seconds = time() - t_start threads = Threads.nthreads()
 end
