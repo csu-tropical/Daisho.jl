@@ -231,10 +231,10 @@ function _symmetric_filter_matrix(K, support::Real, x::AbstractVector{Float64},
     return sparse(I, J, V, n, n)
 end
 
-# y = A·x for a CSC matrix, allocation-free on views.
-function _csc_mul!(y::AbstractVector{Float64}, A::SparseMatrixCSC{Float64,Int},
-                   x::AbstractVector{Float64})
-    fill!(y, 0.0)
+# y += A·x for a CSC matrix, allocation-free on views (SparseArrays' `mul!`
+# allocates on a view input on Julia 1.10).
+function _csc_muladd!(y::AbstractVector{Float64}, A::SparseMatrixCSC{Float64,Int},
+                      x::AbstractVector{Float64})
     colptr = A.colptr; rowval = A.rowval; nzval = A.nzval
     @inbounds for j in 1:size(A, 2)
         xj = x[j]
@@ -244,6 +244,10 @@ function _csc_mul!(y::AbstractVector{Float64}, A::SparseMatrixCSC{Float64,Int},
     end
     return y
 end
+
+# y = A·x for a CSC matrix, allocation-free on views.
+_csc_mul!(y::AbstractVector{Float64}, A::SparseMatrixCSC{Float64,Int}, x::AbstractVector{Float64}) =
+    _csc_muladd!(fill!(y, 0.0), A, x)
 
 struct _SparseMulKernel; A::SparseMatrixCSC{Float64,Int}; end
 (k::_SparseMulKernel)(out, in, sc::PencilScratch) = (_csc_mul!(out, k.A, in); nothing)

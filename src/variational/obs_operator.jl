@@ -618,7 +618,7 @@ function apply_Ht!(a::AbstractVector{Float64}, set::ObsSet, y::AbstractVector{Fl
     end
     for (off, b) in set.scattered
         nobs(b) == 0 && continue
-        mul!(a, b.Ht, view(y, (off + 1):(off + nobs(b))), 1.0, 1.0)
+        _csc_muladd!(a, b.Ht, view(y, (off + 1):(off + nobs(b))))
     end
     return a
 end
