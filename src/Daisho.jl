@@ -8,6 +8,8 @@ using NearestNeighbors, Distances
 using CoordRefSystems, Unitful
 using Springsteel
 using JLD2
+using LinearAlgebra, SparseArrays
+import Krylov
 
 # Constants
 const Reff = 4.0 * 6371000.0 / 3.0
@@ -15,6 +17,7 @@ const Reff = 4.0 * 6371000.0 / 3.0
 include("netcdf_parameters.jl")
 include("temperature_profile.jl")
 include("parameters.jl")
+include("reference_density.jl")
 include("radar.jl")
 include("cfradial.jl")
 include("cfradial_reader.jl")
@@ -31,6 +34,7 @@ include("rainrate.jl")
 include("echo_products.jl")
 include("hybrid_scan.jl")
 include("springsteel_adapter.jl")
+include("variational/variational.jl")
 
 # Runtime parameter system exports
 export DaishoParameters, print_config
@@ -41,6 +45,14 @@ export MetadataParameters
 export radar_vars
 export IOParameters
 export SynthesisParameters
+export VariationalParameters, BackgroundErrorEntry, RadialVelocityObsParameters
+export ScalarObsEntry, background_error_for, VARIATIONAL_ROLE_VOCAB, VARIATIONAL_BACKGROUND_VOCAB
+export ReferenceStateParameters
+
+# Reference density profiles (exponential | Springsteel sounding)
+export AbstractReferenceProfile, ExponentialReferenceProfile, SoundingReferenceProfile
+export reference_density, dlnrho_dz, reference_temperature_kelvin, freezing_level_m
+export build_reference_profile
 
 # CfRadial 2.1 data model
 export Volume, SweepGroup, Field, FieldMetadata
@@ -80,5 +92,25 @@ export apply_echo_products, add_echo_products!, echo_output_names
 export HybridScanParameters
 export apply_hybrid_scan, build_hybrid_scan, hybrid_scan_output_names
 export hybrid_beam_heights, hybrid_scan_tilt_angle
+
+# Variational (3DVAR) wind analysis. The operator layer (AbstractLinearOp,
+# SplineProjection, SplineEvaluation, MishFilter, DiagonalScaling, ChainOp,
+# ObsSet, the obs backends, IncrementalCostFunction, HessianOperator,
+# solve_incremental!) stays unexported; `XYZ` is not exported either (it would
+# clash with ColorTypes.XYZ for plotting users) — use `Daisho.XYZ`.
+export analyze_radar_volumes_variational, write_variational_netcdf
+export VariationalProblem, solve_variational, VariationalResult, Background
+export analysis_field, background_field, increment_field
+export mass_continuity_residual, horizontal_divergence, vertical_vorticity
+export evaluate_analysis!, solver_options, VarSolverOptions, VarSolverStats
+export StateVector, StateVariable, create_state_grid, state_view, wind_indices
+export AbstractObservation, RadialVelocitySuperObs, MassContinuityObs
+export ScalarValueObs, PointObs, WindSpeedObs, ObsGroup, ObservationSet
+export MishIndex, NodeIndex, ObsTerm
+export build_observation_set, build_radial_velocity_superobs
+export build_mass_continuity_obs, build_scalar_value_obs
+# Stage-1 extensions used by the variational stage (fall speed, gate error)
+export FallSpeedParameters, GateErrorParameters, GateModel
+export terminal_fall_speed, gate_sigma
 
 end # module Daisho

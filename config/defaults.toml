@@ -51,8 +51,15 @@
 #   define_scanned    the field whose PRESENCE at a gate proves the gate was
 #                      scanned. Marks the cell scanned (was `missing_key`).
 #
-# Reserved (a known tag, consumed by nothing yet):
-#   velocity          future multi-Doppler radial-velocity selector.
+#   velocity          the radial-velocity field. Its presence selects the
+#                      multi-Doppler wind synthesis (WindGridAccumulator), which
+#                      also grids every scalar field.
+#   reflectivity      the gate reflectivity (dBZ) used by the hydrometeor
+#                      fall-speed correction ([synthesis.fall_speed]).
+#   spectrum_width    the gate spectrum width (m/s) used by the per-gate
+#                      velocity error model ([synthesis.gate_error]); optional
+#                      even then (the SW term is omitted without it).
+#   beam_height       take the value from each gate's geometry (see below).
 #
 # ── Three gate states (CfRadial 2.1 / ODIM) ──────────────────────────────────
 #   true missing  gate not measured        -> [io] fill_value (CF _FillValue)
@@ -64,9 +71,9 @@
 # intentional.
 
 [fields]
-DBZ   = ["linear_interp",   "define_detection"]
+DBZ   = ["linear_interp",   "define_detection", "reflectivity"]
 VEL   = ["weighted_interp",  "velocity"]
-WIDTH = ["weighted_interp"]
+WIDTH = ["weighted_interp",  "spectrum_width"]
 SQI   = ["weighted_interp",  "define_scanned"]
 # A `beam_height` field takes its value from each gate's geometry (elevation +
 # range), gridded as a beam-power-weighted mean — a per-cell height even on 2-D
@@ -108,6 +115,26 @@ range_weight_max = 10.0   # upper clamp on the (unitless) range_weight
 range_minimum = 0.0        # metres; lower bound on gate slant range (global default)
 # range_maximum = 150000.0 # metres; upper bound — omit for no limit (default Inf)
 
+# Hydrostatic reference-density profile rho-bar(z). OPTIONAL — defaults to the
+# exponential profile below when absent. Shared by the variational-stage mass
+# continuity constraint, the radar fall-speed correction, and (a future phase)
+# FHC temperature.
+[reference_state]
+source                 = "exponential"   # "exponential" | "sounding"
+# Sounding source only (samurai/Scythe format: a surface line "p_sfc theta qv",
+# then "z theta qv" per level; qv in g/kg). Required (and must exist) when
+# source = "sounding":
+# sounding_file        = "sounding.txt"
+# moisture             = true            # include vapor density in rho-bar
+# Exponential source only: rho-bar(z) = density_surface_kg_m3 * exp(-z / density_scale_height_m)
+density_surface_kg_m3  = 1.2
+density_scale_height_m = 8500.0
+# Exponential source only, optional: a linear temperature lapse T(z) = T0 - Gamma*z,
+# needed for melting-layer derivation from this source. Commented out = no
+# temperature profile (freezing_level_m / temperature_celsius unavailable).
+# temperature_surface_k = 300.0
+# lapse_rate_k_m        = 0.0065
+
 # Stage-1 dual-Doppler retrieval QC. Quality is judged ONLY by the per-component
 # normalized uncertainty (CEDRIC DTEST style), evaluated IN THE OUTPUT FRAME;
 # there is no radar count or gate count threshold — geometry adequacy already
@@ -124,8 +151,134 @@ max_sigma_2       = 2.0   # max normalized σ on output component 2 (V for Carte
 # Max line-of-sight elevation (deg) a gate may have to enter the 2-unknown (u,v)
 # solve; the dropped w·sin(el) term contaminates steep beams (airborne tail
 # radars reach ±70°). Above this, gates still grid scalars but not the wind.
-# Optional; defaults to 45.0.
+# Optional; defaults to 45.0. Applied only when include_vertical_velocity = false
+# (in the 3-unknown system steep beams observe w and are kept).
 max_elevation     = 45.0
+# Accumulate the (u,v,w) 3x3 normal system (g = [sin az cos el, cos az cos el,
+# sin el]) instead of the (u,v) 2x2 one. Needed by the variational stage. The
+# stage-1 U/V product is unchanged in meaning (the (u,v) block is solved).
+# Optional; defaults to false.
+include_vertical_velocity = false
+
+# Hydrometeor fall-speed correction of each gate's radial velocity (samurai
+# relations), OPTIONAL. Uncomment the table to enable it (a present table means
+# enabled; every key is optional and defaults as shown). Needs a [fields] entry
+# tagged `reflectivity`. Fall speeds are negative (downward), in m/s:
+#   w_t = -coefficient * Z^exponent * (rho(0)/rho(z))^density_exponent, Z linear
+# with rho from [reference_state]; the corrected value is v_r - w_t*sin(el).
+# Below the melting layer the rain relation is used; above it, snow at or below
+# mixed_phase_dbz, rain above rain_dbz, linear in dBZ between; across the
+# melting layer, linear in height between the two.
+# [synthesis.fall_speed]
+# rain_coefficient       = 2.6      # rain: coefficient (m/s), Joss & Waldvogel (1971)
+# rain_exponent          = 0.107    # rain: exponent on linear Z
+# snow_coefficient       = 0.817    # snow: coefficient (m/s), Atlas et al. (1973)
+# snow_exponent          = 0.063    # snow: exponent on linear Z
+# density_exponent       = 0.45     # exponent on rho(0)/rho(z), Beard (1985)
+# mixed_phase_dbz        = 20.0     # dBZ at/below which the above-layer speed is snow
+# rain_dbz               = 30.0     # dBZ above which the above-layer speed is rain
+# melting_layer_bottom_m = 4500.0   # m; absent => the [reference_state] freezing level
+#                                   #   (an error if that profile has no temperature)
+# melting_layer_depth_m  = 1000.0   # m; height-blend depth above melting_layer_bottom_m
+
+# Per-gate radial-velocity error model, OPTIONAL. Uncomment to enable (every key
+# optional). Per-gate sigma (m/s):
+#   sigma = max(error_guard_min_m_s, |sin(el)|*fall_speed_error_m_s + SW*spectrum_width_error_factor)
+# folded into the gridding weight as w' = w * velocity_variance / sigma^2. The SW
+# term needs a [fields] entry tagged `spectrum_width` (omitted otherwise).
+# [synthesis.gate_error]
+# fall_speed_error_m_s        = 2.0   # m/s, scaled by |sin(el)|
+# spectrum_width_error_factor = 1.0   # multiplier on the gate spectrum width
+# error_guard_min_m_s         = 1.0   # m/s; lower clamp (stability guard) on sigma
+
+# Incremental 3DVAR wind solver (variational stage), OPTIONAL. The block (and
+# its sub-tables) validates strictly whether or not it is enabled, so a config
+# exercises the whole schema before flipping the switch; absent entirely ⇒
+# defaults (disabled, [fields]-independent).
+[variational]
+enabled = false
+# State-vector variable names, in control-variable order: "U"/"V"/"W" or a
+# [fields] name (appended as a value-observed scalar state variable). Must
+# be non-empty, unique, and contain both "U" and "V".
+state = ["U", "V", "W"]
+# Background (first guess) of U/V; W and scalars always start from 0:
+#   "zero"                    0 everywhere, configured sigma (samurai-like)
+#   "synthesis"               smooth spline fit to the stage-1 (u,v) at unflagged
+#                             points (one extra CG solve) + smoothed stage-1 sigma map
+#                             clamped to [sigma/10, sigma]
+#   "synthesis_uniform_sigma" the same smooth fit + configured sigma
+#   "synthesis_profile"       level-mean stage-1 (u,v) profile + configured sigma
+background = "zero"
+background_error_inflation = 1.0     # multiplies sigma_b in every "synthesis*" mode
+                                      # (guards against double-counting the radar data)
+# Enforce anelastic mass continuity (div(u,v) + dw/dz + w*dlnrhobar/dz = 0) as
+# a pseudo-observation at every point of mass_continuity_lattice. Requires "W"
+# in state.
+mass_continuity = true
+# Where the continuity pseudo-observations sit:
+#   "nodes"  the B-spline nodes (cells + 1 per axis = the default regular
+#            output grid; samurai's placement). One constraint per cell.
+#   "mish"   every quadrature point (mubar per cell per axis): mubar^3 times
+#            the constraint weight per cell and mubar^3 times the rows.
+mass_continuity_lattice = "nodes"
+mass_continuity_sigma_per_s = 1.0e-4 # sigma of the divergence residual (s^-1) per point; 1/sigma^2 weight
+max_outer_iterations = 1             # outer Gauss-Newton loops; >1 only matters with nonlinear obs
+max_inner_iterations = 200           # inner conjugate-gradient iterations per outer loop
+inner_tolerance = 1.0e-4             # relative CG residual stopping tolerance, in (0, 1)
+outer_tolerance = 1.0e-3             # relative increment-norm stopping tolerance, in (0, 1)
+# Solver progress: a header, one line every N inner CG iterations (iteration,
+# residual norm, residual relative to the start, cost J), and a summary per
+# outer iteration. 0 = silent.
+cg_progress_interval = 10
+output_background = false            # write *_BACKGROUND fields
+output_increment  = false            # write *_INCREMENT fields
+output_mish       = false            # also write mish-lattice fields + stage-1/super-obs diagnostics
+# Stage-1 QFLAG on the regular output grid, resampled from the mish:
+#   "nearest"  the nearest mish point on each axis
+#   "worst"    bitwise OR of the mish points within half a cell (most masking)
+#   "best"     bitwise AND of the same neighbourhood (least masking)
+quality_flag_map = "nearest"
+# Blank (NaN) the regular-grid winds (U, V, W, VORT, DIV, MCRESIDUAL, and their
+# derivative/background/increment fields) where QFLAG carries any listed bit.
+# Vocabulary = the QFLAG flag_meanings: "sigma1_above_threshold",
+# "sigma2_above_threshold", "singular_geometry", "no_data". Empty = no masking
+# (QFLAG is still written).
+mask_quality_flags = []
+filter_type = "gaussian"             # "gaussian" | "lanczos" (Lanczos has negative lobes near boundaries)
+
+# Per-state-variable background error: sigma (native units: m/s for winds)
+# and the mish-space filter length in METRES along each (i, j, k) axis (0 on
+# an axis disables filtering there). filter_length_m is the Gaussian standard
+# deviation of the filter (Lanczos: its half-width), converted to cells by
+# each axis' cell width. One to two cells is the usual choice; the filter's cost
+# per CG iteration and the CG iteration count both grow with it. "default"
+# applies to any state variable without its own entry; every state variable
+# must resolve one or the other.
+[variational.background_error]
+default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
+W       = { sigma = 2.0,  filter_length_m = [2000.0, 2000.0, 500.0] }
+# DBZ   = { sigma = 10.0, filter_length_m = [1000.0, 1000.0, 250.0] }
+
+# Radial-velocity super-observation parameters (from the stage-1 accumulator's
+# per-point normal system). Every key optional.
+[variational.radial_velocity]
+error_inflation = 1.0               # multiplies sigma^2_vr for the super-obs only
+horizontal_approximation = false    # drop the w*sin(el) term (samurai horizontal_radar_appx);
+                                     # allows [synthesis] include_vertical_velocity = false
+eigenvalue_guard_relative = 1.0e-10 # eigendirections below this fraction of lambda_max emit no obs
+
+# One [variational.scalar_obs.<name>] table is REQUIRED for every [fields]
+# name appearing in `state` above, e.g.:
+# [variational.scalar_obs.DBZ]
+# sigma = 5.0             # observation-error sigma, native field units
+# undetect_value = -10.0  # value substituted for an [io] undetect gate
+
+# Optional explicit role override (values from: wind_u, wind_v, wind_w,
+# reflectivity, scalar); without it, roles resolve automatically (U/V ->
+# wind_u/wind_v, W -> wind_w, a `reflectivity`-tagged field -> reflectivity,
+# any other [fields] name -> scalar):
+# [variational.roles]
+# W = "wind_w"
 
 # Shared Cartesian base geometry. The volume, composite, ppi, and column (QVP)
 # products all read this unless they have their own override section below.
@@ -238,6 +391,10 @@ cells = 10
 [grid.springsteel.k.bc]
 min = "natural"
 max = "natural"
+# When [variational] is enabled, its state variables (U, V, W — not [fields]
+# entries) reuse this same per-field override table by name, e.g. w = 0 at
+# the surface (Dirichlet on the k-min side):
+# W = { min = "dirichlet" }
 
 # CF-1.12 global attributes copied into every gridded NetCDF output. Every
 # key below must be present in your config; the values shipped here are

@@ -2,6 +2,109 @@
 
 ## Unreleased
 
+### Variational wind solver (stage 2)
+
+An incremental, samurai-style 3DVAR analysis producing a coupled `(u, v, w)`
+wind field satisfying anelastic mass continuity, built on Springsteel's
+cubic B-spline quadrature grid. New `src/variational/` operator layer
+(spline projection/evaluation, mish-space filter, observation backends,
+incremental cost function, Gauss–Newton/CG solver via Krylov.jl), new
+`[reference_state]`, `[variational]`, and `[synthesis]` extensions —
+`include_vertical_velocity`, `[synthesis.fall_speed]`,
+`[synthesis.gate_error]`. See the
+[theory](https://csu-tropical.github.io/Daisho.jl/dev/theory/variational_wind/)
+and [guide](https://csu-tropical.github.io/Daisho.jl/dev/guide/variational_wind/)
+pages, the
+[Variational Wind Analysis](https://csu-tropical.github.io/Daisho.jl/dev/api/variational_wind/)
+and
+[Variational Operator Layer](https://csu-tropical.github.io/Daisho.jl/dev/api/variational_operators/)
+API reference pages, and `docs/examples/variational_demo.jl`.
+
+All additions are **optional and non-breaking**: `[reference_state]`,
+`[variational]`, `[synthesis.fall_speed]`, and `[synthesis.gate_error]` are
+absent by default, and `[synthesis] include_vertical_velocity` defaults to
+`false`, so every existing configuration and the stage-1 `(u, v)` product
+keep loading and behaving bit-identically.
+
+- `analyze_radar_volumes_variational(volumes, output_file, index_time, sgrid, p)`
+  is the file-writing entry point: it grids every volume onto the Springsteel
+  quadrature lattice through the stage-1 `WindGridAccumulator`, runs the
+  scalar spectral products unchanged, builds and solves the
+  `VariationalProblem`, and writes one CF-1.12 NetCDF with
+  `write_variational_netcdf` — the gridded scalar fields plus, on the regular
+  output grid, `U`/`V`/`W` (or `<name>_ANALYSIS` for a `[fields]`-derived
+  state variable), `VORT`, `DIV`, `MCRESIDUAL`, and optionally
+  `*_BACKGROUND`/`*_INCREMENT`/derivative fields and, on the mish
+  (quadrature) lattice, `*_MISH`, the stage-1 product, `NOBS_VR`, and
+  `RHOBAR`. `write_radar_netcdf` gained a `time` keyword (seconds since the
+  Unix epoch; `nothing` keeps the historical time-less layout) so the
+  variational and plain spectral writers share one time-aware code path.
+- New `[fields]` tags `reflectivity` (gate dBZ for the fall-speed correction
+  and the `wind_synthesis` `reflectivity` state role) and `spectrum_width`
+  (gate spectrum width for the per-gate error model).
+- `[variational] background` is a flat vocabulary: `"zero"` (default),
+  `"synthesis"` (smooth spline fit to stage 1 + smoothed stage-1 σ map),
+  `"synthesis_uniform_sigma"`, `"synthesis_profile"` (level-mean stage-1
+  profile). The mish-space background-error filter is variance-normalised,
+  so `[variational.background_error] sigma` is the per-point
+  background-error standard deviation.
+- New exported API: the pipeline (`analyze_radar_volumes_variational`,
+  `write_variational_netcdf`); the in-memory problem/result
+  (`VariationalProblem`, `Background`, `solve_variational`,
+  `VariationalResult`, `analysis_field`, `background_field`,
+  `increment_field`, `mass_continuity_residual`, `horizontal_divergence`,
+  `vertical_vorticity`, `evaluate_analysis!`); the state vector
+  (`StateVector`, `StateVariable`, `create_state_grid`, `state_view`,
+  `wind_indices`); observations (`AbstractObservation`,
+  `RadialVelocitySuperObs`, `MassContinuityObs`, `ScalarValueObs`,
+  `PointObs`, `WindSpeedObs`, `ObsGroup`, `ObservationSet`, `MishIndex`,
+  `ObsTerm`, `build_observation_set`, `build_radial_velocity_superobs`,
+  `build_mass_continuity_obs`, `build_scalar_value_obs`); the solver
+  (`solver_options`, `VarSolverOptions`, `VarSolverStats`); and the stage-1
+  extensions (`FallSpeedParameters`, `GateErrorParameters`, `GateModel`,
+  `terminal_fall_speed`, `gate_sigma`). The unexported operator layer
+  (spline/filter operators, observation backends, cost function) is
+  documented on its own API page for callers who need to build a custom
+  problem.
+- New direct dependencies: `LinearAlgebra`, `SparseArrays`, `Krylov`
+  (compat `0.10`).
+- Mass continuity is enforced at the **B-spline nodes** by default
+  (`[variational] mass_continuity_lattice = "nodes"`, new `NodeIndex`
+  observation location and node-lattice `SplineEvaluation`): one constraint
+  per cell at the points the analysis is written on (samurai's placement),
+  instead of `mubar³` per cell on the quadrature mish — far fewer rows in
+  `H`, a better-conditioned Hessian, fewer CG iterations. `"mish"` keeps the
+  previous placement. `analysis_derivatives`, `mass_continuity_residual`,
+  `horizontal_divergence` and `vertical_vorticity` take `lattice = :nodes`.
+- Solver progress: `[variational] cg_progress_interval` (default `10`, `0`
+  silent) prints a header, one line per N inner CG iterations (iteration,
+  `‖r‖`, `‖r‖/‖r₀‖`, the exact cost `J` along the CG path) and a per-outer
+  summary with the cost by observation kind (`VarSolverOptions`
+  `report_interval`/`io` replace `verbose`).
+- The variational NetCDF carries the stage-1 `QFLAG` on the regular output
+  grid, resampled from the mish by `[variational] quality_flag_map`
+  (`"nearest"` default, `"worst"`, `"best"`), and `mask_quality_flags` (a
+  list of `QFLAG` flag meanings, empty by default) blanks the wind outputs
+  where the flag carries any listed bit. `QFLAG_MEANINGS`/`qflag_bits`
+  expose the bit vocabulary.
+- `docs/examples/variational_demo.jl` takes a directory of CfRadial files
+  (volumes or one-sweep-per-file airborne archives), like
+  `dual_doppler_demo.jl`.
+- **Wind-accumulator JLD2 schema v2** (`WIND_ACCUMULATOR_SCHEMA_VERSION`
+  1 → 2, adding the per-gate model): v1 `*.jld2` wind-accumulator files no
+  longer load with `load_wind_accumulator`; regenerate them.
+
+### CfRadial 1 packed (`n_points`) field layout
+
+- `read_cfradial` now reads CfRadial 1 files whose fields are stored as 1-D
+  variables over an `n_points` dimension indexed per ray by `ray_n_gates` /
+  `ray_start_index` (the layout LROSE/Radx and soloii write). Gates a ray does
+  not store are padded with true-missing (`NaN`). Previously such files loaded
+  with no fields at all and every downstream product was silently empty.
+- `read_cfradial` warns when a file yields no field variables.
+- `analyze_radar_volumes_variational` raises an `ArgumentError` when no gate
+  of the velocity field was gridded, instead of returning a zero analysis.
+
 ## v0.2.0 — Flat per-field tag vocabulary, optional blocks, gate-state terminology
 
 *First registered release. Changes below are relative to the unregistered v0.1

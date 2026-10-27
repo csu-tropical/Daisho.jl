@@ -234,6 +234,189 @@ function make_synthetic_dual_doppler(; u::Real = 8.0, v::Real = -3.0,
 end
 
 """
+    make_synthetic_radar_volumes_field(wind::Function, radars::AbstractVector;
+        ref_lat = 16.0, ref_lon = -24.0,
+        azimuths = collect(0.0:2.0:358.0),
+        elevations = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0],
+        ranges = collect(2000.0:500.0:35000.0),
+        fallspeed::Union{Nothing,Function} = nothing,
+        dbz::Union{Nothing,Function} = nothing,
+        width::Union{Nothing,Function} = nothing,
+        return_gate_positions::Bool = false)
+
+N-radar generalization of [`make_synthetic_dual_doppler_field`](@ref). Builds one
+multi-elevation `Volume` per entry of `radars` (each a `(lat, lon, name)`
+NamedTuple), with `VEL` at every gate the radial projection of a *spatially
+varying* wind `wind(x, y, z) -> (u, v, w)` sampled at that gate's own Cartesian
+position **in the analysis reference frame** `(ref_lat, ref_lon)`,
+
+    VEL = u·sin(az)·cos(el) + v·cos(az)·cos(el) + (w + w_t)·sin(el)
+
+using the beam's own azimuth/elevation, with `w_t = fallspeed(x, y, z)` (default
+0 when `fallspeed === nothing`). `dbz`/`width`, when given, fill the `DBZ`/
+`WIDTH` fields from `f(x, y, z)`.
+
+Gate Cartesian positions are computed with the *same* geometry the real
+gridding accumulator uses, by calling Daisho's own internal helpers directly
+rather than re-deriving them: a Transverse Mercator projection anchored at
+`(ref_lat, ref_lon)` (matching `_grid_sweep_products_3d!`'s `TM`), fed through
+`Daisho._sweep_zyx_and_beams` (radar→TM-frame placement + per-gate
+azimuth/elevation/range/`beam_height`, the 4/3-earth refraction model) and
+`Daisho._sweep_gate_yx` (4/3-earth ground-range → gate `(y, x)`). So a wind
+field sampled here is consistent with where `grid_sweep!` will place that same
+gate.
+
+With `return_gate_positions = true`, also returns, per radar, a `Vector` (one
+entry per sweep, in `volume.sweeps` order) of `(x = ..., y = ..., z = ...)`
+gate-position matrices shaped `(n_rays, n_gates)` — matching the `VEL`/`DBZ`/
+`WIDTH` field-data layout — so tests can check geometry or recompute the
+expected field values at each gate.
+"""
+function make_synthetic_radar_volumes_field(wind::Function, radars::AbstractVector;
+        ref_lat::Real = 16.0, ref_lon::Real = -24.0,
+        azimuths = collect(0.0:2.0:358.0),
+        elevations = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0],
+        ranges = collect(2000.0:500.0:35000.0),
+        fallspeed::Union{Nothing,Function} = nothing,
+        dbz::Union{Nothing,Function} = nothing,
+        width::Union{Nothing,Function} = nothing,
+        return_gate_positions::Bool = false)
+
+    # Same TM projection `_grid_sweep_products_3d!` builds from the GridSpec's
+    # `reference_latitude`/`reference_longitude` — here anchored at the
+    # caller's analysis-frame reference instead of a GridSpec.
+    TM = Daisho.CoordRefSystems.shift(
+        Daisho.TransverseMercator{1.0, Float64(ref_lat), Daisho.WGS84Latest},
+        lonₒ = Float64(ref_lon))
+
+    n_rays_g  = length(azimuths)
+    n_gates_g = length(ranges)
+
+    function _sweep_and_positions(elevation, sweep_no, t0, radar_lat, radar_lon)
+        ts = [t0 + Second(i - 1) for i in 1:n_rays_g]
+        az = collect(Float64, azimuths); el = fill(Float64(elevation), n_rays_g)
+        sweep = SweepGroup(
+            sweep_number = sweep_no, sweep_mode = "azimuth_surveillance",
+            fixed_angle = Float64(elevation), time = ts,
+            range = collect(Float64, ranges), azimuth = az, elevation = el)
+
+        # Identical geometry call to what the real accumulator makes
+        # (`_grid_sweep_products_3d!` / `_ref_grid_sweep_wind_3d!`).
+        _, radar_zyx, beams, _, _ = Daisho._sweep_zyx_and_beams(
+            sweep, Float64(radar_lat), Float64(radar_lon), 0.0, TM)
+        gate_yx = Daisho._sweep_gate_yx(radar_zyx, beams)
+
+        # Float64 (not Float32 like `make_synthetic_dual_doppler`'s raw-instrument
+        # emulation): this helper exists to validate exact gate-level physics, so
+        # gate values are kept at full precision rather than instrument-rounded.
+        vel = Array{Float64}(undef, n_rays_g, n_gates_g)
+        dbz_data   = dbz   === nothing ? nothing : Array{Float64}(undef, n_rays_g, n_gates_g)
+        width_data = width === nothing ? nothing : Array{Float64}(undef, n_rays_g, n_gates_g)
+        xs = Array{Float64}(undef, n_rays_g, n_gates_g)
+        ys = Array{Float64}(undef, n_rays_g, n_gates_g)
+        zs = Array{Float64}(undef, n_rays_g, n_gates_g)
+
+        for r in 1:n_rays_g, gcol in 1:n_gates_g
+            # Flat gate index matches `_sweep_zyx_and_beams`'s column-major
+            # (gate, ray) layout: idx = (ray-1)*n_gates + gate.
+            flat = (r - 1) * n_gates_g + gcol
+            azr = beams[flat, 1]; elr = beams[flat, 2]
+            x = gate_yx[2, flat]; y = gate_yx[1, flat]; z = beams[flat, 4]
+            xs[r, gcol] = x; ys[r, gcol] = y; zs[r, gcol] = z
+            u, v, w = wind(x, y, z)
+            wt = fallspeed === nothing ? 0.0 : fallspeed(x, y, z)
+            a = sin(azr) * cos(elr); b = cos(azr) * cos(elr)
+            vel[r, gcol] = u * a + v * b + (w + wt) * sin(elr)
+            dbz_data   === nothing || (dbz_data[r, gcol]   = dbz(x, y, z))
+            width_data === nothing || (width_data[r, gcol] = width(x, y, z))
+        end
+
+        add_field!(sweep, "VEL", vel, FieldMetadata(units = "m/s", long_name = "VEL"))
+        dbz_data === nothing ||
+            add_field!(sweep, "DBZ", dbz_data,
+                       FieldMetadata(units = "dBZ", long_name = "DBZ", fill_value = -32768.0))
+        width_data === nothing ||
+            add_field!(sweep, "WIDTH", width_data,
+                       FieldMetadata(units = "m/s", long_name = "WIDTH"))
+        return sweep, (x = xs, y = ys, z = zs)
+    end
+
+    vols = Volume[]
+    gate_positions = Vector{Any}(undef, length(radars))
+    for (ri, radar) in enumerate(radars)
+        t0 = DateTime(2024, 1, 1, 0, 0, 0)
+        built = [ _sweep_and_positions(elevations[s], s - 1,
+                    t0 + Second((s - 1) * n_rays_g), radar.lat, radar.lon)
+                  for s in eachindex(elevations) ]
+        sweeps = first.(built)
+        gate_positions[ri] = last.(built)
+        push!(vols, Volume(
+            instrument_name = radar.name, site_name = radar.name, title = "synthetic",
+            institution = "Test", source = "Test", history = "Test",
+            time_coverage_start = t0,
+            time_coverage_end = sweeps[end].time[end],
+            latitude = Float64(radar.lat), longitude = Float64(radar.lon), altitude = 0.0,
+            sweeps = sweeps))
+    end
+
+    return_gate_positions || return Tuple(vols)
+    return (Tuple(vols), Tuple(gate_positions))
+end
+
+"""
+    make_synthetic_dual_doppler_field(wind::Function; ref_lat = 16.0, ref_lon = -24.0,
+        radarA_lat = ref_lat - 0.20, radarA_lon = ref_lon,
+        radarB_lat = ref_lat,        radarB_lon = ref_lon - 0.20,
+        azimuths = collect(0.0:2.0:358.0),
+        elevations = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0],
+        ranges = collect(2000.0:500.0:35000.0),
+        fallspeed = nothing, dbz = nothing, width = nothing,
+        return_gate_positions = false) -> (volA, volB[, posA, posB])
+
+Spatially varying analog of [`make_synthetic_dual_doppler`](@ref): the *same*
+two-radar geometry (radar A south of the grid origin, radar B west, giving a
+~90° beam-crossing angle near the origin) and the *same* default keyword
+arguments, so tests can swap one helper for the other — but `VEL` is the radial
+projection of a wind **field** `wind(x, y, z) -> (u, v, w)` sampled at each
+gate's own Cartesian position, rather than a spatially uniform `(u, v)`. A
+uniform `wind = (x, y, z) -> (u, v, 0.0)` reproduces
+`make_synthetic_dual_doppler(u=u, v=v)`'s `VEL` fields to floating-point
+precision (this helper keeps `VEL`/`DBZ`/`WIDTH` at `Float64`, unlike
+`make_synthetic_dual_doppler`'s `Float32` raw-instrument emulation, so the two
+agree up to `make_synthetic_dual_doppler`'s own `Float32` rounding).
+
+See [`make_synthetic_radar_volumes_field`](@ref) for the shared gate-geometry
+and field-construction machinery, the `fallspeed`/`dbz`/`width` kwargs, and
+`return_gate_positions`.
+"""
+function make_synthetic_dual_doppler_field(wind::Function;
+        ref_lat::Real = 16.0, ref_lon::Real = -24.0,
+        radarA_lat::Real = ref_lat - 0.20, radarA_lon::Real = ref_lon,
+        radarB_lat::Real = ref_lat,        radarB_lon::Real = ref_lon - 0.20,
+        azimuths = collect(0.0:2.0:358.0),
+        elevations = [0.5, 1.0, 2.0, 3.0, 4.0, 6.0, 8.0],
+        ranges = collect(2000.0:500.0:35000.0),
+        fallspeed::Union{Nothing,Function} = nothing,
+        dbz::Union{Nothing,Function} = nothing,
+        width::Union{Nothing,Function} = nothing,
+        return_gate_positions::Bool = false)
+    radars = [(lat = Float64(radarA_lat), lon = Float64(radarA_lon), name = "RADARA"),
+              (lat = Float64(radarB_lat), lon = Float64(radarB_lon), name = "RADARB")]
+    result = make_synthetic_radar_volumes_field(wind, radars;
+        ref_lat = ref_lat, ref_lon = ref_lon,
+        azimuths = azimuths, elevations = elevations, ranges = ranges,
+        fallspeed = fallspeed, dbz = dbz, width = width,
+        return_gate_positions = return_gate_positions)
+    if return_gate_positions
+        (volA, volB), (posA, posB) = result
+        return volA, volB, posA, posB
+    else
+        volA, volB = result
+        return volA, volB
+    end
+end
+
+"""
 Build a deterministic CfRadial 2.1 `Volume` for round-trip tests, with the
 moment fields named in `fields`.
 """
@@ -321,10 +504,18 @@ The file contains:
   * `field_names` fields over `(range, time)`. The first field embeds a
     `-32768` fill (→ NaN, true-missing) and a `-9999` value (clear-air; stays
     finite) so the fill/sentinel distinction is exercised.
+
+`packed = true` writes the fields in CfRadial 1's **packed** ("n_points")
+layout instead: 1-D `short` variables over an `n_points` dimension with
+`scale_factor`/`add_offset`, indexed per ray by `ray_n_gates(time)` /
+`ray_start_index(time)`, as LROSE/Radx and soloii write them. The LAST ray of
+every sweep stores one gate fewer than `n_gates`, so readers must pad. The
+stored (scaled) values equal the 2-D layout's values gate for gate.
 """
 function build_synthetic_cfradial_v1(path;
         n_sweeps::Int = 2, rays_per_sweep::Int = 4, n_gates::Int = 5,
-        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false)
+        field_names = ["DBZ", "VEL"], fill_volume_number::Bool = false,
+        packed::Bool = false)
 
     n_rays = n_sweeps * rays_per_sweep
     slen = 32
@@ -479,7 +670,50 @@ function build_synthetic_cfradial_v1(path;
     defVar(ds, "range_correction", Float32, ())[:]     = 0.0
     defVar(ds, "roll_correction", Float32, ())[:]      = 0.1
 
-    # Field variables over (range, time). First field embeds fill/sentinels.
+    # Field variables. First field embeds fill/sentinels.
+    if packed
+        # Packed layout: the last ray of each sweep is one gate short.
+        ray_ngates = fill(Int32(n_gates), n_rays)
+        for j in 1:n_sweeps
+            ray_ngates[j * rays_per_sweep] = Int32(n_gates - 1)
+        end
+        ray_start = Vector{Int32}(undef, n_rays)
+        acc = Int32(0)
+        for r in 1:n_rays
+            ray_start[r] = acc          # 0-based start index
+            acc += ray_ngates[r]
+        end
+        n_points = Int(acc)
+        ds.dim["n_points"] = n_points
+        defVar(ds, "ray_n_gates", Int32, ("time",),
+               attrib = DataStructures.OrderedDict("long_name" => "number_of_gates",
+                                                   "_FillValue" => Int32(-9999)))[:] = ray_ngates
+        defVar(ds, "ray_start_index", Int32, ("time",),
+               attrib = DataStructures.OrderedDict(
+                   "long_name" => "array_index_to_start_of_ray"))[:] = ray_start
+        for (fi, name) in enumerate(field_names)
+            attrib = DataStructures.OrderedDict{String,Any}(
+                "_FillValue"   => Int16(-32768),
+                "scale_factor" => Float32(0.5),
+                "add_offset"   => Float32(0.0),
+                "long_name"    => name,
+                "units"        => name == "DBZ" ? "dBZ" : name == "VEL" ? "m/s" : "",
+            )
+            v = defVar(ds, name, Int16, ("n_points",), attrib = attrib)
+            data = Float32.(reshape(1:(n_gates * n_rays), n_gates, n_rays)) .+ Float32(fi * 0.5)
+            if fi == 1
+                data[1, 1] = -32768.0f0
+                data[2, 1] = -9999.0f0
+            end
+            raw = Vector{Int16}(undef, n_points)
+            for r in 1:n_rays, g in 1:Int(ray_ngates[r])
+                x = data[g, r]
+                raw[Int(ray_start[r]) + g] = x == -32768.0f0 ? Int16(-32768) :
+                                             Int16(round(x / 0.5f0))   # scaled storage
+            end
+            v.var[:] = raw
+        end
+    else
     for (fi, name) in enumerate(field_names)
         attrib = DataStructures.OrderedDict{String,Any}(
             "_FillValue" => Float32(-32768),
@@ -493,6 +727,7 @@ function build_synthetic_cfradial_v1(path;
             data[2, 1] = -9999.0f0    # clear-air/undetect → stays finite
         end
         v[:, :] = data
+    end
     end
 
     close(ds)

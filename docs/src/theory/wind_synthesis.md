@@ -128,3 +128,10 @@ needs to recover masked baseline points. [`finalize_wind`](@ref) produces the
 single-stage *product*; the accumulator is the richer *input* for stage 2.
 Because accumulation is linear, [`merge_wind_accumulators!`](@ref) across files
 and radars is an exact elementwise sum.
+
+Stage 2 (the [variational wind solver](variational_wind.md)) eigen-splits each
+point's per-point normal system into radial-velocity super-observations and
+solves them, together with anelastic mass continuity, as an incremental
+3DVAR analysis that produces a coupled `(u, v, w)` field on the same
+quadrature grid. See the [variational theory page](variational_wind.md) for
+the full formulation.

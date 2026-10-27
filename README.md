@@ -17,7 +17,7 @@ Daisho is a data analysis and assimilation package written in Julia for atmosphe
 - **Beam-aware gridding** — interpolate radar observations onto 3-D Cartesian, lat/lon, RHI, PPI, composite, and column grids, with edge-referenced radius-of-influence that accounts for beam geometry on moving (airborne / ship-based) platforms.
 - **Spectral gridding** — grid directly onto [Springsteel.jl](https://github.com/csu-tropical/Springsteel.jl) semi-spectral grids for downstream variational analysis.
 - **Echo products** — post-gridding hydrometeor identification (FHC) and rain-rate retrievals under a configurable `[echo]` namespace.
-- **Multi-Doppler wind synthesis** — stage-1 (u, v) variational synthesis (in development).
+- **Multi-Doppler wind synthesis** — stage-1 `(u, v)` least-squares retrieval plus an incremental 3DVAR variational solver producing a mass-continuity-consistent `(u, v, w)` analysis.
 - **TOML-driven configuration** — the entire read → QC → grid pipeline is driven by a single, strictly-validated `DaishoParameters` TOML file.
 
 ## Installation
@@ -68,7 +68,7 @@ Full documentation lives at **[csu-tropical.github.io/Daisho.jl/dev/](https://cs
 | [Quality Control](https://csu-tropical.github.io/Daisho.jl/dev/guide/quality_control/) | Threshold QC, despeckling, platform-motion removal, terrain masking |
 | [Gridding](https://csu-tropical.github.io/Daisho.jl/dev/guide/gridding/) | Cartesian / lat-lon / RHI / PPI / composite / column grids and the accumulator workflow |
 | [Spectral Gridding](https://csu-tropical.github.io/Daisho.jl/dev/guide/spectral_gridding/) | Gridding onto Springsteel semi-spectral grids |
-| [Multi-Doppler Wind Synthesis](https://csu-tropical.github.io/Daisho.jl/dev/guide/wind_synthesis/) | Stage-1 (u, v) variational synthesis |
+| [Multi-Doppler Wind Synthesis](https://csu-tropical.github.io/Daisho.jl/dev/guide/wind_synthesis/) | Stage-1 `(u, v)` retrieval and the [variational `(u, v, w)` solver](https://csu-tropical.github.io/Daisho.jl/dev/guide/variational_wind/) |
 | [SRTM Terrain Integration](https://csu-tropical.github.io/Daisho.jl/dev/guide/srtm/) | Digital elevation models for terrain-aware QC |
 | [Theory](https://csu-tropical.github.io/Daisho.jl/dev/theory/beam_geometry/) | Beam geometry, the gridding algorithm, and wind-synthesis derivations |
 | [API Reference](https://csu-tropical.github.io/Daisho.jl/dev/api/parameters/) | Full docstring reference for parameters, types, I/O, QC, gridding, and echo products |

@@ -14,4 +14,6 @@ Daisho.save_wind_accumulator
 Daisho.load_wind_accumulator
 Daisho.merge_wind_accumulators!
 Daisho.write_wind_synthesis
+Daisho.QFLAG_MEANINGS
+Daisho.qflag_bits
 ```

@@ -65,6 +65,15 @@ The two thresholds are **independent** — a geometry that determines one compon
 well but not the other flags only the poor one. There is no radar-count or
 gate-count threshold; geometry adequacy already shows up in σ.
 
+Three optional additions feed the [variational wind solver](variational_wind.md)
+(stage 2) rather than the stage-1 `(u, v)` product itself: `include_vertical_velocity`
+accumulates the 3×3 `(u, v, w)` normal system instead of the 2×2 `(u, v)` one;
+`[synthesis.fall_speed]` corrects each gate's radial velocity for hydrometeor
+terminal fall speed before it enters the normal system; and `[synthesis.gate_error]`
+scales each gate's weight by a per-gate error model. All three default to off/absent,
+leaving the stage-1 product bit-identical. See the
+[Variational Wind Solver guide](variational_wind.md) for the full configuration.
+
 The velocity field is the one tagged `velocity` in `[fields]`:
 
 ```toml
@@ -122,6 +131,8 @@ out_uv = finalize_wind(acc, p)                          # CartesianFrame (U, V)
   convention (dealiasing is upstream QC, not stage 1).
 - A single synthesis time (no advection); inputs should be reasonably
   contemporaneous.
-- Reflectivity/fallspeed is not used (`W` neglected).
+- `W` is neglected in the stage-1 `(u, v)` solve by default; reflectivity and
+  fall speed only enter when `[synthesis.fall_speed]`/`include_vertical_velocity`
+  are configured, feeding the variational stage rather than this product.
 - A gate's own velocity validity (non-missing value) gates its participation,
   independent of the `define_detection`/`define_scanned` roles.

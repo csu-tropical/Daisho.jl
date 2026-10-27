@@ -1,0 +1,589 @@
+# Variational Wind Solver
+
+The variational wind solver (stage 2) turns a stage-1
+[dual-Doppler retrieval](wind_synthesis.md) into a coupled `(u, v, w)`
+analysis that satisfies anelastic mass continuity, on Springsteel's
+quadrature grid. See the [theory page](../theory/variational_wind.md) for the
+underlying mathematics; this guide covers configuration and workflow.
+
+## Workflow
+
+1. **Stage-1 accumulation** — grid every sweep of every radar volume into a
+   [`WindGridAccumulator`](@ref) on the Springsteel quadrature grid, exactly
+   as for [spectral gridding](spectral_gridding.md), but with
+   `[synthesis] include_vertical_velocity = true` (unless you plan to use
+   `horizontal_approximation`) so the per-point normal system carries a `w`
+   row.
+2. **Variational analysis** — the accumulated per-point normal systems
+   become radial-velocity super-observations, combined with anelastic mass
+   continuity and (optionally) direct scalar observations, and solved by
+   the incremental Gauss–Newton/CG loop.
+3. **NetCDF output** — the analysis is exported through Springsteel's
+   regular-grid transform, alongside the usual gridded scalar fields.
+
+### High-level entry point
+
+```julia
+using Daisho, Dates
+
+p = DaishoParameters("mygrid.toml")   # [variational] enabled = true
+sgrid = Daisho.create_radar_grid(p)   # from [grid.springsteel] + [fields]
+
+result = analyze_radar_volumes_variational(
+    volumes, "analysis.nc", DateTime(2026, 9, 23, 12), sgrid, p;
+    heading = -9999.0, institution = "", source = "",
+    include_derivatives = false, frame = CartesianFrame())
+```
+
+[`analyze_radar_volumes_variational`](@ref) takes one `Volume` or a vector
+of them (multi-radar, exactly as for stage 1 — there is no radar-index
+argument); the grid is centred on the centroid of the radars' reference
+positions. The call grids every sweep into a [`WindGridAccumulator`](@ref)
+(so one `[fields]` entry must carry the `velocity` tag), runs the scalar
+spectral products exactly as
+[`grid_radar_volume_spectral`](@ref Daisho.grid_radar_volume_spectral)
+does, builds the reference-density profile, the state vector, the
+background and the observation set, solves the incremental cost function,
+and writes the file with [`write_variational_netcdf`](@ref). The third
+argument (`index_time`, a `DateTime`) becomes the file's `time` coordinate.
+
+It returns the [`VariationalResult`](@ref). Pass `return_problem = true` to
+get `(result, problem)` instead — the [`VariationalProblem`](@ref) holds the
+stage-1 product (`problem.stage1`), the observation set, and the state grid
+with the analysis loaded — and `write_output = false` to skip the file.
+
+A ready-to-use script for this path ships at
+`docs/examples/variational_demo.jl`: it takes a directory of CfRadial files
+(volumes or single sweeps, one or many radars; one-sweep-per-file airborne
+archives are the intended use), builds the `[variational]`
+configuration from a base TOML, runs the analysis, prints the solver stats,
+cost-by-group, mass-continuity residual RMS, and `NOBS_VR` coverage, and (with
+CairoMakie installed) plots a horizontal `U`/`V` + `DBZ` cross-section and a
+vertical `W` cross-section read back from the written NetCDF.
+
+```
+julia --project=. -t auto docs/examples/variational_demo.jl <cfradial_dir> [out_basename [config.toml]]
+```
+
+Always start Julia with threads (`-t auto`, or `-t 8`): every operator of
+the solver (filter, spline projection, observation operator) is threaded
+over the mish, and the filter dominates the cost of each CG iteration. On a
+120 × 120 × 16-cell grid at `mubar = 3` (18.7 M controls for `U`, `V`, `W`)
+one Hessian product takes ≈ 5 s on one thread and ≈ 1 s on eight, so a
+single-threaded run is four to five times slower for no reason.
+
+### In-memory API
+
+For tests, interactive work, or an orchestrator (Sparrow) that wants the
+analysis without going through a file, build and solve a problem directly
+on the Springsteel quadrature grid:
+
+```julia
+spec = Daisho.build_springsteel_grid_spec(sgrid;
+    reference_latitude = lat, reference_longitude = lon)
+acc = build_accumulator(spec, p)                   # WindGridAccumulator
+h_roi, v_roi = Daisho.compute_roi(sgrid; h_factor = p.gridding.horizontal_roi_factor,
+                                         v_factor = p.gridding.vertical_roi_factor)
+for vol in volumes, s in eachindex(vol.sweeps)
+    grid_sweep!(acc, vol, s, p; roi = (h_roi, v_roi))
+end
+radar_grid = finalize_grid(acc.scalar)             # gridded scalars on the mish
+
+prob = VariationalProblem(acc, radar_grid, sgrid, p)
+result = solve_variational(prob)                   # ::VariationalResult
+
+analysis_field(result, "U")                        # U on the mish, (nz, ny, nx)
+mass_continuity_residual(prob, result)             # ∂u/∂x + ∂v/∂y + ∂w/∂z + w·dlnρ̄/dz on the mish
+mass_continuity_residual(prob, result; lattice = :nodes)   # … at the nodes, where "nodes" enforces it
+evaluate_analysis!(prob.state_grid, result)        # load the analysis into the state grid
+```
+
+`radar_grid` supplies value observations for any `[fields]`-derived scalar
+in the state (§ "Adding a scalar to the state" below); pass `nothing` when
+the state has no such variable. [`analysis_field`](@ref),
+[`background_field`](@ref) and [`increment_field`](@ref) return mish arrays;
+[`horizontal_divergence`](@ref), [`vertical_vorticity`](@ref) and
+[`mass_continuity_residual`](@ref) the mish diagnostics. For custom
+observation sets and backgrounds see [`build_observation_set`](@ref),
+[`Background`](@ref) and the in-memory
+`VariationalProblem(state, state_grid, observations, background, reference, p)`
+constructor.
+
+## Configuration
+
+A complete `[variational]` configuration, with the state variables it needs
+from `[synthesis]` and `[reference_state]`. These are the real blocks from
+`config/defaults.toml`; every key not shown here defaults as documented in
+[`SynthesisParameters`](@ref), [`ReferenceStateParameters`](@ref), and
+[`VariationalParameters`](@ref).
+
+```toml
+# Hydrostatic reference-density profile rho-bar(z) — shared by mass continuity,
+# the fall-speed correction, and (future) FHC temperature.
+[reference_state]
+source                 = "exponential"   # "exponential" | "sounding"
+density_surface_kg_m3  = 1.2
+density_scale_height_m = 8500.0
+
+[synthesis]
+velocity_variance = 1.0
+max_sigma_1       = 2.0
+max_sigma_2       = 2.0
+max_elevation     = 45.0
+# Accumulate the (u,v,w) 3x3 normal system instead of (u,v) 2x2 — required by
+# the variational stage unless [variational.radial_velocity]
+# horizontal_approximation = true.
+include_vertical_velocity = true
+
+# Hydrometeor fall-speed correction (samurai relations), OPTIONAL. A present
+# table means enabled. Needs a [fields] entry tagged `reflectivity`.
+[synthesis.fall_speed]
+rain_coefficient       = 2.6
+rain_exponent          = 0.107
+snow_coefficient       = 0.817
+snow_exponent          = 0.063
+density_exponent       = 0.45
+mixed_phase_dbz        = 20.0
+rain_dbz               = 30.0
+# melting_layer_bottom_m = 4500.0   # absent => [reference_state] freezing level
+melting_layer_depth_m  = 1000.0
+
+# Per-gate radial-velocity error model, OPTIONAL. A present table means
+# enabled. The spectrum-width term needs a [fields] entry tagged
+# `spectrum_width` (silently omitted otherwise).
+[synthesis.gate_error]
+fall_speed_error_m_s        = 2.0
+spectrum_width_error_factor = 1.0
+error_guard_min_m_s         = 1.0
+
+# Incremental 3DVAR wind solver.
+[variational]
+enabled = true
+state = ["U", "V", "W"]              # append a [fields] name to analyse a scalar
+background = "zero"                  # "zero" | "synthesis" | "synthesis_uniform_sigma" | "synthesis_profile"
+background_error_inflation = 1.0
+mass_continuity = true
+mass_continuity_lattice = "nodes"      # "nodes" (default) | "mish"
+mass_continuity_sigma_per_s = 1.0e-4
+max_outer_iterations = 1
+max_inner_iterations = 200
+inner_tolerance = 1.0e-4
+outer_tolerance = 1.0e-3
+output_background = false
+output_increment  = false
+output_mish       = false
+filter_type = "gaussian"             # "gaussian" | "lanczos"
+
+[variational.background_error]
+# filter_length_m is the Gaussian STANDARD DEVIATION of the mish-space filter
+# along [i, j, k], in metres (one cell each here); FWHM = 2.35 × this.
+default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
+W       = { sigma = 2.0,  filter_length_m = [2000.0, 2000.0, 500.0] }
+# DBZ   = { sigma = 10.0, filter_length_m = [1000.0, 1000.0, 250.0] }
+
+[variational.radial_velocity]
+error_inflation = 1.0
+horizontal_approximation = false
+eigenvalue_guard_relative = 1.0e-10
+
+# One [variational.scalar_obs.<name>] table is REQUIRED for every [fields]
+# name appearing in `state`:
+# [variational.scalar_obs.DBZ]
+# sigma = 5.0
+# undetect_value = -10.0
+
+# Optional explicit role override:
+# [variational.roles]
+# W = "wind_w"
+
+# State variables reuse the [grid.springsteel.k.bc] per-field override table
+# by name — e.g. w = 0 at the surface:
+[grid.springsteel.k.bc]
+min = "natural"
+max = "natural"
+W = { min = "dirichlet" }
+```
+
+### `[variational]` key reference
+
+| Key | Units | Default | Meaning |
+|:----|:------|:--------|:--------|
+| `enabled` | — | `false` | Master switch. The whole block (and sub-tables) validates strictly whether or not this is `true`. |
+| `state` | — | `["U","V","W"]` | State-vector names, in order. Each is `"U"`/`"V"`/`"W"` or a `[fields]` name (appended as a value-observed scalar). Must be non-empty, unique, and contain both `"U"` and `"V"`. |
+| `background` | — | `"zero"` | `"zero"`, `"synthesis"`, `"synthesis_uniform_sigma"`, or `"synthesis_profile"`. See "Choosing a background" below. |
+| `background_error_inflation` | — | `1.0` | Multiplies σ_b of every state variable in the three `synthesis*` modes (ignored for `"zero"`). Must be positive. |
+| `mass_continuity` | — | `true` | Enforce the anelastic continuity pseudo-observation at every point of `mass_continuity_lattice`. Requires `"W"` in `state`. |
+| `mass_continuity_lattice` | — | `"nodes"` | `"nodes"` (the B-spline nodes, `cells + 1` per axis = the default regular output grid; samurai's placement) or `"mish"` (every quadrature point: `mubar³` constraints per cell, more CG iterations). |
+| `mass_continuity_sigma_per_s` | s⁻¹ | `1.0e-4` | σ of the divergence residual at each constraint point; inverse-variance weight `1/σ²`. Must be positive. |
+| `max_outer_iterations` | — | `1` | Gauss–Newton outer iterations. `1` is exact when every observation is linear; only matters with a nonlinear observation type. |
+| `max_inner_iterations` | — | `200` | CG iteration cap per outer iteration. |
+| `inner_tolerance` | — | `1.0e-4` | CG relative residual tolerance, in `(0, 1)`. |
+| `outer_tolerance` | — | `1.0e-3` | Relative increment-norm stopping tolerance between outer iterations, in `(0, 1)`. |
+| `cg_progress_interval` | — | `10` | Print a solver progress line to `stdout` at CG iteration 1 and every this many CG iterations (plus a header and a per-outer summary); `0` is silent. Must be `≥ 0`. See "Reading the solver progress lines" below. |
+| `output_background` | — | `false` | Write `*_BACKGROUND` fields. |
+| `output_increment` | — | `false` | Write `*_INCREMENT` fields. |
+| `output_mish` | — | `false` | Also write mish-lattice fields and stage-1/super-obs diagnostics (§ "Output variables"). |
+| `quality_flag_map` | — | `"nearest"` | How the stage-1 `QFLAG` is resampled from the mish lattice to the regular output grid: `"nearest"` (flag of the nearest mish point), `"worst"` (bitwise OR over the mish points within half a cell — most flagging), `"best"` (bitwise AND over the same points — least flagging). |
+| `mask_quality_flags` | — | `[]` | `QFLAG` meanings (`"sigma1_above_threshold"`, `"sigma2_above_threshold"`, `"singular_geometry"`, `"no_data"`) at which the regular-grid wind fields are set to `NaN`. Empty = no masking (`QFLAG` is still written). |
+| `filter_type` | — | `"gaussian"` | `"gaussian"` or `"lanczos"` mish-space background-error filter kernel. Gaussian has no negative lobes; Lanczos does, near boundaries. |
+| `[variational.background_error.<name>].sigma` | native (m/s for winds) | required | Background-error standard deviation σ_b of state variable `<name>` (or `"default"`) at every mish point: the mish filter is variance-normalised (`diag(F Fᵀ) = 1`), so filtered white noise scaled by σ_b has exactly this pointwise standard deviation, whatever the filter length. Must be positive. |
+| `[variational.background_error.<name>].filter_length_m` | m | required | **Gaussian standard deviation** σ_f (Lanczos: the half-width `a`) of the mish-space background-error filter along `[i, j, k]`, converted to cells by each axis' cell width. The full width at half maximum is 2.35 σ_f and the effective correlation length is √2 σ_f, so 1 km here is a 2.4 km-wide smoother. One to two cells is the usual choice; the filter's cost per CG iteration and the Hessian's largest eigenvalue both grow with σ_f. `0.0` on an axis disables filtering there. |
+| `[variational.radial_velocity].error_inflation` | — | `1.0` | Multiplies `σ²_vr` for the super-observation inverse variance only. |
+| `[variational.radial_velocity].horizontal_approximation` | — | `false` | Drop the `w·sin(el)` term from the super-obs geometry (samurai `horizontal_radar_appx`); allows `[synthesis] include_vertical_velocity = false`. |
+| `[variational.radial_velocity].eigenvalue_guard_relative` | — | `1.0e-10` | Eigendirections below this fraction of `λ_max` emit no super-obs row. In `[0, 1)`. |
+| `[variational.scalar_obs.<name>].sigma` | native field units | required | Observation-error σ for scalar state variable `<name>`. |
+| `[variational.scalar_obs.<name>].undetect_value` | native field units | required | Value substituted at an `[io] undetect` gate before it becomes an observation (§ below). |
+| `[variational.roles].<name>` | — | (auto) | Explicit role override (`"wind_u"`, `"wind_v"`, `"wind_w"`, `"reflectivity"`, `"scalar"`); without it, roles resolve automatically. |
+
+### New `[synthesis]` keys
+
+| Key | Units | Default | Meaning |
+|:----|:------|:--------|:--------|
+| `include_vertical_velocity` | — | `false` | Accumulate the `(u, v, w)` 3×3 normal system instead of the `(u, v)` 2×2 one. Required by the variational stage unless `horizontal_approximation = true`. The stage-1 `(u, v)` product is unchanged in meaning. |
+| `[synthesis.fall_speed].rain_coefficient` | m/s | `2.6` | Joss & Waldvogel (1971) rain-relation coefficient. |
+| `[synthesis.fall_speed].rain_exponent` | — | `0.107` | Rain-relation exponent on linear Z. |
+| `[synthesis.fall_speed].snow_coefficient` | m/s | `0.817` | Atlas et al. (1973) snow-relation coefficient. |
+| `[synthesis.fall_speed].snow_exponent` | — | `0.063` | Snow-relation exponent on linear Z. |
+| `[synthesis.fall_speed].density_exponent` | — | `0.45` | Exponent on `ρ̄(0)/ρ̄(z)` (Beard 1985). |
+| `[synthesis.fall_speed].mixed_phase_dbz` | dBZ | `20.0` | At/below this, the above-melting-layer speed is pure snow. |
+| `[synthesis.fall_speed].rain_dbz` | dBZ | `30.0` | Above this, the above-melting-layer speed is pure rain; linear blend between. |
+| `[synthesis.fall_speed].melting_layer_bottom_m` | m | `NaN` | Melting-layer bottom height. `NaN` ⇒ the `[reference_state]` freezing level (error if that profile has no temperature). |
+| `[synthesis.fall_speed].melting_layer_depth_m` | m | `1000.0` | Height over which the fall speed blends from rain to the above-layer value. |
+| `[synthesis.gate_error].fall_speed_error_m_s` | m/s | `2.0` | Assumed fall-speed error, scaled by `|sin(el)|`. |
+| `[synthesis.gate_error].spectrum_width_error_factor` | — | `1.0` | Multiplier on the gate spectrum width (needs a `spectrum_width`-tagged field). |
+| `[synthesis.gate_error].error_guard_min_m_s` | m/s | `1.0` | Lower clamp on the per-gate σ. |
+
+`[reference_state]` (`source`, `density_surface_kg_m3`, `density_scale_height_m`,
+`sounding_file`, `moisture`, `temperature_surface_k`, `lapse_rate_k_m`) is
+documented in full on the [Reference State guide](reference_state.md); it is
+shared unchanged by mass continuity and the fall-speed correction above.
+
+## Choosing a background
+
+`W` (and any scalar state variable) always starts from 0 with its
+configured σ_b; the modes differ in the `U`/`V` first guess and σ_b. The
+three `synthesis*` modes need the stage-1 product (the high-level
+`VariationalProblem(acc, …)` supplies it) and multiply every σ_b by
+`background_error_inflation`.
+
+- **`"zero"`** (default): the background is 0 everywhere, with σ_b from
+  `[variational.background_error]`. This is the samurai-like choice, right
+  when no first guess deserves more trust than the current volume's own
+  data. At the edges of the data the analysis relaxes toward 0 over the
+  filter length.
+- **`"synthesis"`**: `U`/`V` background = a **smooth fit** to the stage-1
+  `(u, v)` at unflagged points. The fit is one auxiliary variational solve
+  (one extra CG solve): configured filter and σ, one value observation per
+  good point weighted by its stage-1 σ, and no continuity or radar
+  super-obs. It relaxes smoothly to 0 over the filter length in data gaps.
+  σ_b is the stage-1 σ map with its variance smoothed by the same filter,
+  clamped to `[σ/10, σ]` of the configured σ. The background is tightest
+  where stage 1 is well determined and falls back to the configured σ in
+  gaps. Use it to *adjust* a good stage-1 analysis, for example to add `w`
+  and enforce continuity without moving well-observed dual-Doppler winds far,
+  or to steady the analysis near a baseline.
+- **`"synthesis_uniform_sigma"`**: the same smooth fit, with the configured
+  (uniform) σ_b. Use it when stage-1 coverage is spotty or its σ is
+  unreliable. The first guess helps, but no point is trusted more than
+  another.
+- **`"synthesis_profile"`**: `U`/`V` background = the **level-mean** stage-1
+  profile (the plain mean of the good points on each mish level, constant
+  horizontally; levels with none are interpolated linearly in height),
+  with the configured σ_b. It is the least local of the synthesis modes.
+  Use it for spotty coverage, or as an environmental first guess that
+  relaxes gaps toward the mean flow instead of 0.
+
+**Double counting.** Stage 1 and the radial-velocity super-observations are
+built from the *same* gates, so every `synthesis*` background counts that
+data twice: once in the prior mean, once in the likelihood. `"synthesis"`
+double counts most, because it trusts the stage-1 σ; `"synthesis_profile"`
+least. Increase `background_error_inflation` to weaken the background
+relative to the always-present radar term. It trades off the double count;
+it does not eliminate it. It also raises the Hessian's condition number
+`∝ σ_b²`, so large inflations need a larger `max_inner_iterations`. In the
+test case, inflation 10 took ≈ 4–5k CG iterations and inflation 100 took
+≈ 20–30k.
+
+## Adding a scalar to the state
+
+Append a `[fields]` name to `state` to analyse it alongside the wind — its
+gridded mish values become direct observations of a new state variable
+(e.g. a smoothed, mass-continuity-consistent reflectivity field):
+
+```toml
+[variational]
+state = ["U", "V", "W", "DBZ"]
+
+[variational.scalar_obs.DBZ]
+sigma = 5.0             # observation-error sigma, native field units
+undetect_value = -10.0  # value substituted for an [io] undetect gate
+
+[variational.background_error]
+default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
+DBZ     = { sigma = 10.0, filter_length_m = [1000.0, 1000.0, 250.0] }
+```
+
+At each mish point, the gridded value of `DBZ` is inspected against the
+`[io]` sentinels **before** it becomes an observation — this is the same
+true-missing/undetect distinction used everywhere else in Daisho and it must
+not be collapsed:
+
+- `[io] fill_value` (default `-32768.0`, true missing — never scanned) or
+  `NaN`: **no observation** at that point.
+- `[io] undetect` (default `-9999.0`, scanned but no detectable echo): an
+  observation of `undetect_value`, e.g. a reflectivity floor well below the
+  detection threshold — the point *is* informative (it says "no echo here"),
+  it just cannot use the raw sentinel as a value.
+- Any other value: an observation of that value directly.
+
+## Boundary conditions for state variables
+
+State variables resolve boundary conditions from the same
+`[grid.springsteel.<axis>.bc]` per-field override tables the obs/scalar grid
+uses, keyed by state name:
+
+```toml
+[grid.springsteel.k.bc]
+min = "natural"
+max = "natural"
+W = { min = "dirichlet" }   # w = 0 at the surface
+```
+
+Every axis without its own override for a state variable falls back to that
+axis's `"default"` (`min`/`max`) BC. **Inhomogeneous** boundary conditions
+(`R3X`/`R1T1X`, whose boundary data live in Springsteel's `ahat` vector) are
+refused for state variables — the variational increment is homogeneous by
+construction, so that data would be silently unusable; use a homogeneous
+type (`natural`, `dirichlet` at 0, `neumann` at 0, …) instead.
+
+## Output variables
+
+[`write_variational_netcdf`](@ref) writes one file. The scalar `[fields]`
+come first, exactly as [`grid_radar_volume_spectral`](@ref Daisho.grid_radar_volume_spectral)
+writes them (Springsteel's regular output grid, dims `x, y, z`, plus
+`time`); every regular-grid variable is `Float64` with a `NaN` fill on the
+same dims.
+
+On the **regular output grid**:
+
+| Variable | Units | Meaning |
+|:---------|:------|:--------|
+| `U`, `V`, `W` | m s⁻¹ | The analysis (a `[fields]`-derived state variable such as `DBZ` is written as `DBZ_ANALYSIS`). |
+| `VORT` | s⁻¹ | `∂v/∂x − ∂u/∂y` |
+| `DIV` | s⁻¹ | `∂u/∂x + ∂v/∂y` |
+| `MCRESIDUAL` | s⁻¹ | `DIV + ∂w/∂z + w·dlnρ̄/dz` — the anelastic continuity residual, a direct check of solver convergence (only when `W` is in the state). |
+| `QFLAG` | — | Stage 1's bitwise quality flag (`Int8`, no fill; CF `flag_masks = 1, 2, 4, 8`, `flag_meanings = sigma1_above_threshold sigma2_above_threshold singular_geometry no_data`), resampled from the mish lattice by `quality_flag_map`. |
+| `U_x`, `U_xx`, `U_y`, … | | With `include_derivatives = true`: the derivative fields of every analysis variable, with the same suffixes as the scalars. |
+| `*_BACKGROUND` | | With `output_background`: the background, per state variable. |
+| `*_INCREMENT` | | With `output_increment`: analysis − background, so `BACKGROUND + INCREMENT = analysis`. |
+
+`QFLAG` is stage 1's per-point diagnosis of the dual-Doppler geometry,
+resampled to the output grid — not a property of the variational
+analysis. The regular points (the B-spline nodes, by default) sit between
+mish points, so `[variational] quality_flag_map` chooses how the
+neighbouring mish flags combine: `"nearest"` copies the nearest mish
+point's flag; `"worst"` ORs every mish point within half a cell on each
+axis, so a point is flagged if any neighbour is; `"best"` ANDs them, so a
+bit survives only if every neighbour carries it (`best ⊆ nearest ⊆ worst`).
+Nothing is masked by default: the variational solve can recover winds at
+points stage 1 flagged for a near-baseline geometry or a single σ above
+threshold (the spline and the continuity constraint carry information
+across them), but it has nothing to fit where there was no data, so
+whether to blank is the user's choice. List flag meanings in
+`[variational] mask_quality_flags` (e.g. `["no_data"]`) to set every
+regular-grid wind-derived field — `U`, `V`, `W`, their derivative,
+`_BACKGROUND` and `_INCREMENT` fields, `VORT`, `DIV`, `MCRESIDUAL` — to
+`NaN` where `QFLAG` carries any listed bit; gridded scalars and the
+`<name>_ANALYSIS` of scalar state variables are never masked.
+
+With `output_mish = true`, also on the **mish (quadrature) lattice**
+(`x_mish`, `y_mish`, `z_mish` dimensions): `U_MISH`, `V_MISH`, `W_MISH`
+(the analysis itself at the quadrature points, `Float64`), the stage-1
+per-point product `U_STAGE1`, `V_STAGE1`, `USTD`, `VSTD`, `DET`, `NGATES`,
+`QFLAG_MISH` (the flag at its native points; never resampled — these are properties of the accumulator, not the
+spline; written as the QC'd product with the `[io]` fill, as
+[`write_wind_synthesis`](@ref) does), the super-observation row count
+`NOBS_VR` (§ theory, §4), and `RHOBAR(z_mish)` (the reference-density
+profile actually used).
+
+Global attributes add `variational_background`,
+`variational_outer_iterations`, `variational_cg_iterations` (total CG
+iterations), `variational_converged` (`1`/`0`),
+`variational_quality_flag_map` and `variational_mask_quality_flags` (the
+masked meanings, space-separated; empty when none) to the usual radar set.
+
+## Troubleshooting
+
+- **"no gate of the velocity field `…` was gridded".** The volumes carry no
+  usable radial velocity under the name tagged `velocity` in `[fields]`, or
+  the grid domain does not overlap the coverage. `read_cfradial` warns when a
+  file has no field variables at all (it reads 2-D `(time, range)` fields and
+  CfRadial 1's packed `n_points` layout); check `field_names(volume.sweeps[1])`
+  against your `[fields]` names.
+- **`NOBS_VR` is 0 or 1 at many points.** The stage-1 geometry there is
+  degenerate (single look or near-baseline) — expected at range-fold edges
+  or near a radar baseline; the mass-continuity term and the background
+  still constrain those points, just more weakly. Widespread low
+  `NOBS_VR` across the whole domain usually means too few radars are
+  contributing, or `[synthesis] max_elevation`/ROI settings are excluding
+  more gates than intended.
+- **High `MCRESIDUAL`.** Either the solver has not converged (check
+  `result.converged` and `result.stats.outer_iterations` /
+  `result.stats.inner_iterations` ([`VarSolverStats`](@ref)), or the
+  `variational_*` global attributes of the file —
+  raise `max_inner_iterations` or loosen `inner_tolerance` if CG is hitting
+  the cap) or `mass_continuity_sigma_per_s` is too loose relative to the
+  radial-velocity term (tighten it, or check `[reference_state]` for a
+  ρ̄(z) that does not match the analysis domain).
+- **CG iteration counts climbing or not converging.** Conditioning is driven
+  by `(σ_b/σ_o)² Σw` times the filter volume — very large background σ, a
+  long filter, or very dense, low-error observation coverage steepens the
+  Hessian; check `[variational.background_error]` σ and filter lengths are
+  physically reasonable, that `[synthesis.gate_error]` is enabled, and that
+  `[variational.radial_velocity] error_inflation` /
+  `mass_continuity_sigma_per_s` are not making the observation term
+  overwhelmingly dominant relative to the `I` term
+- **Checking which observation term dominates the cost.** The result
+  carries a per-kind cost breakdown (`result.cost_by_group`; per backend:
+  `result.stats.cost_by_backend`) — compare `:radial_velocity`,
+  `:mass_continuity`, and `:scalar_value` (if present) to see which term the
+  optimizer is spending its effort on.
+
+### Reading the solver progress lines
+
+With `cg_progress_interval > 0` (default `10`) the solver prints its
+progress while it runs, so a misconfigured or diverging solve is visible
+after a few iterations rather than at the end:
+
+```
+solve_incremental!: n=2916 controls, nobs=430 (point 400, point 30)
+  initial  J=1.6591703162e+04  J_b=0.000000e+00  J_o[point]=1.657565e+04  J_o[point]=1.605293e+01
+outer 1  ‖∇J‖=1.535e+02  J=1.659170e+04
+  cg     1  ‖r‖=7.490e+01  ‖r‖/‖r₀‖=4.881e-01  J=1.587020e+04  ΔJ=-7.215e+02  t=0.2s
+  cg     5  ‖r‖=2.990e+00  ‖r‖/‖r₀‖=1.949e-02  J=1.540822e+04  ΔJ=-4.620e+02  t=0.2s
+  cg    10  ‖r‖=1.044e-02  ‖r‖/‖r₀‖=6.806e-05  J=1.540663e+04  ΔJ=-1.588e+00  t=0.2s
+  outer 1 done: cg=18  status="solution good enough given atol and rtol"  ‖δξ‖=2.193e+01  ‖δξ‖/‖ξ‖=1.000e+00  t=0.3s
+  result   J=1.5406629496e+04  J_b=2.404350e+02  J_o[point]=1.514976e+04  J_o[point]=1.643833e+01
+```
+
+- The **header** gives the control-vector size, the observation count per
+  observation backend, and the initial cost split into the background term
+  `J_b = ½‖ξ‖²` and one `J_o[kind]` per backend.
+- Each **`outer`** line opens a Gauss–Newton iteration: `‖∇J‖` is the norm of
+  the cost gradient at the linearisation point (the CG right-hand side) and
+  `J` the cost there.
+- Each **`cg`** line: the CG iteration, the residual norm `‖r‖`, the residual
+  relative to its start `‖r‖/‖r₀‖` — this is the quantity compared against
+  `inner_tolerance`, so CG stops when it falls below it — the cost `J` at the
+  current CG iterate, its change `ΔJ` since the previous printed line, and
+  the time since the outer iteration started. `J` costs only two dot
+  products (no extra Hessian products); for linear observations (radial
+  velocity, mass continuity, scalar values) it is exactly the cost the
+  analysis would have if CG stopped there, so it should decrease
+  monotonically. A `J` that rises, or a `‖r‖/‖r₀‖` that stalls far above
+  `inner_tolerance` for hundreds of iterations, points at the conditioning
+  issues described above.
+- The **`done`/`result`** pair summarises the CG solve (iterations, Krylov
+  status, increment norm and relative increment, elapsed time) and the new
+  cost split at the updated state.
+
+Set `cg_progress_interval = 0` to silence all of it.
+
+### Factors that affect the solver time
+
+Wall time is (seconds per CG iteration) × (iterations). The two factors
+have different causes.
+
+**Seconds per iteration** is the cost of one Hessian product
+`CᵀHᵀR⁻¹HC + I`, which is dominated by the mish filter `F` and its
+transpose (≈ 80 % on a NEXRAD-sized grid; the spline projection, the
+observation operator and the Krylov vector updates share the rest).
+
+- *Threads.* All of it is threaded over the mish; run Julia with
+  `-t auto`. Measured on a 120 × 120 × 16-cell, `mubar = 3` grid
+  (18.7 M controls): 4.9 s per Hessian product on one thread, 1.1 s on
+  eight.
+- *Filter length.* `F` is a truncated (± 4 σ_f) sparse convolution, so its
+  cost grows linearly with `filter_length_m / mish spacing` on each axis.
+  Halving the horizontal filter length halves the filter cost.
+- *Grid size.* The control vector is `n_vars × n_mish`; `mubar = 3` means
+  27 mish points per cell.
+
+**Iterations** are set by the Hessian's spectrum, which does not depend on
+the background *values* at all. Each eigenvalue is `1 + SNR²` of one
+background-error mode, so the count grows with everything that makes the
+observations confident relative to the background:
+
+- *Background σ_b, including `background_error_inflation`.* Multiplying σ_b
+  by 10 multiplies every SNR² by 100 and the iteration count by roughly 10
+  (measured 11× on the test suite's dual-Doppler case). A closer
+  background does not cut iterations: it shrinks the right-hand side,
+  and the relative-residual stop (`inner_tolerance`, relative to `‖∇J‖` at
+  the start of the outer loop) shrinks its target with it. Only a weaker
+  or stronger background changes the count.
+- *Per-gate velocity error.* With `[synthesis.gate_error]` absent every gate
+  has σ = √`velocity_variance` (1 m/s by default) and the super-observation
+  inverse variance is the summed gate weight over that. Enabling the table
+  (its defaults are samurai's `radar_sw_error = 1`,
+  `radar_fallspeed_error = 2`, `radar_min_error = 1`) lowers the per-gate
+  weight by 4–16× for typical spectrum widths, lowers every SNR² by the same
+  factor, and is the physically honest error model; expect more stage-1
+  points to fail the σ thresholds in exchange.
+- *Filter length.* The variance normalisation keeps the pointwise σ_b fixed,
+  so a longer filter concentrates the same variance in fewer, smoother modes
+  of larger amplitude: the largest eigenvalue grows with the filter volume,
+  roughly `Π_axes (σ_f / mish spacing)`. Going from 10 km to 4 km
+  horizontally cuts it by about 6×.
+- *Mass-continuity σ.* `mass_continuity_sigma_per_s = 1e-4` is about ten
+  times tighter than samurai's `mc_weight = 1` (which, in samurai's
+  ρu-per-km units, is roughly 1e-3 s⁻¹ near the surface). It is a secondary
+  contributor to the spectrum unless the filter is short.
+- *Tolerance.* `inner_tolerance = 1e-4` is samurai's default. The `J` and
+  `ΔJ` columns of the progress lines show whether the cost is still moving;
+  if `ΔJ` is flat long before `‖r‖/‖r₀‖` reaches the tolerance, `1e-3`
+  yields the same analysis in fewer iterations.
+
+**Why a Gaussian on the mish, not a recursive filter.** A recursive filter
+needs evenly spaced points. In samurai that meant filtering the spline
+coefficients (the node lattice in spectral space), but the boundary-condition
+transform modifies the first and last coefficients independently of the
+filter, so the filter and the boundary conditions fought each other. Daisho
+filters on the physical mish before the spline projection, so Springsteel's
+`Γ` enforces the boundary conditions exactly; the price is the sparse
+convolution above. A fast recursive scheme for the unevenly spaced Gauss
+mish would remove the length dependence of the cost and is a candidate
+future change.
+
+## Migrating from samurai
+
+Old samurai keys are rejected with a diagnostic naming the Daisho
+equivalent (from `[variational]`, its sub-tables, and `[synthesis]`):
+
+| samurai key | Daisho equivalent |
+|:------------|:-------------------|
+| `mc_weight` | `mass_continuity_sigma_per_s` in `[variational]` |
+| `bg_rhou_error` | a `U` entry in `[variational.background_error]` |
+| `bg_rhov_error` | a `V` entry in `[variational.background_error]` |
+| `bg_rhow_error` | a `W` entry in `[variational.background_error]` |
+| `i_filter_length` | `filter_length_m` (meters, per axis, i first) in `[variational.background_error.<name>]` |
+| `j_filter_length` | `filter_length_m` (meters, per axis, j second) in `[variational.background_error.<name>]` |
+| `k_filter_length` | `filter_length_m` (meters, per axis, k third) in `[variational.background_error.<name>]` |
+| `horizontal_radar_appx` (in `[variational.radial_velocity]` context) | `horizontal_approximation` in `[variational.radial_velocity]` |
+| `num_iterations` | `max_outer_iterations` in `[variational]` |
+| `radar_fallspeed_error` | `fall_speed_error_m_s` in `[synthesis.gate_error]` |
+| `radar_sw_error` | `spectrum_width_error_factor` in `[synthesis.gate_error]` |
+| `radar_min_error` | `error_guard_min_m_s` in `[synthesis.gate_error]` |
+| `horizontal_radar_appx` (in `[synthesis]` context) | `include_vertical_velocity` in `[synthesis]` (samurai `horizontal_radar_appx = true` ≈ `include_vertical_velocity = false`) |
+| `max_radar_elevation` | `max_elevation` in `[synthesis]` (degrees) |
+| `melting_zone_width` | `melting_layer_depth_m` in `[synthesis.fall_speed]` (metres; samurai used km) |
+
+Also remember the two semantic differences that are *not* caught by a key
+rename (theory page, §10): observation weights are `1/σ²` (not samurai's
+`1/σ`), and filter lengths are configured in **meters** as the Gaussian
+standard deviation, with an *effective* `FF^\top` correlation length of
+`√2` times the configured (cell) length. Samurai's hurricane templates used
+`i/j/k_filter_length = 2` grid increments; a `filter_length_m` of one to two
+cells is the comparable starting point, not the domain-scale lengths that
+look natural in meters. Enable `[synthesis.gate_error]` too: samurai's
+per-gate error model (`radar_sw_error`, `radar_fallspeed_error`,
+`radar_min_error`) was always on, and its defaults are that table's defaults.
