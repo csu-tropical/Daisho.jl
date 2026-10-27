@@ -30,7 +30,7 @@
 # suite uses instead).
 #
 # Usage:
-#   julia --project=. docs/examples/variational_demo.jl \
+#   julia --project=. -t auto docs/examples/variational_demo.jl \
 #       <cfradial_dir> [out_basename [config.toml]]
 #
 #   cfradial_dir  directory of CfRadial files (required)
@@ -38,6 +38,10 @@
 #   config.toml   parameter file (default: the bundled defaults.toml)
 #
 # Notes:
+#   * Run with threads (`-t auto`). Every solver operator is threaded over
+#     the mish and the filter dominates each CG iteration: on a
+#     120x120x16-cell grid at mubar 3 one Hessian product takes ~5 s on one
+#     thread and ~1 s on eight.
 #   * `[variational] enabled`, `[synthesis] include_vertical_velocity`, and
 #     the surface `W` boundary condition are forced on regardless of what
 #     `config.toml` says (see `build_variational_config`) — everything else

@@ -248,8 +248,12 @@ filter_type = "gaussian"             # "gaussian" | "lanczos" (Lanczos has negat
 
 # Per-state-variable background error: sigma (native units: m/s for winds)
 # and the mish-space filter length in METRES along each (i, j, k) axis (0 on
-# an axis disables filtering there). "default" applies to any state variable
-# without its own entry; every state variable must resolve one or the other.
+# an axis disables filtering there). filter_length_m is the Gaussian standard
+# deviation of the filter (Lanczos: its half-width), converted to cells by
+# each axis' cell width. One to two cells is the usual choice; the filter's cost
+# per CG iteration and the CG iteration count both grow with it. "default"
+# applies to any state variable without its own entry; every state variable
+# must resolve one or the other.
 [variational.background_error]
 default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
 W       = { sigma = 2.0,  filter_length_m = [2000.0, 2000.0, 500.0] }

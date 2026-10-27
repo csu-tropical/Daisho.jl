@@ -62,8 +62,15 @@ CairoMakie installed) plots a horizontal `U`/`V` + `DBZ` cross-section and a
 vertical `W` cross-section read back from the written NetCDF.
 
 ```
-julia --project=. docs/examples/variational_demo.jl <cfradial_dir> [out_basename [config.toml]]
+julia --project=. -t auto docs/examples/variational_demo.jl <cfradial_dir> [out_basename [config.toml]]
 ```
+
+Always start Julia with threads (`-t auto`, or `-t 8`): every operator of
+the solver (filter, spline projection, observation operator) is threaded
+over the mish, and the filter dominates the cost of each CG iteration. On a
+120 × 120 × 16-cell grid at `mubar = 3` (18.7 M controls for `U`, `V`, `W`)
+one Hessian product takes ≈ 5 s on one thread and ≈ 1 s on eight, so a
+single-threaded run is four to five times slower for no reason.
 
 ### In-memory API
 
@@ -168,6 +175,8 @@ output_mish       = false
 filter_type = "gaussian"             # "gaussian" | "lanczos"
 
 [variational.background_error]
+# filter_length_m is the Gaussian STANDARD DEVIATION of the mish-space filter
+# along [i, j, k], in metres (one cell each here); FWHM = 2.35 × this.
 default = { sigma = 10.0, filter_length_m = [2000.0, 2000.0, 500.0] }
 W       = { sigma = 2.0,  filter_length_m = [2000.0, 2000.0, 500.0] }
 # DBZ   = { sigma = 10.0, filter_length_m = [1000.0, 1000.0, 250.0] }
@@ -218,7 +227,7 @@ W = { min = "dirichlet" }
 | `mask_quality_flags` | — | `[]` | `QFLAG` meanings (`"sigma1_above_threshold"`, `"sigma2_above_threshold"`, `"singular_geometry"`, `"no_data"`) at which the regular-grid wind fields are set to `NaN`. Empty = no masking (`QFLAG` is still written). |
 | `filter_type` | — | `"gaussian"` | `"gaussian"` or `"lanczos"` mish-space background-error filter kernel. Gaussian has no negative lobes; Lanczos does, near boundaries. |
 | `[variational.background_error.<name>].sigma` | native (m/s for winds) | required | Background-error standard deviation σ_b of state variable `<name>` (or `"default"`) at every mish point: the mish filter is variance-normalised (`diag(F Fᵀ) = 1`), so filtered white noise scaled by σ_b has exactly this pointwise standard deviation, whatever the filter length. Must be positive. |
-| `[variational.background_error.<name>].filter_length_m` | m | required | Mish-space filter length along `[i, j, k]`. `0.0` on an axis disables filtering there. |
+| `[variational.background_error.<name>].filter_length_m` | m | required | **Gaussian standard deviation** σ_f (Lanczos: the half-width `a`) of the mish-space background-error filter along `[i, j, k]`, converted to cells by each axis' cell width. The full width at half maximum is 2.35 σ_f and the effective correlation length is √2 σ_f, so 1 km here is a 2.4 km-wide smoother. One to two cells is the usual choice; the filter's cost per CG iteration and the Hessian's largest eigenvalue both grow with σ_f. `0.0` on an axis disables filtering there. |
 | `[variational.radial_velocity].error_inflation` | — | `1.0` | Multiplies `σ²_vr` for the super-observation inverse variance only. |
 | `[variational.radial_velocity].horizontal_approximation` | — | `false` | Drop the `w·sin(el)` term from the super-obs geometry (samurai `horizontal_radar_appx`); allows `[synthesis] include_vertical_velocity = false`. |
 | `[variational.radial_velocity].eigenvalue_guard_relative` | — | `1.0e-10` | Eigendirections below this fraction of `λ_max` emit no super-obs row. In `[0, 1)`. |
@@ -427,12 +436,13 @@ masked meanings, space-separated; empty when none) to the usual radar set.
   radial-velocity term (tighten it, or check `[reference_state]` for a
   ρ̄(z) that does not match the analysis domain).
 - **CG iteration counts climbing or not converging.** Conditioning is driven
-  by `(σ_b/σ_o)² Σw` — very large background σ or very dense, low-error
-  observation coverage steepens the Hessian; check
-  `[variational.background_error]` σ values are physically reasonable, and
-  that `[variational.radial_velocity] error_inflation` /
+  by `(σ_b/σ_o)² Σw` times the filter volume — very large background σ, a
+  long filter, or very dense, low-error observation coverage steepens the
+  Hessian; check `[variational.background_error]` σ and filter lengths are
+  physically reasonable, that `[synthesis.gate_error]` is enabled, and that
+  `[variational.radial_velocity] error_inflation` /
   `mass_continuity_sigma_per_s` are not making the observation term
-  overwhelmingly dominant relative to the `I` term.
+  overwhelmingly dominant relative to the `I` term
 - **Checking which observation term dominates the cost.** The result
   carries a per-kind cost breakdown (`result.cost_by_group`; per backend:
   `result.stats.cost_by_backend`) — compare `:radial_velocity`,
@@ -479,6 +489,71 @@ outer 1  ‖∇J‖=1.535e+02  J=1.659170e+04
 
 Set `cg_progress_interval = 0` to silence all of it.
 
+### Factors that affect the solver time
+
+Wall time is (seconds per CG iteration) × (iterations). The two factors
+have different causes.
+
+**Seconds per iteration** is the cost of one Hessian product
+`CᵀHᵀR⁻¹HC + I`, which is dominated by the mish filter `F` and its
+transpose (≈ 80 % on a NEXRAD-sized grid; the spline projection, the
+observation operator and the Krylov vector updates share the rest).
+
+- *Threads.* All of it is threaded over the mish; run Julia with
+  `-t auto`. Measured on a 120 × 120 × 16-cell, `mubar = 3` grid
+  (18.7 M controls): 4.9 s per Hessian product on one thread, 1.1 s on
+  eight.
+- *Filter length.* `F` is a truncated (± 4 σ_f) sparse convolution, so its
+  cost grows linearly with `filter_length_m / mish spacing` on each axis.
+  Halving the horizontal filter length halves the filter cost.
+- *Grid size.* The control vector is `n_vars × n_mish`; `mubar = 3` means
+  27 mish points per cell.
+
+**Iterations** are set by the Hessian's spectrum, which does not depend on
+the background *values* at all. Each eigenvalue is `1 + SNR²` of one
+background-error mode, so the count grows with everything that makes the
+observations confident relative to the background:
+
+- *Background σ_b, including `background_error_inflation`.* Multiplying σ_b
+  by 10 multiplies every SNR² by 100 and the iteration count by roughly 10
+  (measured 11× on the test suite's dual-Doppler case). A closer
+  background does not cut iterations: it shrinks the right-hand side,
+  and the relative-residual stop (`inner_tolerance`, relative to `‖∇J‖` at
+  the start of the outer loop) shrinks its target with it. Only a weaker
+  or stronger background changes the count.
+- *Per-gate velocity error.* With `[synthesis.gate_error]` absent every gate
+  has σ = √`velocity_variance` (1 m/s by default) and the super-observation
+  inverse variance is the summed gate weight over that. Enabling the table
+  (its defaults are samurai's `radar_sw_error = 1`,
+  `radar_fallspeed_error = 2`, `radar_min_error = 1`) lowers the per-gate
+  weight by 4–16× for typical spectrum widths, lowers every SNR² by the same
+  factor, and is the physically honest error model; expect more stage-1
+  points to fail the σ thresholds in exchange.
+- *Filter length.* The variance normalisation keeps the pointwise σ_b fixed,
+  so a longer filter concentrates the same variance in fewer, smoother modes
+  of larger amplitude: the largest eigenvalue grows with the filter volume,
+  roughly `Π_axes (σ_f / mish spacing)`. Going from 10 km to 4 km
+  horizontally cuts it by about 6×.
+- *Mass-continuity σ.* `mass_continuity_sigma_per_s = 1e-4` is about ten
+  times tighter than samurai's `mc_weight = 1` (which, in samurai's
+  ρu-per-km units, is roughly 1e-3 s⁻¹ near the surface). It is a secondary
+  contributor to the spectrum unless the filter is short.
+- *Tolerance.* `inner_tolerance = 1e-4` is samurai's default. The `J` and
+  `ΔJ` columns of the progress lines show whether the cost is still moving;
+  if `ΔJ` is flat long before `‖r‖/‖r₀‖` reaches the tolerance, `1e-3`
+  yields the same analysis in fewer iterations.
+
+**Why a Gaussian on the mish, not a recursive filter.** A recursive filter
+needs evenly spaced points. In samurai that meant filtering the spline
+coefficients (the node lattice in spectral space), but the boundary-condition
+transform modifies the first and last coefficients independently of the
+filter, so the filter and the boundary conditions fought each other. Daisho
+filters on the physical mish before the spline projection, so Springsteel's
+`Γ` enforces the boundary conditions exactly; the price is the sparse
+convolution above. A fast recursive scheme for the unevenly spaced Gauss
+mish would remove the length dependence of the cost and is a candidate
+future change.
+
 ## Migrating from samurai
 
 Old samurai keys are rejected with a diagnostic naming the Daisho
@@ -490,9 +565,9 @@ equivalent (from `[variational]`, its sub-tables, and `[synthesis]`):
 | `bg_rhou_error` | a `U` entry in `[variational.background_error]` |
 | `bg_rhov_error` | a `V` entry in `[variational.background_error]` |
 | `bg_rhow_error` | a `W` entry in `[variational.background_error]` |
-| `i_filter_length` | `filter_length_m` (metres, per axis, i first) in `[variational.background_error.<name>]` |
-| `j_filter_length` | `filter_length_m` (metres, per axis, j second) in `[variational.background_error.<name>]` |
-| `k_filter_length` | `filter_length_m` (metres, per axis, k third) in `[variational.background_error.<name>]` |
+| `i_filter_length` | `filter_length_m` (meters, per axis, i first) in `[variational.background_error.<name>]` |
+| `j_filter_length` | `filter_length_m` (meters, per axis, j second) in `[variational.background_error.<name>]` |
+| `k_filter_length` | `filter_length_m` (meters, per axis, k third) in `[variational.background_error.<name>]` |
 | `horizontal_radar_appx` (in `[variational.radial_velocity]` context) | `horizontal_approximation` in `[variational.radial_velocity]` |
 | `num_iterations` | `max_outer_iterations` in `[variational]` |
 | `radar_fallspeed_error` | `fall_speed_error_m_s` in `[synthesis.gate_error]` |
@@ -504,6 +579,11 @@ equivalent (from `[variational]`, its sub-tables, and `[synthesis]`):
 
 Also remember the two semantic differences that are *not* caught by a key
 rename (theory page, §10): observation weights are `1/σ²` (not samurai's
-`1/σ`), and filter lengths are configured in **metres**, with an *effective*
-`FF^\top` correlation length of `√2` times the configured (cell) length —
-re-derive, don't copy, ported σ and filter-length values.
+`1/σ`), and filter lengths are configured in **meters** as the Gaussian
+standard deviation, with an *effective* `FF^\top` correlation length of
+`√2` times the configured (cell) length. Samurai's hurricane templates used
+`i/j/k_filter_length = 2` grid increments; a `filter_length_m` of one to two
+cells is the comparable starting point, not the domain-scale lengths that
+look natural in meters. Enable `[synthesis.gate_error]` too: samurai's
+per-gate error model (`radar_sw_error`, `radar_fallspeed_error`,
+`radar_min_error`) was always on, and its defaults are that table's defaults.
