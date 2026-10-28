@@ -228,6 +228,44 @@ const FIXTURE_V2 = joinpath(@__DIR__, "fixtures",
         rm(tmp)
     end
 
+    @testset "boolean field attributes accept string and integer encodings" begin
+        # Regression (issue #15): CfRadial writes is_discrete / field_folds /
+        # is_quality_field as "true"/"false" strings (ARM CSAPR2, and Daisho's
+        # own writer); `Bool("true")` threw a MethodError on read.
+        tmp = tempname() * ".nc"
+        cases = [("S_TRUE", "true", true), ("S_FALSE", "false", false),
+                 ("S_UPPER", "TRUE", true), ("I_ONE", Int8(1), true),
+                 ("I_ZERO", Int32(0), false)]
+        NCDatasets.NCDataset(tmp, "c") do ds
+            NCDatasets.defDim(ds, "x", 2)
+            for (name, val, _) in cases
+                NCDatasets.defVar(ds, name, Float32[0.0, 1.0], ("x",);
+                    attrib = DataStructures.OrderedDict("is_discrete" => val,
+                        "field_folds" => val, "is_quality_field" => val))
+            end
+        end
+        NCDatasets.NCDataset(tmp, "r") do ds
+            for (name, _, expected) in cases
+                md = Daisho._read_field_metadata(ds[name])
+                @test md.is_discrete === expected
+                @test md.field_folds === expected
+                @test md.is_quality_field === expected
+            end
+        end
+        rm(tmp)
+
+        # Daisho's own writer emits the string form; it must read back.
+        v = synthetic_volume(n_sweeps = 1)
+        add_field!(v.sweeps[1], "DBZ", v.sweeps[1].fields["DBZ"].data,
+                   FieldMetadata(units = "dBZ", is_discrete = true,
+                                 field_folds = true, is_quality_field = true))
+        tmp = tempname() * ".nc"
+        write_cfradial(v, tmp)
+        rmd = read_cfradial(tmp).sweeps[1].fields["DBZ"].metadata
+        @test rmd.is_discrete && rmd.field_folds && rmd.is_quality_field
+        rm(tmp)
+    end
+
     @testset "required-missing raises ArgumentError" begin
         tmp = tempname() * ".nc"
         NCDatasets.NCDataset(tmp, "c") do ds

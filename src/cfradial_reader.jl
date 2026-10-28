@@ -101,14 +101,17 @@ _to_string(x::AbstractArray{<:AbstractChar}) = String(rstrip(String(collect(x)),
 _to_string(x::AbstractArray{UInt8}) = String(rstrip(String(x), '\0'))
 _to_string(x) = String(string(x))
 
-# Coerce attribute value to Bool. CfRadial commonly uses "true"/"false" strings.
-function _attr_bool(ds, key, default::Bool=false)
-    haskey(ds.attrib, key) || return default
-    v = ds.attrib[key]
+# Coerce an attribute value to Bool. CfRadial commonly uses "true"/"false"
+# strings; some writers use integer flags.
+function _to_bool(v)
     v isa Bool && return v
+    v isa Real && return v != 0
     s = lowercase(_to_string(v))
     return s == "true" || s == "1" || s == "yes"
 end
+
+_attr_bool(ds, key, default::Bool=false) =
+    haskey(ds.attrib, key) ? _to_bool(ds.attrib[key]) : default
 
 function _attr_int(ds, key, default::Int=0)
     haskey(ds.attrib, key) || return default
@@ -285,11 +288,11 @@ function _read_field_metadata(var)
     add_offset = haskey(a, "add_offset") ? Float64(a["add_offset"]) : nothing
     coordinates = haskey(a, "coordinates") ? _to_string(a["coordinates"]) : nothing
     sampling_ratio = haskey(a, "sampling_ratio") ? Float64(a["sampling_ratio"]) : 1.0
-    is_discrete = haskey(a, "is_discrete") ? Bool(a["is_discrete"]) : false
-    field_folds = haskey(a, "field_folds") ? Bool(a["field_folds"]) : false
+    is_discrete = haskey(a, "is_discrete") ? _to_bool(a["is_discrete"]) : false
+    field_folds = haskey(a, "field_folds") ? _to_bool(a["field_folds"]) : false
     fold_lo = haskey(a, "fold_limit_lower") ? Float64(a["fold_limit_lower"]) : nothing
     fold_hi = haskey(a, "fold_limit_upper") ? Float64(a["fold_limit_upper"]) : nothing
-    is_quality_field = haskey(a, "is_quality_field") ? Bool(a["is_quality_field"]) : false
+    is_quality_field = haskey(a, "is_quality_field") ? _to_bool(a["is_quality_field"]) : false
     qualified = haskey(a, "qualified_variables") ?
         _split_var_list(_to_string(a["qualified_variables"])) : String[]
     ancillary = haskey(a, "ancillary_variables") ?
