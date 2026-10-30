@@ -79,6 +79,59 @@ Daisho uses Transverse Mercator projections (via CoordRefSystems.jl) centered on
 lat, lon = Daisho.appx_inverse_projection(ref_lat, ref_lon, [y_meters, x_meters])
 ```
 
+### Grid origin and moving frame
+
+By default, the projection origin is the radar position: the volume's
+lat/lon, or the first georeference fix for a mobile platform. Multi-radar
+Springsteel and variational runs use the centroid of the radar positions
+instead. The optional `[grid.origin]` table overrides this for every grid kind,
+so the grid doesn't depend on which files are in a folder and can match
+another analysis:
+
+```toml
+[grid.origin]
+latitude_deg   = 18.0
+longitude_deg  = 150.0
+```
+
+Adding a constant motion turns the grid into a moving, storm-relative frame.
+This is useful for fast-moving squall lines, or hurricane flights that span
+several hours:
+
+```toml
+[grid.origin]
+latitude_deg     = 18.0                    # where the origin is at reference_time
+longitude_deg    = 150.0
+reference_time   = "2008-09-19T04:00:00Z"  # UTC; required with a nonzero motion
+motion_east_mps  = -4.0                    # u
+motion_north_mps =  0.0                    # v
+```
+
+The origin is at `(latitude_deg, longitude_deg)` at `reference_time` and moves
+at `(u, v)`. Each ray observed at time `t` is placed at its projected position
+minus `(u, v)·(t − reference_time)`. A feature moving with the frame therefore
+grids to one place however long the analysis window is.
+- The motion can be combined with the default origin: leave the lat/lon unset
+  and the frame passes through the radar position at `reference_time`.
+- All of these keys are optional. Absent keys keep the default origin and a
+  fixed earth frame.
+- An origin equal to the radar position gives exactly the default result.
+
+Notes:
+- Positions use the same Transverse Mercator projection as the rest of the
+  gridding. This replaces SAMURAI's frame-of-reference (`.cen`) file and its
+  generator script, whose flat-earth degree-to-km factors give slightly
+  different positions far from the origin.
+- Winds remain earth-relative: radial velocities are earth-relative, and
+  only positions move with the frame.
+- Gridded lat/lon coordinates are where the grid sits at `reference_time`.
+  Files written with a moving frame carry the global attributes
+  `origin_reference_time`, `frame_motion_east_mps` and `frame_motion_north_mps`.
+- RHI grids accept an origin override but reject a nonzero motion. Column
+  (QVP) grids use height only, so the motion has no effect on them. The legacy
+  `radar`-struct drivers accept the origin but reject a nonzero motion; use
+  the `Volume` API (`read_cfradial`) for a moving frame.
+
 ## Output Format
 
 Gridded data is written as CF-compliant NetCDF files with:

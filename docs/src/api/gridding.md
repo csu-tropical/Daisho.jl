@@ -36,6 +36,7 @@ Daisho.SweepProvenance
 Daisho.ScalarGridAccumulator
 Daisho.build_accumulator
 Daisho.build_grid_spec
+Daisho.resolve_grid_origin
 Daisho.grid_sweep!
 Daisho.finalize_grid
 Daisho.merge_accumulators!

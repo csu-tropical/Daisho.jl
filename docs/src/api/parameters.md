@@ -21,6 +21,8 @@ Daisho.SpringsteelGridConfig
 Daisho.SpringsteelAxisConfig
 Daisho.SPRINGSTEEL_AXIS_BASES
 Daisho.MetadataParameters
+Daisho.OriginParameters
+Daisho.has_frame_motion
 Daisho.IOParameters
 Daisho.VariationalParameters
 Daisho.BackgroundErrorEntry
