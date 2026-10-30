@@ -322,6 +322,23 @@ function appx_inverse_projection(reference_latitude::AbstractFloat, reference_lo
 
 end
 
+# Grid origin for the legacy `radar` drivers: the radar's first position, or the
+# `[grid.origin]` override passed down by the `DaishoParameters` wrappers. The
+# struct stores Float32 positions; promote so both branches compute in Float64.
+_legacy_reference(radar_volume, origin::Nothing) =
+    (Float64(radar_volume.latitude[1]), Float64(radar_volume.longitude[1]))
+_legacy_reference(radar_volume, origin::Tuple{Float64,Float64}) = origin
+
+# `[grid.origin]` for the legacy wrappers: the override, or `nothing` to keep the
+# radar position. A moving frame needs the per-ray geometry of the Volume API.
+function _legacy_origin(p::DaishoParameters, for_op::String)
+    o = p.grid.origin
+    has_frame_motion(o) && throw(ArgumentError(
+        "$(for_op): the legacy `radar` path does not support a moving frame " *
+        "([grid.origin] motion); pass a `Volume` (from read_cfradial) instead"))
+    return o.latitude_deg === nothing ? nothing : (o.latitude_deg, o.longitude_deg)
+end
+
 """
     grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time, xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, power_threshold, missing_key="SQI", valid_key="DBZ", heading=-9999.0, metadata=MetadataParameters())
 
@@ -355,11 +372,11 @@ writes the output via `write_gridded_radar_volume`.
 function grid_radar_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim, zmin, zincr, zdim, power_threshold,
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
-        metadata::MetadataParameters=MetadataParameters())
+        metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
@@ -410,14 +427,16 @@ grid increment. Horizontal radius of influence is computed from the degree incre
 function grid_radar_latlon_volume(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
     lonmin, londim, latmin, latdim, degincr, zmin, zincr, zdim, power_threshold,
     missing_key="SQI", valid_key="DBZ", heading=-9999.0,
-    metadata::MetadataParameters=MetadataParameters())
+    metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
     #reference_latitude = latmin + Int64(round(latdim/2)) * degincr
     #reference_longitude = lonmin + Int64(round(londim/2)) * degincr
 
-    reference_latitude = radar_volume.latitude[1] - rem(radar_volume.latitude[1], degincr)
-    reference_longitude = radar_volume.longitude[1] - rem(radar_volume.longitude[1], degincr)
+    lat0, lon0 = _legacy_reference(radar_volume, origin)
+    reference_latitude = lat0 - rem(lat0, degincr)
+    reference_longitude = lon0 - rem(lon0, degincr)
 
     latmin = round(reference_latitude + latmin, digits=2)
     lonmin = round(reference_longitude + lonmin, digits=2)
@@ -473,11 +492,11 @@ the output via `write_gridded_radar_rhi`.
 function grid_radar_rhi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         rmin, rincr, rdim, rhi_zmin, rhi_zincr, rhi_zdim, power_threshold,
         missing_key::String="SQI", valid_key::String="DBZ",
-        metadata::MetadataParameters=MetadataParameters())
+        metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
@@ -525,11 +544,11 @@ via `write_gridded_radar_ppi`.
 function grid_radar_ppi(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim, power_threshold,
         missing_key="SQI", valid_key="DBZ", heading=-9999.0,
-        metadata::MetadataParameters=MetadataParameters())
+        metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
@@ -588,11 +607,11 @@ at each horizontal grid point across all elevations. The output is written via `
 function grid_radar_composite(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
         xmin, xincr, xdim, ymin, yincr, ydim,
         missing_key="SQI", valid_key="DBZ", mean_heading=-9999.0,
-        metadata::MetadataParameters=MetadataParameters())
+        metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
@@ -636,11 +655,11 @@ profile directly above the radar.
 function grid_radar_column(radar_volume, moment_dict, grid_type_dict, output_file, index_time,
     column_zmin, column_zincr, column_zdim, power_threshold,
     missing_key::String="SQI", valid_key::String="DBZ",
-    metadata::MetadataParameters=MetadataParameters())
+    metadata::MetadataParameters=MetadataParameters();
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
     # Set the reference to the first location in the volume, but could be a parameter
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # Initialize the gridpoints
     # This array is slightly different than Springsteel spectral arrays, need to reconcile later
@@ -2439,7 +2458,7 @@ function grid_radar_volume(radar_volume::radar, output_file::AbstractString,
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim, g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk, heading,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_volume"))
     _maybe_add_echo_products(output_file, p)
 end
 
@@ -2460,7 +2479,7 @@ function grid_radar_latlon_volume(radar_volume::radar, output_file::AbstractStri
         g.lonmin, g.londim, g.latmin, g.latdim, g.degincr,
         g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk, heading,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_latlon_volume"))
     _maybe_add_echo_products(output_file, p)
 end
 
@@ -2479,7 +2498,7 @@ function grid_radar_rhi(radar_volume::radar, output_file::AbstractString,
         output_file, index_time,
         g.rmin, g.rincr, g.rdim, g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_rhi"))
     _maybe_add_echo_products(output_file, p)
 end
 
@@ -2501,7 +2520,7 @@ function grid_radar_ppi(radar_volume::radar, output_file::AbstractString,
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
         gd.power_threshold, mk, dk, heading,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_ppi"))
     _maybe_add_echo_products(output_file, p)
 end
 
@@ -2523,7 +2542,7 @@ function grid_radar_composite(radar_volume::radar, output_file::AbstractString,
         output_file, index_time,
         g.xmin, g.xincr, g.xdim, g.ymin, g.yincr, g.ydim,
         mk, dk, mean_heading,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_composite"))
 end
 
 """
@@ -2543,7 +2562,7 @@ function grid_radar_column(radar_volume::radar, output_file::AbstractString,
         output_file, index_time,
         g.zmin, g.zincr, g.zdim,
         gd.power_threshold, mk, dk,
-        p.grid.metadata)
+        p.grid.metadata; origin = _legacy_origin(p, "grid_radar_column"))
     _maybe_add_echo_products(output_file, p)
 end
 
@@ -2570,6 +2589,7 @@ function grid_radar_volume(volume::Volume, output_file::AbstractString,
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     _maybe_add_echo_products(output_file, p)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2590,6 +2610,7 @@ function grid_radar_latlon_volume(volume::Volume, output_file::AbstractString,
         spec.reference_latitude, spec.reference_longitude, Float64(heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
     _maybe_add_echo_products(output_file, p)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2609,6 +2630,7 @@ function grid_radar_rhi(volume::Volume, output_file::AbstractString,
         spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
         fill_value=p.io.fill_value, undetect=p.io.undetect)
     _maybe_add_echo_products(output_file, p)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2632,6 +2654,7 @@ function grid_radar_ppi(volume::Volume, output_file::AbstractString,
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect,
         fixed_angle=fixed_angle)
     _maybe_add_echo_products(output_file, p)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2650,6 +2673,7 @@ function grid_radar_composite(volume::Volume, output_file::AbstractString,
         gridpoints, radar_grid, latlon_grid, field_index_dict(p),
         spec.reference_latitude, spec.reference_longitude, Float64(mean_heading),
         p.grid.metadata; fill_value=p.io.fill_value, undetect=p.io.undetect)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2670,6 +2694,7 @@ function grid_radar_column(volume::Volume, output_file::AbstractString,
         spec.reference_latitude, spec.reference_longitude, p.grid.metadata;
         fill_value=p.io.fill_value, undetect=p.io.undetect)
     _maybe_add_echo_products(output_file, p)
+    _write_frame_attributes!(output_file, spec)
     return accum
 end
 
@@ -2699,6 +2724,7 @@ function _write_scalar_grid_file(file::AbstractString, scalar::ScalarGridAccumul
         gridpoints, radar_grid, latlon_grid, moment_dict,
         g.reference_latitude, g.reference_longitude, -9999.0, p.grid.metadata;
         fill_value = scalar.fill_value, undetect = scalar.undetect)
+    _write_frame_attributes!(file, g)
     return file
 end
 

@@ -32,6 +32,7 @@
 #   [grid.springsteel]        -> p.grid.springsteel  (Springsteel spectral grid)
 #   [grid.springsteel.i/j/k]  -> p.grid.springsteel.i/j/k  (per-axis spec + bc)
 #   [grid.metadata]           -> p.grid.metadata  (CF global attrs for outputs)
+#   [grid.origin]             -> p.grid.origin    (optional origin + moving frame)
 #
 # ── [fields] tag vocabulary ──────────────────────────────────────────────────
 # Each field maps to a flat ARRAY of tags `[ ... ]`. No tag is required;
@@ -328,6 +329,24 @@ rdim  =     481
 zmin  =     0.0
 zincr =   250.0
 zdim  =      41
+
+# Grid origin override and moving (storm-relative) frame, for every grid kind.
+# Leave latitude_deg/longitude_deg unset to keep the default origin: the radar
+# position for one volume, the centroid of the radar positions for multi-radar
+# runs. Set both to pin the origin (e.g. to match another analysis).
+# A nonzero motion moves the frame at constant (u, v): the origin is at
+# (latitude_deg, longitude_deg) at reference_time, and each observation at
+# time t is placed at its projected position minus (u, v)·(t - reference_time),
+# so a feature moving with the frame stays put (squall lines, long hurricane
+# flights). reference_time is required when the motion is nonzero. Positions
+# use the gridding's own Transverse Mercator projection; RHI grids reject a
+# nonzero motion.
+[grid.origin]
+# latitude_deg   =   18.0                   # origin at reference_time (deg N)
+# longitude_deg  =  150.0                   # origin at reference_time (deg E)
+# reference_time = "2008-09-19T04:00:00Z"   # UTC
+motion_east_mps  = 0.0                      # frame motion u (m/s, eastward)
+motion_north_mps = 0.0                      # frame motion v (m/s, northward)
 
 # Springsteel spectral grid. The section speaks Springsteel's native i/j/k
 # axis vocabulary, because x/y/z only makes sense for Cartesian geometries:

@@ -41,7 +41,7 @@ export DaishoParameters, print_config
 export MomentParameters, QCParameters, GriddingParameters
 export GridParameters, CartesianGridParameters, LatLonGridParameters
 export RhiGridParameters, SpringsteelGridConfig, SpringsteelAxisConfig
-export MetadataParameters
+export MetadataParameters, OriginParameters, has_frame_motion, resolve_grid_origin
 export radar_vars
 export IOParameters
 export SynthesisParameters

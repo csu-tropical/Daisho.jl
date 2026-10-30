@@ -7,7 +7,7 @@
 
 # v2: GridAccumulator carries the io fill_value/undetect sentinels. v1 files
 # (no such fields) are intentionally incompatible — regenerate them.
-const GRID_ACCUMULATOR_SCHEMA_VERSION = 2
+const GRID_ACCUMULATOR_SCHEMA_VERSION = 3
 
 """
     GridSpec
@@ -22,6 +22,12 @@ tag determines the dimensionality of the arrays inside the accumulator:
 
 Axes carry the projected coordinates from the gridding-parameters block.
 Unused axes are length-1 placeholders.
+
+`reference_time`, `motion_east_mps` and `motion_north_mps` describe an optional
+moving frame (`[grid.origin]`): the origin is at the reference lat/lon at
+`reference_time` and moves at constant (u, v), so each ray is placed at its
+projected position minus `(u, v)·(t_ray − reference_time)`. Zero motion (the
+default) is the fixed earth frame.
 """
 Base.@kwdef struct GridSpec
     shape::Symbol
@@ -33,7 +39,16 @@ Base.@kwdef struct GridSpec
     lat_axis::Union{Vector{Float64},Nothing} = nothing
     lon_axis::Union{Vector{Float64},Nothing} = nothing
     rhi_azimuth::Union{Float64,Nothing}      = nothing
+    reference_time::Union{DateTime,Nothing}  = nothing
+    motion_east_mps::Float64                 = 0.0
+    motion_north_mps::Float64                = 0.0
 end
+
+has_frame_motion(g::GridSpec) = g.motion_east_mps != 0.0 || g.motion_north_mps != 0.0
+
+# The moving-frame keywords of `_sweep_zyx_and_beams` / `GridSpec`.
+_frame_kw(g::GridSpec) = (reference_time = g.reference_time,
+    motion_east_mps = g.motion_east_mps, motion_north_mps = g.motion_north_mps)
 
 """
     SweepProvenance
@@ -229,6 +244,9 @@ function _grid_spec_equal(a::GridSpec, b::GridSpec)
     a.lat_axis == b.lat_axis || return false
     a.lon_axis == b.lon_axis || return false
     a.rhi_azimuth == b.rhi_azimuth || return false
+    a.reference_time == b.reference_time || return false
+    a.motion_east_mps == b.motion_east_mps || return false
+    a.motion_north_mps == b.motion_north_mps || return false
     return true
 end
 
@@ -315,11 +333,17 @@ end
 # Per-sweep analog of `radar_arrays`. Returns `(grid_origin, radar_zyx, beams)`
 # where `radar_zyx[idx]` and `beams[idx, :]` use the flat
 # `idx = (ray - 1) * n_gates + gate` layout (column-major, matching legacy).
+# A moving frame (nonzero motion) shifts each ray's beam origin by
+# −(u, v)·(t_ray − reference_time), which moves the whole beam rigidly, so every
+# gate quantity derived from `radar_zyx` stays consistent.
 function _sweep_zyx_and_beams(sweep::SweepGroup,
                                ref_latitude::Float64,
                                ref_longitude::Float64,
                                ref_altitude::Float64,
-                               projection)
+                               projection;
+                               reference_time::Union{DateTime,Nothing} = nothing,
+                               motion_east_mps::Float64 = 0.0,
+                               motion_north_mps::Float64 = 0.0)
     n_gates_s = length(sweep.range)
     n_rays_s  = n_rays(sweep)
 
@@ -328,6 +352,15 @@ function _sweep_zyx_and_beams(sweep::SweepGroup,
     beam_origin = [ [alts[i],
                      Float64(ustrip(radar_loc[i].y)),
                      Float64(ustrip(radar_loc[i].x))]  for i in eachindex(radar_loc) ]
+    if motion_east_mps != 0.0 || motion_north_mps != 0.0
+        reference_time === nothing && throw(ArgumentError(
+            "moving grid frame: a nonzero motion needs a reference_time"))
+        for i in eachindex(beam_origin)
+            dt = Dates.value(sweep.time[i] - reference_time) / 1000   # s
+            beam_origin[i][2] -= motion_north_mps * dt
+            beam_origin[i][3] -= motion_east_mps * dt
+        end
+    end
     # Layout: radar_zyx[gate, ray] = beam_origin[ray]. Column-major flat index
     # `(gate, ray) → idx = (ray-1)*n_gates + gate` matches the legacy bridge.
     radar_zyx = [ zyx for _ in sweep.range, zyx in beam_origin ]
@@ -803,7 +836,8 @@ function _grid_sweep_products_3d!(acc::FieldAccumulator, sweep::SweepGroup,
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, n_rays_s =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM;
+                             _frame_kw(g)...)
     gate_yx  = _sweep_gate_yx(radar_zyx, beams)   # surface (y,x), reused for d_h
     balltree = BallTree(gate_yx)
     gridpoints = _materialize_gridpoints_3d(g, TM, grid_origin)
@@ -1022,12 +1056,19 @@ end
 
 # ── RHI worker (2D, range × z) ───────────────────────────────────────────────
 
+# An RHI is range along a fixed azimuth from the radar, so a moving frame has no
+# meaning there; an origin override alone just reprojects.
+_reject_rhi_motion(g::GridSpec) = has_frame_motion(g) && throw(ArgumentError(
+    "RHI gridding does not support a moving frame: set [grid.origin] " *
+    "motion_east_mps = motion_north_mps = 0 (an origin override alone is fine)"))
+
 function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
                               p::DaishoParameters,
                               ref_latitude::Float64, ref_longitude::Float64,
                               ref_altitude::Float64; beam_width::Real = 1.0,
                               roi::Union{Nothing,Tuple{Float64,Float64}} = nothing)
     g  = accum.grid_spec
+    _reject_rhi_motion(g)
     gd = p.gridding
     missing_key = field_with_tag(p, :define_scanned;   for_op="grid_sweep! (accumulator path)")
     valid_key   = field_with_tag(p, :define_detection; for_op="grid_sweep! (accumulator path)")
@@ -1036,7 +1077,8 @@ function _grid_sweep_rhi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     grid_origin, radar_zyx, beams, n_gates_s, _ =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM;
+                             _frame_kw(g)...)
     gate_r   = _sweep_gate_r(radar_zyx, beams)   # surface radial dist, reused for d_r
     balltree = BallTree(gate_r)
 
@@ -1184,7 +1226,8 @@ function _grid_sweep_ppi_2d!(accum::GridAccumulator, sweep::SweepGroup,
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     _, radar_zyx, beams, n_gates_s, _ =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM;
+                             _frame_kw(g)...)
     gate_yx  = _sweep_gate_yx(radar_zyx, beams)
     balltree = BallTree(gate_yx)
 
@@ -1310,7 +1353,8 @@ function _grid_sweep_composite_2d!(accum::GridAccumulator, sweep::SweepGroup,
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     _, radar_zyx, beams, n_gates_s, _ =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM;
+                             _frame_kw(g)...)
     gate_yx  = _sweep_gate_yx(radar_zyx, beams)
     balltree = BallTree(gate_yx)
 
@@ -1438,7 +1482,8 @@ function _grid_sweep_column_1d!(accum::GridAccumulator, sweep::SweepGroup,
     TM = CoordRefSystems.shift(TransverseMercator{1.0, g.reference_latitude, WGS84Latest},
                                 lonₒ = g.reference_longitude)
     _, radar_zyx, beams, n_gates_s, n_rays_s =
-        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM)
+        _sweep_zyx_and_beams(sweep, ref_latitude, ref_longitude, ref_altitude, TM;
+                             _frame_kw(g)...)
 
     nz = length(g.z_axis)
     n_fields = length(accum.fields)
@@ -1543,6 +1588,33 @@ end
 
 # ── Volume-level helpers (build_grid_spec, writers' gridpoints, latlon) ──────
 
+# Record a moving frame ([grid.origin] motion) as global attributes of a written
+# grid file. The origin itself is already the grid_mapping projection origin.
+function _write_frame_attributes!(file::AbstractString, g::GridSpec)
+    has_frame_motion(g) || return file
+    NCDataset(file, "a") do ds
+        ds.attrib["origin_reference_time"] =
+            Dates.format(g.reference_time, dateformat"yyyy-mm-ddTHH:MM:SS") * "Z"
+        ds.attrib["frame_motion_east_mps"]  = g.motion_east_mps
+        ds.attrib["frame_motion_north_mps"] = g.motion_north_mps
+    end
+    return file
+end
+
+"""
+    resolve_grid_origin(p::DaishoParameters, default_lat, default_lon) -> (lat, lon)
+    resolve_grid_origin(o::OriginParameters, default_lat, default_lon) -> (lat, lon)
+
+The grid origin: the `[grid.origin]` `latitude_deg`/`longitude_deg` override
+when set, otherwise the caller's default (the radar position, or the
+multi-radar centroid).
+"""
+resolve_grid_origin(o::OriginParameters, default_lat::Real, default_lon::Real) =
+    o.latitude_deg === nothing ? (Float64(default_lat), Float64(default_lon)) :
+                                 (o.latitude_deg, o.longitude_deg)
+resolve_grid_origin(p::DaishoParameters, default_lat::Real, default_lon::Real) =
+    resolve_grid_origin(p.grid.origin, default_lat, default_lon)
+
 """
     build_grid_spec(shape, volume, p; rhi_azimuth=nothing) -> GridSpec
 
@@ -1553,12 +1625,14 @@ Helper for the Volume drivers. Pulls the right grid sub-spec from `p` based on
 For mobile-platform sweeps the reference position falls back to the first
 ray's georeference when the volume's stationary lat/lon/alt is the zero
 default; callers can override by constructing the `GridSpec` directly.
+A `[grid.origin]` override replaces that default (see
+[`resolve_grid_origin`](@ref)), and its moving frame is carried on the spec.
+RHI grids reject a nonzero motion.
 """
 function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
                           rhi_azimuth::Union{Nothing,Real} = nothing)
     ref_lat = volume.latitude
     ref_lon = volume.longitude
-    ref_alt = volume.altitude
 
     # If the volume's stationary lat/lon look like the zero default but the
     # first sweep has a georeference, fall back to that — typical mobile
@@ -1568,13 +1642,17 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
         if s1.georeference !== nothing && !isempty(s1.georeference.latitude)
             ref_lat = s1.georeference.latitude[1]
             ref_lon = s1.georeference.longitude[1]
-            ref_alt = s1.georeference.altitude[1]
         end
     end
+    ref_lat, ref_lon = resolve_grid_origin(p, ref_lat, ref_lon)
+    frame = _frame_kw(p.grid.origin)
+    shape === :rhi_2d && has_frame_motion(p.grid.origin) && throw(ArgumentError(
+        "build_grid_spec: RHI gridding does not support a moving frame; set " *
+        "[grid.origin] motion_east_mps = motion_north_mps = 0 (an origin override alone is fine)"))
 
     if shape === :volume_3d
         g = p.grid.volume
-        return GridSpec(
+        return GridSpec(; frame...,
             shape = :volume_3d,
             reference_latitude = ref_lat,
             reference_longitude = ref_lon,
@@ -1594,7 +1672,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
         lon_axis = collect(Float64,
             round(snapped_lon + g.lonmin, digits = 6) .+
             (0:(g.londim-1)) .* g.degincr)
-        return GridSpec(
+        return GridSpec(; frame...,
             shape = :latlon_3d,
             reference_latitude = snapped_lat,
             reference_longitude = snapped_lon,
@@ -1617,7 +1695,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
         else
             0.0
         end
-        return GridSpec(
+        return GridSpec(; frame...,
             shape = :rhi_2d,
             reference_latitude = ref_lat,
             reference_longitude = ref_lon,
@@ -1628,7 +1706,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
         )
     elseif shape === :ppi_2d || shape === :composite_2d
         g = shape === :ppi_2d ? p.grid.ppi : p.grid.composite
-        return GridSpec(
+        return GridSpec(; frame...,
             shape = shape,
             reference_latitude = ref_lat,
             reference_longitude = ref_lon,
@@ -1638,7 +1716,7 @@ function build_grid_spec(shape::Symbol, volume::Volume, p::DaishoParameters;
         )
     elseif shape === :column_1d
         g = p.grid.column
-        return GridSpec(
+        return GridSpec(; frame...,
             shape = :column_1d,
             reference_latitude = ref_lat,
             reference_longitude = ref_lon,
@@ -1922,6 +2000,7 @@ function finalize_accumulator_file(input_file::AbstractString,
     else
         throw(ArgumentError("finalize_accumulator_file: unsupported shape $shape"))
     end
+    _write_frame_attributes!(output_file, acc.grid_spec)
     return output_file
 end
 

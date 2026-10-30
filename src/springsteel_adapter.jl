@@ -693,10 +693,10 @@ function grid_radar_volume_spectral(radar_volume, moment_dict::Dict, grid_type_d
         power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ", heading::Real=-9999.0,
         institution::String="", source::String="",
-        include_derivatives::Bool=false)
+        include_derivatives::Bool=false,
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     # 1. Get gridpoints in Daisho format
     gridpoints = get_springsteel_gridpoints_zyx(sgrid)
@@ -745,10 +745,10 @@ function grid_radar_ppi_spectral(radar_volume, moment_dict::Dict, grid_type_dict
         power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ", heading::Real=-9999.0,
         institution::String="", source::String="",
-        include_derivatives::Bool=false)
+        include_derivatives::Bool=false,
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     gridpoints = get_springsteel_gridpoints_zyx(sgrid)
     roi = compute_roi(sgrid)
@@ -789,10 +789,10 @@ function grid_radar_column_spectral(radar_volume, moment_dict::Dict, grid_type_d
         power_threshold::Float64;
         missing_key::String="SQI", valid_key::String="DBZ",
         institution::String="", source::String="",
-        include_derivatives::Bool=false)
+        include_derivatives::Bool=false,
+        origin::Union{Nothing,Tuple{Float64,Float64}} = nothing)
 
-    reference_latitude = radar_volume.latitude[1]
-    reference_longitude = radar_volume.longitude[1]
+    reference_latitude, reference_longitude = _legacy_reference(radar_volume, origin)
 
     gridpoints = get_springsteel_gridpoints_zyx(sgrid)
     roi = compute_roi(sgrid)
@@ -952,7 +952,8 @@ function grid_radar_volume_spectral(radar_volume, output_file::AbstractString,
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_volume_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_volume_spectral"),
         heading=heading, institution=institution, source=source,
-        include_derivatives=include_derivatives)
+        include_derivatives=include_derivatives,
+        origin=_legacy_origin(p, "grid_radar_volume_spectral"))
 end
 
 """
@@ -972,7 +973,8 @@ function grid_radar_ppi_spectral(radar_volume, output_file::AbstractString,
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_ppi_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_ppi_spectral"),
         heading=heading, institution=institution, source=source,
-        include_derivatives=include_derivatives)
+        include_derivatives=include_derivatives,
+        origin=_legacy_origin(p, "grid_radar_ppi_spectral"))
 end
 
 """
@@ -991,7 +993,8 @@ function grid_radar_column_spectral(radar_volume, output_file::AbstractString,
         missing_key=field_with_tag(p, :define_scanned;   for_op="grid_radar_column_spectral"),
         valid_key=field_with_tag(p, :define_detection; for_op="grid_radar_column_spectral"),
         institution=institution, source=source,
-        include_derivatives=include_derivatives)
+        include_derivatives=include_derivatives,
+        origin=_legacy_origin(p, "grid_radar_column_spectral"))
 end
 
 # ── Springsteel → GridSpec builder ───────────────────────────────────────────
@@ -1020,7 +1023,9 @@ end
 
 Build a Daisho [`GridSpec`](@ref) whose per-axis coordinate sets reproduce the
 Springsteel grid's quadrature lattice, centered on the given reference
-position (the `volume` form uses [`volume_reference_position`](@ref)). The
+position (the `volume` form uses [`volume_reference_position`](@ref)). Extra
+keywords (`reference_time`, `motion_east_mps`, `motion_north_mps`) set the
+moving frame on the spec. The
 unified accumulator engine then grids onto exactly the Springsteel node
 layout.
 
@@ -1038,40 +1043,40 @@ build_springsteel_grid_spec(sgrid::SpringsteelGrid, volume::Volume) =
         reference_longitude = volume_reference_position(volume)[2])
 
 function build_springsteel_grid_spec(sgrid::RRR_Grid;
-        reference_latitude::Real, reference_longitude::Real)
+        reference_latitude::Real, reference_longitude::Real, frame...)
     gp = get_springsteel_gridpoints_zyx(sgrid)   # (kDim, jDim, iDim, 3): [z,y,x]
     Z = collect(Float64, gp[:, 1, 1, 1])
     Y = collect(Float64, gp[1, :, 1, 2])
     X = collect(Float64, gp[1, 1, :, 3])
-    return GridSpec(shape = :volume_3d,
+    return GridSpec(; frame..., shape = :volume_3d,
         reference_latitude  = Float64(reference_latitude),
         reference_longitude = Float64(reference_longitude),
         x_axis = X, y_axis = Y, z_axis = Z)
 end
 
 function build_springsteel_grid_spec(sgrid::RR_Grid;
-        reference_latitude::Real, reference_longitude::Real)
+        reference_latitude::Real, reference_longitude::Real, frame...)
     gp = get_springsteel_gridpoints_zyx(sgrid)   # (jDim, iDim, 2): [y,x]
     X = collect(Float64, gp[1, :, 2])
     Y = collect(Float64, gp[:, 1, 1])
-    return GridSpec(shape = :ppi_2d,
+    return GridSpec(; frame..., shape = :ppi_2d,
         reference_latitude  = Float64(reference_latitude),
         reference_longitude = Float64(reference_longitude),
         x_axis = X, y_axis = Y, z_axis = [0.0])
 end
 
 function build_springsteel_grid_spec(sgrid::R_Grid;
-        reference_latitude::Real, reference_longitude::Real)
+        reference_latitude::Real, reference_longitude::Real, frame...)
     # The single R axis is altitude for a column (mirrors grid_radar_column_spectral).
     Z = collect(Float64, get_springsteel_gridpoints_zyx(sgrid))
-    return GridSpec(shape = :column_1d,
+    return GridSpec(; frame..., shape = :column_1d,
         reference_latitude  = Float64(reference_latitude),
         reference_longitude = Float64(reference_longitude),
         x_axis = [0.0], y_axis = [0.0], z_axis = Z)
 end
 
 function build_springsteel_grid_spec(sgrid::SpringsteelGrid;
-        reference_latitude::Real, reference_longitude::Real)
+        reference_latitude::Real, reference_longitude::Real, frame...)
     throw(ArgumentError(
         "build_springsteel_grid_spec: only the Cartesian R/RR/RRR Springsteel " *
         "grids can be gridded by the accumulator engine today (got geometry " *
@@ -1145,6 +1150,10 @@ function _volumes_reference_position(volumes::AbstractVector{<:Volume})
     return (sum(first, refs) / length(refs), sum(last, refs) / length(refs))
 end
 
+# Multi-radar grid origin: the [grid.origin] override, else the centroid.
+_volumes_origin(p::DaishoParameters, volumes::AbstractVector{<:Volume}) =
+    resolve_grid_origin(p, _volumes_reference_position(volumes)...)
+
 # Seconds since the Unix epoch for Springsteel's optional `time` coordinate
 # (`nothing` → no time dimension, the historical spectral-file layout).
 _nc_time_seconds(::Nothing) = nothing
@@ -1163,8 +1172,10 @@ function _grid_volumes_spectral!(sgrid::SpringsteelGrid,
         include_derivatives::Bool=false)
     isempty(volumes) && throw(ArgumentError("$(for_op): no volumes given"))
     _require_radar_vars(sgrid, p; for_op = for_op)
+    ref_lat, ref_lon = resolve_grid_origin(p, ref_lat, ref_lon)
     spec = build_springsteel_grid_spec(sgrid;
-        reference_latitude = ref_lat, reference_longitude = ref_lon)
+        reference_latitude = ref_lat, reference_longitude = ref_lon,
+        _frame_kw(p.grid.origin)...)
     acc  = ScalarGridAccumulator(spec, p)                       # scalar-only
     _grid_volumes!(acc, sgrid, volumes, p; heading = heading)
     _scalar_spectral_products!(sgrid, finalize_grid(acc), p)
@@ -1172,6 +1183,7 @@ function _grid_volumes_spectral!(sgrid::SpringsteelGrid,
         ref_lat = ref_lat, ref_lon = ref_lon,
         institution = institution, source = source, heading = heading,
         include_derivatives = include_derivatives)
+    _write_frame_attributes!(output_file, spec)
     return sgrid
 end
 

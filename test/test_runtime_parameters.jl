@@ -343,6 +343,72 @@ using TOML
         end
     end
 
+    @testset "[grid.origin] defaults: no override, no motion" begin
+        mktemp() do path, io
+            close(io)
+            o = DaishoParameters(_write_full_config(path)).grid.origin
+            @test o == OriginParameters()
+            @test o.latitude_deg === nothing && o.longitude_deg === nothing
+            @test o.reference_time === nothing
+            @test o.motion_east_mps == 0.0 && o.motion_north_mps == 0.0
+            @test !Daisho.has_frame_motion(o)
+        end
+        # Absent table → defaults too.
+        @test GridParameters().origin == OriginParameters()
+    end
+
+    @testset "[grid.origin] full table parses (string and TOML datetimes)" begin
+        for t in ("2008-09-19T04:00:00Z", "2008-09-19T04:00:00", DateTime(2008, 9, 19, 4))
+            mktemp() do path, io
+                close(io)
+                p = DaishoParameters(_write_full_config(path, Dict("grid" => Dict(
+                    "origin" => Dict("latitude_deg" => 18, "longitude_deg" => 150.0,
+                                     "reference_time" => t,
+                                     "motion_east_mps" => -4.0, "motion_north_mps" => 0)))))
+                o = p.grid.origin
+                @test o.latitude_deg === 18.0 && o.longitude_deg === 150.0
+                @test o.reference_time == DateTime(2008, 9, 19, 4)
+                @test o.motion_east_mps === -4.0 && o.motion_north_mps === 0.0
+                @test Daisho.has_frame_motion(o)
+            end
+        end
+        # Origin alone (stationary): no reference_time needed.
+        mktemp() do path, io
+            close(io)
+            p = DaishoParameters(_write_full_config(path, Dict("grid" => Dict(
+                "origin" => Dict("latitude_deg" => 40.5, "longitude_deg" => -105.0)))))
+            @test p.grid.origin.latitude_deg == 40.5
+            @test !Daisho.has_frame_motion(p.grid.origin)
+        end
+    end
+
+    @testset "[grid.origin] validation errors" begin
+        bad = [
+            Dict("motion_east_mps" => 5.0),                                   # motion, no time
+            Dict("motion_north_mps" => 5.0, "reference_time" => ""),          # empty time
+            Dict("latitude_deg" => 18.0),                                     # half-set origin
+            Dict("longitude_deg" => 150.0),
+            Dict("latitude_deg" => 95.0, "longitude_deg" => 0.0),             # lat out of range
+            Dict("latitude_deg" => 10.0, "longitude_deg" => NaN),             # non-finite
+            Dict("motion_east_mps" => Inf, "reference_time" => "2008-09-19T04:00:00Z"),
+            Dict("motion_east_mps" => 1.0, "reference_time" => "not a time"),
+            Dict("motion_east_mps" => 1.0, "reference_time" => "2008-09-19T04:00:00+02:00"),
+            Dict("center_lat" => 18.0),                                       # unknown key
+        ]
+        for o in bad
+            mktemp() do path, io
+                close(io)
+                cfg = _write_full_config(path, Dict("grid" => Dict("origin" => o)))
+                @test_throws ArgumentError DaishoParameters(cfg)
+            end
+        end
+        # The no-time error names the key a user has to add.
+        err = try
+            GridParameters(origin = OriginParameters(motion_east_mps = 3.0)); nothing
+        catch e; e end
+        @test err isa ArgumentError && occursin("reference_time", err.msg)
+    end
+
     @testset "Mandatory [fields]/[io] absent → ArgumentError" begin
         for sect in ("fields", "io")
             mktemp() do path, io

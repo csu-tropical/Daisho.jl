@@ -55,9 +55,10 @@ function analyze_radar_volumes_variational(volumes::AbstractVector{<:Volume},
         "[variational] block to run the variational analysis"))
     isempty(volumes) && throw(ArgumentError("$(for_op): no volumes given"))
     _require_radar_vars(sgrid, p; for_op = for_op)
-    ref_lat, ref_lon = _volumes_reference_position(volumes)
+    ref_lat, ref_lon = _volumes_origin(p, volumes)
     spec = build_springsteel_grid_spec(sgrid;
-        reference_latitude = ref_lat, reference_longitude = ref_lon)
+        reference_latitude = ref_lat, reference_longitude = ref_lon,
+        _frame_kw(p.grid.origin)...)
     ref = reference === nothing ? build_reference_profile(p, sgrid) : reference
     acc = build_accumulator(spec, p; reference = ref)
     acc isa WindGridAccumulator || throw(ArgumentError(
@@ -88,6 +89,7 @@ function analyze_radar_volumes_variational(volumes::AbstractVector{<:Volume},
             index_time = index_time, ref_lat = ref_lat, ref_lon = ref_lon,
             institution = institution, source = source, heading = heading,
             include_derivatives = include_derivatives)
+        _write_frame_attributes!(output_file, spec)
     end
     return return_problem ? (result, prob) : result
 end

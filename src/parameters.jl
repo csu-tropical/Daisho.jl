@@ -441,6 +441,95 @@ Base.@kwdef struct MetadataParameters
 end
 
 """
+    OriginParameters
+
+Optional override of the grid origin and a moving (storm-relative) frame,
+from `[grid.origin]`.
+
+- `latitude_deg`, `longitude_deg`: the frame origin at `reference_time`.
+  `nothing` (both absent) keeps the default origin: the radar position for a
+  single volume, the centroid of the radar positions for multi-radar runs.
+- `reference_time`: UTC time at which the frame is at the origin. Required
+  when the motion is nonzero.
+- `motion_east_mps`, `motion_north_mps`: constant frame motion (u, v). An
+  observation at time `t` is placed at its projected position minus
+  `(u, v)·(t − reference_time)`, so a feature moving with the frame stays put.
+
+See also: [`resolve_grid_origin`](@ref), [`has_frame_motion`](@ref)
+"""
+Base.@kwdef struct OriginParameters
+    latitude_deg::Union{Float64,Nothing}    = nothing
+    longitude_deg::Union{Float64,Nothing}   = nothing
+    reference_time::Union{DateTime,Nothing} = nothing
+    motion_east_mps::Float64                = 0.0
+    motion_north_mps::Float64               = 0.0
+end
+
+"""
+    has_frame_motion(o::OriginParameters) -> Bool
+
+True when `[grid.origin]` sets a nonzero frame motion.
+"""
+has_frame_motion(o::OriginParameters) = o.motion_east_mps != 0.0 || o.motion_north_mps != 0.0
+
+# The moving-frame keywords of `GridSpec` / `_sweep_zyx_and_beams`.
+_frame_kw(o::OriginParameters) = (reference_time = o.reference_time,
+    motion_east_mps = o.motion_east_mps, motion_north_mps = o.motion_north_mps)
+
+function _check_origin(o::OriginParameters)
+    (o.latitude_deg === nothing) == (o.longitude_deg === nothing) || throw(ArgumentError(
+        "[grid.origin]: set both `latitude_deg` and `longitude_deg`, or neither " *
+        "(neither keeps the default origin)"))
+    if o.latitude_deg !== nothing
+        isfinite(o.latitude_deg) && isfinite(o.longitude_deg) || throw(ArgumentError(
+            "[grid.origin]: `latitude_deg`/`longitude_deg` must be finite"))
+        -90.0 <= o.latitude_deg <= 90.0 || throw(ArgumentError(
+            "[grid.origin]: `latitude_deg` = $(o.latitude_deg) is outside [-90, 90]"))
+    end
+    isfinite(o.motion_east_mps) && isfinite(o.motion_north_mps) || throw(ArgumentError(
+        "[grid.origin]: `motion_east_mps`/`motion_north_mps` must be finite"))
+    if has_frame_motion(o) && o.reference_time === nothing
+        throw(ArgumentError(
+            "[grid.origin]: a nonzero motion needs `reference_time`, the UTC time at " *
+            "which the frame is at the origin (e.g. reference_time = \"2008-09-19T04:00:00Z\")"))
+    end
+    return o
+end
+
+# Parse `reference_time`: a TOML datetime, or an ISO-8601 UTC string (optional
+# trailing `Z`); "" means unset. Other UTC offsets are rejected.
+function _origin_time(v)
+    v isa DateTime && return v
+    v isa AbstractString || throw(ArgumentError(
+        "[grid.origin]: `reference_time` must be an ISO-8601 UTC time string"))
+    isempty(v) && return nothing
+    occursin(r"[+-]\d{2}:?\d{2}$", v) && throw(ArgumentError(
+        "[grid.origin]: `reference_time` = \"$v\" has a UTC offset; give the time in UTC"))
+    try
+        return _parse_iso8601(v)
+    catch
+        throw(ArgumentError(
+            "[grid.origin]: cannot parse `reference_time` = \"$v\" as an ISO-8601 UTC time"))
+    end
+end
+
+function _origin_from_dict(d::AbstractDict)
+    allowed = Set(string.(fieldnames(OriginParameters)))
+    unknown = setdiff(Set(keys(d)), allowed)
+    isempty(unknown) || throw(ArgumentError(
+        "Unknown key(s) $(_fmt_keys(unknown)) in section `[grid.origin]`. " *
+        "Allowed keys: $(join(fieldnames(OriginParameters), ", "))"))
+    num(k) = (v = d[k]; v isa Real ? Float64(v) : throw(ArgumentError(
+        "[grid.origin]: `$k` must be a number")))
+    return OriginParameters(
+        latitude_deg     = haskey(d, "latitude_deg")     ? num("latitude_deg")  : nothing,
+        longitude_deg    = haskey(d, "longitude_deg")    ? num("longitude_deg") : nothing,
+        reference_time   = haskey(d, "reference_time")   ? _origin_time(d["reference_time"]) : nothing,
+        motion_east_mps  = haskey(d, "motion_east_mps")  ? num("motion_east_mps")  : 0.0,
+        motion_north_mps = haskey(d, "motion_north_mps") ? num("motion_north_mps") : 0.0)
+end
+
+"""
     GridParameters
 
 Aggregates the spatial-grid sub-specs plus the NetCDF metadata block. Pull
@@ -463,6 +552,7 @@ struct GridParameters
     rhi::RhiGridParameters
     springsteel::SpringsteelGridConfig
     metadata::MetadataParameters
+    origin::OriginParameters
 end
 
 # Keyword constructor centralizing the per-product fallback: a Cartesian-family
@@ -479,13 +569,14 @@ function GridParameters(;
         latlon::LatLonGridParameters       = LatLonGridParameters(),
         rhi::RhiGridParameters             = RhiGridParameters(),
         springsteel::SpringsteelGridConfig = SpringsteelGridConfig(),
-        metadata::MetadataParameters       = MetadataParameters())
+        metadata::MetadataParameters       = MetadataParameters(),
+        origin::OriginParameters           = OriginParameters())
     GridParameters(cartesian,
         volume    === nothing ? cartesian : volume,
         composite === nothing ? cartesian : composite,
         ppi       === nothing ? cartesian : ppi,
         column    === nothing ? cartesian : column,
-        latlon, rhi, springsteel, metadata)
+        latlon, rhi, springsteel, metadata, _check_origin(origin))
 end
 
 """
@@ -2085,9 +2176,10 @@ function _grid_from_dict(d::AbstractDict)
     rhi         = haskey(d, "rhi")         ? _struct_from_dict(RhiGridParameters,       d["rhi"];       section="grid.rhi",       optional=range_opt) : RhiGridParameters()
     springsteel = haskey(d, "springsteel") ? _springsteel_from_dict(d["springsteel"])                                            : SpringsteelGridConfig()
     metadata    = haskey(d, "metadata")    ? _struct_from_dict(MetadataParameters,      d["metadata"];  section="grid.metadata")  : MetadataParameters()
+    origin      = haskey(d, "origin")      ? _origin_from_dict(d["origin"])                                                  : OriginParameters()
     return GridParameters(cartesian=cartesian, volume=volume, composite=composite,
                           ppi=ppi, column=column, latlon=latlon, rhi=rhi,
-                          springsteel=springsteel, metadata=metadata)
+                          springsteel=springsteel, metadata=metadata, origin=origin)
 end
 
 # Build a SpringsteelGridConfig from the `[grid.springsteel]` table. The
