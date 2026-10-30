@@ -195,6 +195,64 @@
         end
     end
 
+    @testset "every legacy driver: radar-equal origin is a no-op, motion rejected" begin
+        v = synthetic_volume(n_sweeps = 1, n_rays = 36, n_gates = 6)
+        radar, _ = Daisho.as_legacy_radar(v)
+        t = v.time_coverage_start
+        small = (; latlon = Daisho.LatLonGridParameters(lonmin = -0.02, londim = 5,
+                       latmin = -0.02, latdim = 5, zdim = 3),
+                   rhi = Daisho.RhiGridParameters(rdim = 6, zdim = 3))
+        function _p_legacy(origin)
+            p = _p_origin(origin)
+            return Daisho.DaishoParameters(p.moments, p.qc, p.gridding,
+                Daisho.GridParameters(cartesian = p.grid.cartesian, latlon = small.latlon,
+                                      rhi = small.rhi, springsteel = p.grid.springsteel,
+                                      origin = origin),
+                p.io, p.provided)
+        end
+        p0 = _p_legacy(OriginParameters())
+        # The legacy struct stores the position as Float32; "radar-equal" means that value.
+        p1 = _p_legacy(OriginParameters(latitude_deg = Float64(radar.latitude[1]),
+                                        longitude_deg = Float64(radar.longitude[1])))
+        pm = _p_legacy(OriginParameters(reference_time = t_ref, motion_east_mps = 2.0))
+        md = Daisho.field_index_dict(p0)
+        sgrids = Dict(
+            :volume => () -> Daisho.create_radar_grid("RRR", md; xmin = -1500.0,
+                xmax = 1500.0, xdim = 3, ymin = -1500.0, ymax = 1500.0, ydim = 3,
+                zmin = 0.0, zmax = 1000.0, zdim = 3),
+            :ppi => () -> Daisho.create_radar_grid("RR", md; xmin = -1500.0,
+                xmax = 1500.0, xdim = 3, ymin = -1500.0, ymax = 1500.0, ydim = 3),
+            :column => () -> Daisho.create_radar_grid("R", md; xmin = 0.0,
+                xmax = 1000.0, xdim = 3))
+        drivers = [
+            (f, p) -> Daisho.grid_radar_latlon_volume(radar, f, t, p),
+            (f, p) -> Daisho.grid_radar_rhi(radar, f, t, p),
+            (f, p) -> Daisho.grid_radar_ppi(radar, f, t, p),
+            (f, p) -> Daisho.grid_radar_composite(radar, f, t, p),
+            (f, p) -> Daisho.grid_radar_column(radar, f, t, p),
+            (f, p) -> Daisho.grid_radar_volume_spectral(radar, f, t, sgrids[:volume](), p),
+            (f, p) -> Daisho.grid_radar_ppi_spectral(radar, f, t, sgrids[:ppi](), p),
+            (f, p) -> Daisho.grid_radar_column_spectral(radar, f, t, sgrids[:column](), p)]
+        for run in drivers
+            f0 = tempname() * ".nc"; f1 = tempname() * ".nc"; f2 = tempname() * ".nc"
+            try
+                run(f0, p0)
+                run(f1, p1)
+                NCDataset(f0) do a
+                    NCDataset(f1) do b
+                        @test sort(collect(keys(a))) == sort(collect(keys(b)))
+                        for k in keys(a)
+                            @test isequal(Array(a[k]), Array(b[k]))
+                        end
+                    end
+                end
+                @test_throws ArgumentError run(f2, pm)
+            finally
+                foreach(f -> rm(f, force = true), (f0, f1, f2))
+            end
+        end
+    end
+
     @testset "written files record the origin and frame" begin
         v = synthetic_volume(n_sweeps = 1, n_rays = 36, n_gates = 6)
         o = OriginParameters(latitude_deg = 16.9, longitude_deg = -24.9,

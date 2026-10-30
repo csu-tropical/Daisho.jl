@@ -323,9 +323,10 @@ function appx_inverse_projection(reference_latitude::AbstractFloat, reference_lo
 end
 
 # Grid origin for the legacy `radar` drivers: the radar's first position, or the
-# `[grid.origin]` override passed down by the `DaishoParameters` wrappers.
+# `[grid.origin]` override passed down by the `DaishoParameters` wrappers. The
+# struct stores Float32 positions; promote so both branches compute in Float64.
 _legacy_reference(radar_volume, origin::Nothing) =
-    (radar_volume.latitude[1], radar_volume.longitude[1])
+    (Float64(radar_volume.latitude[1]), Float64(radar_volume.longitude[1]))
 _legacy_reference(radar_volume, origin::Tuple{Float64,Float64}) = origin
 
 # `[grid.origin]` for the legacy wrappers: the override, or `nothing` to keep the
